@@ -1,0 +1,41 @@
+{
+  "name": "notion-ai-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Personal-use MCP server for Notion AI's unofficial internal API",
+  "bin": {
+    "notion-ai-mcp": "dist/src/index.js",
+    "notion-ai-mcp-http": "dist/src/http.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "docs"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/src/index.js",
+    "start:http": "node dist/src/http.js",
+    "dev": "tsx src/index.ts",
+    "dev:http": "tsx src/http.ts",
+    "test": "node --import tsx --test tests/**/*.test.ts",
+    "smoke:live": "tsx scripts/live-smoke.ts"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "4.23.1",
+    "typescript": "7.0.2"
+  },
+  "overrides": {
+    "@hono/node-server": "2.0.11"
+  }
+}
