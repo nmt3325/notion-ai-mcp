@@ -11,6 +11,7 @@ const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 export class WorkspaceManager {
   private exhausted = new Set<string>();
   private accountPath: string | null;
+  private pinnedSpaceId: string | null = null;
 
   constructor(private account: AccountContext, private configBase: string, private fetchFn: typeof fetch, accountFilePath?: string) {
     this.accountPath = accountFilePath || null;
@@ -73,6 +74,44 @@ export class WorkspaceManager {
     this.account.spaceName = ws.spaceName;
     this.persistAccount();
     return true;
+  }
+
+  getCurrent(): WorkspaceInfo { return { spaceId: this.account.spaceId, spaceViewId: this.account.spaceViewId, spaceName: this.account.spaceName, plan: "unknown", createdTime: null }; }
+
+  pinnedWorkspace(): string | null { return this.pinnedSpaceId; }
+
+  pin(spaceId: string | null): void { this.pinnedSpaceId = spaceId && spaceId.trim() ? spaceId.trim() : null; }
+
+  async listWorkspaces(): Promise<Array<WorkspaceInfo & { current: boolean; exhausted: boolean; pinned: boolean }>> {
+    const all = await this.discoverWorkspaces();
+    return all.map((ws) => ({ ...ws, current: ws.spaceId === this.account.spaceId, exhausted: this.exhausted.has(ws.spaceId), pinned: ws.spaceId === this.pinnedSpaceId }));
+  }
+
+  async switchWorkspace(selector: string): Promise<WorkspaceInfo> {
+    const needle = selector.trim().toLowerCase();
+    if (!needle) throw new Error("switch_workspace requires a workspace id or name");
+    const bare = needle.replaceAll("-", "");
+    const all = await this.discoverWorkspaces();
+    const match = all.find((ws) => ws.spaceId.toLowerCase() === needle)
+      ?? all.find((ws) => ws.spaceId.replaceAll("-", "").toLowerCase() === bare)
+      ?? all.find((ws) => ws.spaceName.toLowerCase() === needle)
+      ?? all.find((ws) => ws.spaceName.toLowerCase().includes(needle));
+    if (!match) throw new Error(`Workspace ${selector} was not found for this account`);
+    if (!(await this.switchTo(match))) throw new Error(`Workspace ${match.spaceName} could not be activated`);
+    return match;
+  }
+
+  async createAndSwitchWorkspace(name?: string, options: { pin?: boolean } = {}): Promise<WorkspaceInfo> {
+    const created = await this.createWorkspace(name);
+    if (!(await this.switchTo(created))) throw new Error("The new workspace could not be activated");
+    if (options.pin) this.pin(created.spaceId);
+    return created;
+  }
+
+  async restorePinnedWorkspace(): Promise<boolean> {
+    if (!this.pinnedSpaceId || this.pinnedSpaceId === this.account.spaceId) return false;
+    const target = (await this.discoverWorkspaces()).find((ws) => ws.spaceId === this.pinnedSpaceId);
+    return target ? this.switchTo(target) : false;
   }
 
   async handleLimitReached(): Promise<AccountContext> { if (!await this.rotate()) throw new Error("All workspaces are rate-limited"); return this.account; }

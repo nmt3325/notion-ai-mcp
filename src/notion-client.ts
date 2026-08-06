@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type {
-  AccountContext, ChatResult, ChatSession, Conversation, ConversationMessage,
+  AccountContext, ChatAttachment, ChatResult, ChatSession, Conversation, ConversationMessage,
   ConversationSummary, ListConversationsResult, ParsedInferenceStream
 } from "./types.js";
 import type { NotionConfig } from "./config.js";
 import { WorkspaceManager } from "./workspace-manager.js";
+import { normalizeModelName } from "./models.js";
+import { McpConnectionManager } from "./mcp-connections.js";
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 const SEC_CH_UA = '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"';
@@ -50,7 +52,7 @@ function normalizeStreamLine(line: string): string { const trimmed = line.trim()
 
 export function parseInferenceLines(lines: string[]): ParsedInferenceStream {
   let text = ""; let inputTokens = 0; let outputTokens = 0; const eventTypes: Record<string, number> = {}; const patchTypes = new Map<string, string>(); const patchCounts = new Map<string, number>();
-  for (const rawLine of lines) { const line = normalizeStreamLine(rawLine); if (!line) continue; let event: JsonObject; try { event = object(JSON.parse(line)); } catch { continue; } const type = asString(event.type, "unknown"); eventTypes[type] = (eventTypes[type] ?? 0) + 1; if (type === "error") throw new Error(`Notion AI error: ${asString(event.message, "unknown error")}`); if (type === "premium-feature-unavailable") throw new Error("Notion AI premium feature unavailable"); if (type === "agent-inference") { for (const rawEntry of Array.isArray(event.value) ? event.value : []) { const entry = object(rawEntry); if (entry.type === "text" && typeof entry.content === "string") { text = entry.content; } } if (typeof event.inputTokens === "number") inputTokens += event.inputTokens; if (typeof event.outputTokens === "number") outputTokens += event.outputTokens; continue; } if (type !== "patch") continue; for (const rawOperation of Array.isArray(event.v) ? event.v : []) { const operation = object(rawOperation); const op = asString(operation.o); const path = asString(operation.p); if (op === "a" && path.includes("/value/-")) { const entry = object(operation.v); const statePrefix = path.slice(0, path.indexOf("/value/")); const count = patchCounts.get(statePrefix) ?? 0; patchTypes.set(`${statePrefix}/value/${count}`, asString(entry.type)); patchCounts.set(statePrefix, count + 1); } if (op === "a" && path.endsWith("/inputTokens") && typeof operation.v === "number") { inputTokens += operation.v; } if (op === "a" && path.endsWith("/outputTokens") && typeof operation.v === "number") { outputTokens += operation.v; } if (!path.includes("content") || typeof operation.v !== "string") continue; const contentIndex = path.lastIndexOf("/content"); const entryType = contentIndex >= 0 ? patchTypes.get(path.slice(0, contentIndex)) : "text"; if (entryType === "thinking" || entryType === "tool_use") continue; if (op === "x") text += operation.v; else if (op === "p") text = text.replace(/<lang[^>]*\/>/g, "").replace(operation.v.includes("<lang") ? /<lang[^>]*\/>/g : /$/, operation.v); } }
+  for (const rawLine of lines) { const line = normalizeStreamLine(rawLine); if (!line) continue; let event: JsonObject; try { event = object(JSON.parse(line)); } catch { continue; } const type = asString(event.type, "unknown"); eventTypes[type] = (eventTypes[type] ?? 0) + 1; if (type === "error") throw new Error(`Notion AI error: ${asString(event.message, "unknown error")}`); if (type === "premium-feature-unavailable") { const availability = object(event.featureAvailability); const limit = object(availability.limit); const current = limit.current; const total = limit.total; const detail = typeof current === "number" && typeof total === "number" ? ` (AI credit limit reached: ${current}/${total})` : ""; throw new Error(`Notion AI premium feature unavailable${detail}`); } if (type === "agent-inference") { for (const rawEntry of Array.isArray(event.value) ? event.value : []) { const entry = object(rawEntry); if (entry.type === "text" && typeof entry.content === "string") { text = entry.content; } } if (typeof event.inputTokens === "number") inputTokens += event.inputTokens; if (typeof event.outputTokens === "number") outputTokens += event.outputTokens; continue; } if (type !== "patch") continue; for (const rawOperation of Array.isArray(event.v) ? event.v : []) { const operation = object(rawOperation); const op = asString(operation.o); const path = asString(operation.p); if (op === "a" && path.includes("/value/-")) { const entry = object(operation.v); const statePrefix = path.slice(0, path.indexOf("/value/")); const count = patchCounts.get(statePrefix) ?? 0; patchTypes.set(`${statePrefix}/value/${count}`, asString(entry.type)); patchCounts.set(statePrefix, count + 1); } if (op === "a" && path.endsWith("/inputTokens") && typeof operation.v === "number") { inputTokens += operation.v; } if (op === "a" && path.endsWith("/outputTokens") && typeof operation.v === "number") { outputTokens += operation.v; } if (!path.includes("content") || typeof operation.v !== "string") continue; const contentIndex = path.lastIndexOf("/content"); const entryType = contentIndex >= 0 ? patchTypes.get(path.slice(0, contentIndex)) : "text"; if (entryType === "thinking" || entryType === "tool_use") continue; if (op === "x") text += operation.v; else if (op === "p") text = text.replace(/<lang[^>]*\/>/g, "").replace(operation.v.includes("<lang") ? /<lang[^>]*\/>/g : /$/, operation.v); } }
   return { text: cleanLangTags(text), inputTokens, outputTokens, eventTypes };
 }
 
@@ -60,7 +62,38 @@ export async function parseInferenceStream(stream: ReadableStream<Uint8Array>): 
 
 function buildCookie(account: AccountContext): string { if (account.fullCookie) return account.fullCookie; const userIdNoDash = account.userId.replaceAll("-", ""); return [`notion_browser_id=${account.browserId}`, `device_id=${account.deviceId}`, `notion_user_id=${account.userId}`, "notion_locale=en-US/legacy", `notion_users=[%22${account.userId}%22]`, "notion_check_cookie_consent=false", "notion_cookie_sync_completed=%7B%22completed%22%3Atrue%2C%22version%22%3A4%7D", `_cioid=${userIdNoDash}`, `token_v2=${account.tokenV2}`].join("; "); }
 
-function buildConfigValue(model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, subsequent: boolean): JsonObject { const integrations = webSearch || workspaceSearch; return { type: "workflow", modelFromUser: !subsequent, enableAgentAutomations: true, enableAgentIntegrations: true, enableCustomAgents: true, enableAgentDiffs: true, enableCsvAttachmentSupport: true, enableScriptAgent: true, enableCreateAndRunThread: true, useWebSearch: webSearch, useReadOnlyMode: readOnly, writerMode: false, isCustomAgent: false, isCustomAgentBuilder: false, ...(integrations ? { searchScopes: [{ type: "everything" }] } : {}), ...(subsequent ? { model, isThreadStartedByAdmin: true } : {}) }; }
+/** Mirrors the config step the Notion web client sends, so server-side gating behaves the same. */
+export const UI_CONFIG_DEFAULTS: JsonObject = {
+  type: "workflow",
+  enableAgentAutomations: true,
+  enableAgentDiffs: true,
+  enableAgentIntegrations: true,
+  enableAgentAskSurvey: true,
+  enableCreateAndRunThread: true,
+  enableCsvAttachmentSupport: true,
+  enableCustomAgents: true,
+  enableScriptAgent: true,
+  enableScriptAgentAdvanced: false,
+  enableScriptAgentMcpServers: true,
+  enableScriptAgentSlack: true,
+  useRulePrioritization: true,
+  internetAccess: false,
+  isCustomAgent: false,
+  isCustomAgentBuilder: false,
+  writerMode: false
+};
+
+function buildConfigValue(model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, subsequent: boolean): JsonObject {
+  const integrations = webSearch || workspaceSearch;
+  return {
+    ...UI_CONFIG_DEFAULTS,
+    modelFromUser: !subsequent,
+    useWebSearch: webSearch,
+    useReadOnlyMode: readOnly,
+    ...(integrations ? { searchScopes: [{ type: "everything" }] } : {}),
+    ...(subsequent ? { model, isThreadStartedByAdmin: true } : {})
+  };
+}
 
 interface ConversationCursor { notionCursor?: string; offset: number }
 
@@ -72,6 +105,7 @@ export class NotionClient {
   private accountPromise: Promise<AccountContext> | null = null;
   private readonly sessions = new Map<string, ChatSession>();
   private workspaceManager: WorkspaceManager | null = null;
+  private mcpManager: McpConnectionManager | null = null;
 
   constructor(private readonly config: NotionConfig, private readonly fetchImpl: typeof fetch = fetch) {
     if (config.account.tokenV2) {
@@ -109,11 +143,22 @@ export class NotionClient {
 
   async getConversation(threadId: string, maxPages = 20): Promise<Conversation> { const found = await this.findThread(threadId, Math.min(Math.max(maxPages, 1), 100)); const messageIds = arrayOfStrings(found.thread.messages); const records = await this.fetchThreadMessages(messageIds); const t = found.transcript ?? {}; return { id: threadId, title: asString(t.title) || asString(object(found.thread.data).title) || "Untitled", type: asString(t.type) || asString(found.thread.type, "workflow"), createdAt: asNumber(t.created_at) ?? asNumber(found.thread.created_time), updatedAt: asNumber(t.updated_at) ?? asNumber(found.thread.updated_time), messages: parseConversationMessages(messageIds, records) }; }
 
-  private buildContext(account: AccountContext, datetime: string): JsonObject { return { timezone: account.timezone, userName: account.userName, userId: account.userId, userEmail: account.userEmail, spaceName: account.spaceName, spaceId: account.spaceId, spaceViewId: account.spaceViewId, currentDatetime: datetime, surface: "ai_module" }; }
+  private buildContext(account: AccountContext, datetime: string, hasAttachments = false): JsonObject { return { timezone: account.timezone, userName: account.userName, userId: account.userId, userEmail: account.userEmail, spaceName: account.spaceName, spaceId: account.spaceId, spaceViewId: account.spaceViewId, currentDatetime: datetime, surface: hasAttachments ? "workflows" : "ai_module" }; }
 
-  private buildInferenceBody(account: AccountContext, prompt: string, model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, session: ChatSession): JsonObject { const sub = session.turnCount > 0; const now = new Date().toISOString(); const transcript: JsonObject[] = [{ id: session.configId, type: "config", value: buildConfigValue(model, webSearch, workspaceSearch, readOnly, sub) }, { id: session.contextId, type: "context", value: this.buildContext(account, session.originalDatetime) }, ...session.updatedConfigIds.map((id) => ({ id, type: "updated-config" })), { id: randomUUID(), type: "user", value: [[prompt]], userId: account.userId, createdAt: now }]; return { traceId: randomUUID(), spaceId: account.spaceId, threadId: session.threadId, transcript, createThread: !sub, generateTitle: !sub, saveAllThreadOperations: true, setUnreadState: false, threadType: "workflow", asPatchResponse: false, isPartialTranscript: sub, ...(!sub ? { threadParentPointer: { table: "space", id: account.spaceId, spaceId: account.spaceId } } : {}), debugOverrides: { model, emitAgentSearchExtractedResults: true } }; }
+  private buildInferenceBody(account: AccountContext, prompt: string, model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, session: ChatSession, attachments: ChatAttachment[] = []): JsonObject {
+    const sub = session.turnCount > 0;
+    const now = new Date().toISOString();
+    const userStep: JsonObject = { id: randomUUID(), type: "user", value: [[prompt]], userId: account.userId, createdAt: now, ...(attachments.length ? { attachments } : {}) };
+    const transcript: JsonObject[] = [
+      { id: session.configId, type: "config", value: buildConfigValue(model, webSearch, workspaceSearch, readOnly, sub) },
+      { id: session.contextId, type: "context", value: this.buildContext(account, session.originalDatetime, attachments.length > 0) },
+      ...session.updatedConfigIds.map((id) => ({ id, type: "updated-config" })),
+      userStep
+    ];
+    return { traceId: randomUUID(), spaceId: account.spaceId, threadId: session.threadId, transcript, createThread: !sub, generateTitle: !sub, saveAllThreadOperations: true, setUnreadState: false, threadType: "workflow", asPatchResponse: false, isPartialTranscript: sub, ...(!sub ? { threadParentPointer: { table: "space", id: account.spaceId, spaceId: account.spaceId } } : {}), debugOverrides: { model, emitAgentSearchExtractedResults: true } };
+  }
 
-  async chat(options: { prompt: string; model?: string; conversationId?: string; webSearch?: boolean; workspaceSearch?: boolean; readOnly?: boolean; _retryCount?: number }): Promise<ChatResult> {
+  async chat(options: { prompt: string; model?: string; conversationId?: string; webSearch?: boolean; workspaceSearch?: boolean; readOnly?: boolean; attachments?: ChatAttachment[]; _retryCount?: number }): Promise<ChatResult> {
     const maxRetries = this.config.maxWorkspaceRetries ?? 5;
     try { return await this._chatInternal(options); }
     catch (error) {
@@ -129,21 +174,66 @@ export class NotionClient {
     }
   }
 
-  private async _chatInternal(options: { prompt: string; model?: string; conversationId?: string; webSearch?: boolean; workspaceSearch?: boolean; readOnly?: boolean; _retryCount?: number }): Promise<ChatResult> {
+  private async _chatInternal(options: { prompt: string; model?: string; conversationId?: string; webSearch?: boolean; workspaceSearch?: boolean; readOnly?: boolean; attachments?: ChatAttachment[]; _retryCount?: number }): Promise<ChatResult> {
     const account = await this.account();
-    const model = options.model || this.config.defaultModel;
+    const model = normalizeModelName(options.model, this.config.defaultModel);
     let session: ChatSession;
     if (options.conversationId) {
       const known = this.sessions.get(options.conversationId);
       if (!known) throw new Error(`Conversation ${options.conversationId} is not an active MCP session. Start a new chat without conversationId.`);
       session = known;
     } else { session = { threadId: randomUUID(), configId: randomUUID(), contextId: randomUUID(), originalDatetime: new Date().toISOString(), model, updatedConfigIds: [], turnCount: 0 }; }
-    const body = this.buildInferenceBody(account, options.prompt, model, options.webSearch ?? false, options.workspaceSearch ?? false, options.readOnly ?? true, session);
+    const body = this.buildInferenceBody(account, options.prompt, model, options.webSearch ?? false, options.workspaceSearch ?? false, options.readOnly ?? true, session, options.attachments ?? []);
     const response = await this.request("runInferenceTranscript", body, true);
     if (!response.body) throw new Error("runInferenceTranscript returned no response stream");
     const parsed = await parseInferenceStream(response.body);
     if (!parsed.text.trim()) throw new Error("Notion AI returned an empty response");
     session.turnCount += 1; session.updatedConfigIds.push(randomUUID()); session.model = model; this.sessions.set(session.threadId, session);
     return { conversationId: session.threadId, text: parsed.text, model, usage: { inputTokens: parsed.inputTokens, outputTokens: parsed.outputTokens } };
+  }
+
+  /** Raw internal-API POST used by the management tools. */
+  async apiPost(endpoint: string, body: JsonObject): Promise<JsonObject> { return this.fetchJson(endpoint, body); }
+
+  mcp(): McpConnectionManager {
+    this.mcpManager ??= new McpConnectionManager(
+      { post: (endpoint, requestBody) => this.fetchJson(endpoint, requestBody), spaceId: async () => (await this.account()).spaceId },
+      this.config.mcpRegistryPath
+    );
+    return this.mcpManager;
+  }
+
+  private workspaces(): WorkspaceManager {
+    if (!this.workspaceManager) throw new Error("Workspace management requires a token_v2 credential");
+    return this.workspaceManager;
+  }
+
+  async listWorkspaces(): Promise<Array<Record<string, unknown>>> {
+    const account = await this.account();
+    const all = await this.workspaces().listWorkspaces();
+    return all.map((ws) => ({ ...ws, current: ws.spaceId === account.spaceId }));
+  }
+
+  async getCurrentWorkspace(): Promise<JsonObject> {
+    const account = await this.account();
+    return { spaceId: account.spaceId, spaceName: account.spaceName, spaceViewId: account.spaceViewId, userEmail: account.userEmail, pinnedSpaceId: this.workspaces().pinnedWorkspace() };
+  }
+
+  async switchWorkspace(selector: string, pin = false): Promise<JsonObject> {
+    const workspace = await this.workspaces().switchWorkspace(selector);
+    if (pin) this.workspaces().pin(workspace.spaceId);
+    this.accountPromise = null;
+    this.sessions.clear();
+    return { ...workspace, pinned: pin };
+  }
+
+  async createWorkspace(name?: string, options: { pin?: boolean; switchTo?: boolean } = {}): Promise<JsonObject> {
+    const manager = this.workspaces();
+    const shouldSwitch = options.switchTo !== false;
+    const workspace = shouldSwitch
+      ? await manager.createAndSwitchWorkspace(name, { pin: options.pin ?? true })
+      : await manager.createWorkspace(name);
+    if (shouldSwitch) { this.accountPromise = null; this.sessions.clear(); }
+    return { ...workspace, switched: shouldSwitch, pinned: shouldSwitch ? (options.pin ?? true) : false };
   }
 }

@@ -9,6 +9,7 @@ export interface NotionConfig {
   account: Partial<AccountContext> & Pick<AccountContext, "tokenV2">;
   accountFilePath?: string|undefined;
   maxWorkspaceRetries?: number;
+  mcpRegistryPath?: string | undefined;
 }
 
 function optional(name: string, fallback = ""): string {
@@ -40,6 +41,7 @@ export function loadConfig(): NotionConfig {
     defaultModel: optional("NOTION_DEFAULT_MODEL", "almond-croissant-low"),
     requestTimeoutMs: timeout,
     accountFilePath: accountPath || undefined,
+    mcpRegistryPath: optional("NOTION_MCP_REGISTRY_FILE") || undefined,
     maxWorkspaceRetries: Number.isFinite(maxRetries) && maxRetries > 0 ? maxRetries : 5,
     account: {
       tokenV2,
