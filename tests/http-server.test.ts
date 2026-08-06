@@ -70,9 +70,22 @@ test("Streamable HTTP server requires bearer auth and executes MCP tools", async
     assert.equal(remote.sessionCount(), 1);
     const tools = await client.listTools();
     assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), [
+      "add_mcp_connection",
+      "check_mcp_oauth_support",
+      "connect_preconfigured_mcp_server",
+      "create_workspace",
       "get_conversation",
+      "get_current_workspace",
+      "get_mcp_connection_status",
       "list_conversations",
-      "notion_ai_chat"
+      "list_mcp_connections",
+      "list_preconfigured_mcp_servers",
+      "list_workspaces",
+      "notion_ai_chat",
+      "remove_mcp_connection",
+      "start_mcp_oauth",
+      "switch_workspace",
+      "update_mcp_connection"
     ]);
     const result = await client.callTool({ name: "notion_ai_chat", arguments: { prompt: "Hello" } });
     assert.equal(result.content[0]?.type === "text" ? result.content[0].text : "", "Remote mock answer");

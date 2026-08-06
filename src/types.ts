@@ -7,3 +7,4 @@ export interface ListConversationsResult { conversations:ConversationSummary[]; 
 export interface ChatResult { conversationId:string; text:string; model:string; usage:{inputTokens:number;outputTokens:number} }
 export interface ChatSession { threadId:string; configId:string; contextId:string; originalDatetime:string; model:string; updatedConfigIds:string[]; turnCount:number }
 export interface ParsedInferenceStream { text:string; inputTokens:number; outputTokens:number; eventTypes:Record<string,number> }
+export interface ChatAttachment { name:string; url?:string|undefined; text?:string|undefined; mimeType?:string|undefined }
