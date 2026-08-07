@@ -309,12 +309,11 @@ join transactionが失敗した場合も、自動で再作成せずpartial failu
 | `oauth` | なし | `start_mcp_oauth` で取得した URL をブラウザで開く |
 | `none` | なし | なし |
 
-登録済み接続は `NOTION_MCP_REGISTRY_FILE`（既定はメモリ内のみ）に mode 0600 で保存され、
-`list_mcp_connections` / `get_mcp_connection_status` から参照できます。serverUrl は https または localhost のみ許可します。
+このserverで作成したcredential-free metadataは `NOTION_MCP_REGISTRY_FILE`（既定はメモリ内のみ）にmode 0600で保存します。`list_mcp_connections`はcurrent `space_view.settings.agent_chat_modules`を読み、linked済み`workflow_module`を1回のbatch requestで取得してlocal metadataとmergeします。別clientやUIが作成したmoduleも列挙でき、registryにないauth方式は`unknown`として返します。raw external-connection recordやcredentialは返しません。serverUrlはhttpsまたはlocalhostのみ許可します。
 
 作成後のconnect、space-view可視化、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、該当pointerだけをunlinkします。remove時も他のsettingsとmodule pointerを保持します。update/remove/statusはactive workspaceとregistry recordのspace/viewが一致する場合だけ実行します。
 
-Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験ではadd/list/status/remove、3 toolsのvalidation、remove後の`alive:false`・`linked:false`を確認しました。全回帰は63/63です。
+Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験ではadd/list/status/remove、3 toolsのvalidation、remove後の`alive:false`・`linked:false`を確認しました。全回帰は64/64です。
 
 ## 添付ファイル
 

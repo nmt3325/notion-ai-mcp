@@ -32,6 +32,22 @@ export interface McpConnectionRecord {
   createdAt: string;
 }
 
+export interface McpConnectionSummary {
+  id: string;
+  name: string;
+  serverUrl: string;
+  spaceId: string;
+  spaceViewId: string;
+  authType: McpAuth["type"] | "unknown";
+  transport: string;
+  toolNames: string[];
+  createdAt: string | null;
+  source: "notion" | "notion_and_registry" | "registry_only";
+  alive: boolean | null;
+  linked: boolean;
+  defaultEnabled: boolean;
+}
+
 export interface McpApi {
   post(endpoint: string, body: JsonObject): Promise<JsonObject>;
   context(): Promise<McpContext>;
@@ -50,6 +66,11 @@ function unwrapRecord(value: unknown): JsonObject {
   return current;
 }
 function asString(value: unknown, fallback = ""): string { return typeof value === "string" ? value : fallback; }
+function asIsoTimestamp(value: unknown): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
 function linkedModuleId(value: unknown): string { return asString(object(object(value).pointer).id); }
 function linkedModules(settings: JsonObject): unknown[] { return Array.isArray(settings.agent_chat_modules) ? settings.agent_chat_modules : []; }
 
@@ -244,12 +265,29 @@ export class McpConnectionManager {
     return object(record.settings);
   }
 
-  private async loadSpaceRecord(context: McpContext, table: string, id: string, pointerSpaceId = context.spaceId): Promise<JsonObject> {
+  private async loadSpaceRecords(context: McpContext, pointers: Array<{ table: string; id: string; spaceId: string }>): Promise<Map<string, JsonObject>> {
+    const unique = new Map<string, { table: string; id: string; spaceId: string }>();
+    for (const pointer of pointers) {
+      if (!pointer.table || !pointer.id || pointer.spaceId !== context.spaceId) continue;
+      unique.set(`${pointer.table}:${pointer.id}`, pointer);
+    }
+    if (unique.size === 0) return new Map();
     const response = await this.api.post("syncRecordValues", {
-      requests: [{ pointer: { table, id, spaceId: pointerSpaceId }, version: -1 }]
+      requests: [...unique.values()].map((pointer) => ({ pointer, version: -1 }))
     });
-    const record = unwrapRecord(object(object(response.recordMap)[table])[id]);
-    if (asString(record.id) !== id) throw new Error(`${table} ${id} was not found`);
+    const recordMap = object(response.recordMap);
+    const records = new Map<string, JsonObject>();
+    for (const [key, pointer] of unique) {
+      const record = unwrapRecord(object(recordMap[pointer.table])[pointer.id]);
+      if (asString(record.id) === pointer.id) records.set(key, record);
+    }
+    return records;
+  }
+
+  private async loadSpaceRecord(context: McpContext, table: string, id: string, pointerSpaceId = context.spaceId): Promise<JsonObject> {
+    const records = await this.loadSpaceRecords(context, [{ table, id, spaceId: pointerSpaceId }]);
+    const record = records.get(`${table}:${id}`);
+    if (!record) throw new Error(`${table} ${id} was not found`);
     return record;
   }
 
@@ -420,7 +458,71 @@ export class McpConnectionManager {
     return { removed: true };
   }
 
-  list(): McpConnectionRecord[] { return this.registry.list(); }
+  async list(): Promise<McpConnectionSummary[]> {
+    const context = await this.context();
+    const settings = await this.loadSpaceViewSettings(context);
+    const localRecords = this.registry.list().filter((record) =>
+      record.spaceId === context.spaceId && (!record.spaceViewId || record.spaceViewId === context.spaceViewId)
+    );
+    const localById = new Map(localRecords.map((record) => [record.id, record]));
+    const linked: Array<{ id: string; spaceId: string; defaultEnabled: boolean }> = [];
+    const seen = new Set<string>();
+    for (const entry of linkedModules(settings)) {
+      const rawEntry = object(entry);
+      const pointer = object(rawEntry.pointer);
+      const id = asString(pointer.id);
+      const spaceId = asString(pointer.spaceId, context.spaceId);
+      if (asString(pointer.table) !== "workflow_module" || !id || spaceId !== context.spaceId || seen.has(id)) continue;
+      seen.add(id);
+      linked.push({ id, spaceId, defaultEnabled: rawEntry.defaultEnabled === true });
+    }
+    const records = await this.loadSpaceRecords(context, linked.map(({ id, spaceId }) => ({ table: "workflow_module", id, spaceId })));
+    const summaries: McpConnectionSummary[] = [];
+    for (const link of linked) {
+      const record = records.get(`workflow_module:${link.id}`);
+      if (!record || asString(record.module_type) !== "mcpServer") continue;
+      const recordSpaceId = asString(record.space_id, context.spaceId);
+      if (recordSpaceId !== context.spaceId) continue;
+      const data = object(record.data);
+      const local = localById.get(link.id);
+      const remoteToolNames = toolNamesFrom(data.tools);
+      summaries.push({
+        id: link.id,
+        name: asString(data.name, asString(data.officialName, local?.name ?? link.id)),
+        serverUrl: asString(data.serverUrl, local?.serverUrl ?? ""),
+        spaceId: context.spaceId,
+        spaceViewId: context.spaceViewId,
+        authType: local?.authType ?? "unknown",
+        transport: asString(data.preferredTransport, local?.transport ?? ""),
+        toolNames: remoteToolNames.length > 0 ? remoteToolNames : [...(local?.toolNames ?? [])],
+        createdAt: asIsoTimestamp(record.created_time) ?? local?.createdAt ?? null,
+        source: local ? "notion_and_registry" : "notion",
+        alive: record.alive === true,
+        linked: true,
+        defaultEnabled: link.defaultEnabled
+      });
+      localById.delete(link.id);
+    }
+    for (const local of localRecords) {
+      if (!localById.has(local.id)) continue;
+      summaries.push({
+        id: local.id,
+        name: local.name,
+        serverUrl: local.serverUrl,
+        spaceId: context.spaceId,
+        spaceViewId: context.spaceViewId,
+        authType: local.authType,
+        transport: local.transport,
+        toolNames: [...local.toolNames],
+        createdAt: local.createdAt,
+        source: "registry_only",
+        alive: null,
+        linked: false,
+        defaultEnabled: false
+      });
+    }
+    return summaries;
+  }
 
   async status(id: string): Promise<JsonObject> {
     const existing = this.registry.get(id);

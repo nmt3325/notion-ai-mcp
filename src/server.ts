@@ -195,9 +195,9 @@ export function createServer(client: NotionClient): McpServer {
 
   server.registerTool("list_mcp_connections", {
     title: "List MCP connections",
-    description: "List the custom MCP servers this server registered in Notion.",
+    description: "List custom MCP modules linked to the current Personal Agent, merged with safe local registry metadata.",
     inputSchema: {}
-  }, async () => result(client.mcp().list()));
+  }, async () => result(await client.mcp().list()));
 
   server.registerTool("add_mcp_connection", {
     title: "Add an MCP connection",

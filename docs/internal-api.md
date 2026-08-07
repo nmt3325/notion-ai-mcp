@@ -347,9 +347,11 @@ Personal/global MCP接続は2 recordを協調更新する。
 1. `workflow_module`はcurrent model factoryと同じ必須fieldで作成する。`created_time`と`last_edited_time`は1つのtimestampを共有し、creator/editor tableとparent tableはいずれも`notion_user`、parent IDはcurrent userとする。
 2. current `space_view`を`syncRecordValuesMain`で読み、settings全体と既存`agent_chat_modules`を保持したまま、`{pointer:{table:"workflow_module",id,spaceId},defaultEnabled:false}`を重複なく追加する。
 
+一覧取得もこのspace-view listをsource of truthにし、linked pointerをdeduplicateして1回の`syncRecordValues`でbatch readする。liveかつdeadなlinked moduleを安全なsummaryへ変換し、current workspace/viewのlocal registry metadataだけをmergeする。registry-only stale recordは`linked:false`、Notion-only recordのauth typeは`unknown`とし、raw `connectionPointer`やexternal-connection recordは返さない。
+
 connectはこの2 commitの間で実行する。connect、visibility commit、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、そのmodule IDに一致するpointerだけを削除する。removeもdead + unlinkを1 transactionで行い、他のsettings/module pointerは変更しない。registry recordのworkspace/viewがactive contextと異なるupdate/remove/statusは拒否する。
 
-Personal Agent moduleには`workflowId`がないため、`getMcpOAuthStatus`は使用できない。statusは`syncRecordValues`で`workflow_module`と参照先`external_connection`を読み、space-view linkageと合わせて判定する。pointerなしは`needs_setup`、external connectionの`authenticated:false`は`needs_reauth`、liveかつlinkedでそれ以外は`connected`、deadまたはunlinkedは`disconnected`となる。2026-08-07のcompiled-stdio live lifecycleと63/63 testsで検証した。
+Personal Agent moduleには`workflowId`がないため、`getMcpOAuthStatus`は使用できない。statusは`syncRecordValues`で`workflow_module`と参照先`external_connection`を読み、space-view linkageと合わせて判定する。pointerなしは`needs_setup`、external connectionの`authenticated:false`は`needs_reauth`、liveかつlinkedでそれ以外は`connected`、deadまたはunlinkedは`disconnected`となる。2026-08-07のcompiled-stdio live lifecycleと64/64 testsで検証した。
 
 ## モデルレジストリ
 

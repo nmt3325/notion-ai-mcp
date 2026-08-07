@@ -51,7 +51,7 @@ function fakeClient(): { client: NotionClient; chatCalls: Array<Record<string, u
       return { fileId: "file-1", fileName: "notes.txt", mediaType: "text/plain", sizeBytes: 5, base64: "aGVsbG8=" };
     },
     mcp: () => ({
-      list: () => [{ id: "module-1", name: "DeepWiki" }],
+      list: async () => [{ id: "module-1", name: "DeepWiki" }],
       add: async (input: Record<string, unknown>) => { added.push(input); return { id: "module-1", ...input }; },
       update: async () => ({ id: "module-1" }),
       remove: async () => ({ id: "module-1", removed: true }),
@@ -126,6 +126,8 @@ test("management tools reach the workspace and MCP managers", async () => {
   try {
     const workspaces = await mcpClient.callTool({ name: "list_workspaces", arguments: {} });
     assert.deepEqual((workspaces.structuredContent as { items: Array<{ spaceId: string }> }).items[0]?.spaceId, "space-1");
+    const mcpConnections = await mcpClient.callTool({ name: "list_mcp_connections", arguments: {} });
+    assert.equal((mcpConnections.structuredContent as { items: Array<{ id: string }> }).items[0]?.id, "module-1");
     const switched = await mcpClient.callTool({ name: "switch_workspace", arguments: { workspace: "space-9", pin: true } });
     assert.deepEqual(switched.structuredContent, { spaceId: "space-9", pinned: true });
     await mcpClient.callTool({ name: "add_mcp_connection", arguments: { name: "DeepWiki", serverUrl: "https://mcp.example.com/mcp", auth: { type: "apiKey", key: "k", headerName: "X-Key" } } });
