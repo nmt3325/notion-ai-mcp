@@ -14,6 +14,10 @@ export type McpAuth =
   | { type: "header"; headers: Record<string, string> }
   | { type: "oauth" };
 
+export type McpApprovalIntent = "approve_on_connect";
+export type McpTransport = "streamableHttp" | "sse";
+export interface McpHeader { name: string; value: string }
+
 export interface McpConnectionRecord {
   id: string;
   name: string;
@@ -35,7 +39,7 @@ function object(value: unknown): JsonObject {
 }
 function asString(value: unknown, fallback = ""): string { return typeof value === "string" ? value : fallback; }
 
-/** Turns a declarative auth choice into the header map Notion stores with the connection. */
+/** Turns a declarative auth choice into the legacy header map used by callers. */
 export function buildAuthHeaders(auth: McpAuth | undefined): Record<string, string> {
   if (!auth) return {};
   switch (auth.type) {
@@ -58,6 +62,13 @@ export function buildAuthHeaders(auth: McpAuth | undefined): Record<string, stri
   }
 }
 
+/** Current Notion APIs expect authHeaders as [{name,value}], not an object map. */
+export function buildAuthHeaderList(auth: McpAuth | undefined): McpHeader[] {
+  return Object.entries(buildAuthHeaders(auth))
+    .map(([name, value]) => ({ name: name.trim(), value }))
+    .filter(({ name, value }) => Boolean(name) && Boolean(value.trim()));
+}
+
 export function normalizeServerUrl(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) throw new Error("serverUrl is required");
@@ -67,6 +78,13 @@ export function normalizeServerUrl(value: string): string {
     throw new Error("serverUrl must use https (localhost is allowed for testing)");
   }
   return parsed.toString().replace(/\/$/, "");
+}
+
+export function normalizeTransport(value?: string): McpTransport {
+  const normalized = value?.trim() || "streamableHttp";
+  if (normalized === "streamableHttp" || normalized === "streamable-http" || normalized === "http") return "streamableHttp";
+  if (normalized === "sse") return "sse";
+  throw new Error("transport must be streamableHttp or sse");
 }
 
 export function toolNamesFrom(value: unknown): string[] {
@@ -111,7 +129,13 @@ export class McpRegistry {
   }
 }
 
-export interface AddConnectionInput { name: string; serverUrl: string; auth?: McpAuth; transport?: string }
+export interface AddConnectionInput {
+  name: string;
+  serverUrl: string;
+  auth?: McpAuth;
+  transport?: string;
+  approvalIntent?: McpApprovalIntent;
+}
 
 export class McpConnectionManager {
   private readonly registry: McpRegistry;
@@ -125,13 +149,19 @@ export class McpConnectionManager {
     return this.api.post("checkMcpOAuthSupport", { serverUrl: normalizeServerUrl(serverUrl), spaceId });
   }
 
-  async validate(serverUrl: string, auth?: McpAuth): Promise<JsonObject> {
+  async validate(serverUrl: string, auth?: McpAuth, approvalIntent: McpApprovalIntent = "approve_on_connect"): Promise<JsonObject> {
     const spaceId = await this.api.spaceId();
-    return this.api.post("validateMcpConnection", {
+    const response = await this.api.post("validateMcpConnection", {
       serverUrl: normalizeServerUrl(serverUrl),
       spaceId,
-      authHeaders: buildAuthHeaders(auth)
+      authHeaders: buildAuthHeaderList(auth),
+      approvalIntent
     });
+    if (response.success === false) {
+      const detail = asString(object(response.error).message, "connection validation failed");
+      throw new Error(`Notion rejected the MCP server: ${detail}`);
+    }
+    return response;
   }
 
   /** Notion stores custom MCP servers as workflow_module records on the space. */
@@ -139,9 +169,10 @@ export class McpConnectionManager {
     const data: JsonObject = {
       id: moduleId,
       name: input.name,
+      icon: "🤖",
       serverUrl: normalizeServerUrl(input.serverUrl),
-      preferredTransport: input.transport || "http",
-      tools: toolList,
+      preferredTransport: normalizeTransport(input.transport),
+      ...(toolList.length ? { tools: toolList } : {}),
       runReadToolsAutomatically: true,
       runWriteToolsAutomatically: true
     };
@@ -162,7 +193,7 @@ export class McpConnectionManager {
               parent_id: spaceId,
               parent_table: "space",
               space_id: spaceId,
-              module_type: "mcp_server",
+              module_type: "mcpServer",
               data
             }
           }
@@ -171,26 +202,50 @@ export class McpConnectionManager {
     };
   }
 
+  private deadTransaction(moduleId: string, spaceId: string): JsonObject {
+    return {
+      requestId: randomUUID(),
+      transactions: [{
+        id: randomUUID(),
+        spaceId,
+        operations: [{
+          pointer: { table: "workflow_module", id: moduleId, spaceId },
+          path: [],
+          command: "update",
+          args: { alive: false }
+        }]
+      }]
+    };
+  }
+
   async add(input: AddConnectionInput): Promise<McpConnectionRecord & { validation: JsonObject }> {
     const spaceId = await this.api.spaceId();
     const serverUrl = normalizeServerUrl(input.serverUrl);
-    const validation = await this.validate(serverUrl, input.auth);
+    const approvalIntent = input.approvalIntent ?? "approve_on_connect";
+    const validation = await this.validate(serverUrl, input.auth, approvalIntent);
     const toolList = Array.isArray(validation.tools) ? (validation.tools as unknown[]) : [];
     const moduleId = randomUUID();
-    await this.api.post("saveTransactionsFanout", this.buildCreateTransaction(moduleId, spaceId, { ...input, serverUrl }, toolList));
-    await this.api.post("postWorkflowsMcpServerConnect", {
-      integrationId: moduleId,
-      spaceId,
-      authHeaders: buildAuthHeaders(input.auth),
-      initiationContext: "connect"
-    });
+    const transport = normalizeTransport(input.transport);
+    await this.api.post("saveTransactionsFanout", this.buildCreateTransaction(moduleId, spaceId, { ...input, serverUrl, transport }, toolList));
+    try {
+      await this.api.post("postWorkflowsMcpServerConnect", {
+        integrationId: moduleId,
+        spaceId,
+        authHeaders: buildAuthHeaderList(input.auth),
+        initiationContext: "connect",
+        approvalIntent
+      });
+    } catch (error) {
+      await this.api.post("saveTransactionsFanout", this.deadTransaction(moduleId, spaceId)).catch(() => undefined);
+      throw error;
+    }
     const record: McpConnectionRecord = {
       id: moduleId,
       name: input.name,
       serverUrl,
       spaceId,
       authType: input.auth?.type ?? "none",
-      transport: input.transport || "http",
+      transport,
       toolNames: toolNamesFrom(toolList),
       createdAt: new Date().toISOString()
     };
@@ -198,13 +253,13 @@ export class McpConnectionManager {
     return { ...record, validation };
   }
 
-  async update(id: string, changes: { name?: string; serverUrl?: string; auth?: McpAuth; transport?: string }): Promise<McpConnectionRecord> {
+  async update(id: string, changes: { name?: string; serverUrl?: string; auth?: McpAuth; transport?: string; approvalIntent?: McpApprovalIntent }): Promise<McpConnectionRecord> {
     const existing = this.registry.get(id);
     if (!existing) throw new Error(`MCP connection ${id} is not in the local registry`);
     const spaceId = existing.spaceId || (await this.api.spaceId());
     const serverUrl = changes.serverUrl ? normalizeServerUrl(changes.serverUrl) : existing.serverUrl;
     const name = changes.name?.trim() || existing.name;
-    const transport = changes.transport || existing.transport;
+    const transport = normalizeTransport(changes.transport || existing.transport);
     const data: JsonObject = { id, name, serverUrl, preferredTransport: transport };
     await this.api.post("saveTransactionsFanout", {
       requestId: randomUUID(),
@@ -223,8 +278,9 @@ export class McpConnectionManager {
       await this.api.post("postWorkflowsMcpServerConnect", {
         integrationId: id,
         spaceId,
-        authHeaders: buildAuthHeaders(changes.auth),
-        initiationContext: "connect"
+        authHeaders: buildAuthHeaderList(changes.auth),
+        initiationContext: "reconnect",
+        approvalIntent: changes.approvalIntent ?? "approve_on_connect"
       });
     }
     const record: McpConnectionRecord = { ...existing, name, serverUrl, transport, ...(changes.auth ? { authType: changes.auth.type } : {}) };
@@ -235,19 +291,7 @@ export class McpConnectionManager {
   async remove(id: string): Promise<{ removed: boolean }> {
     const existing = this.registry.get(id);
     const spaceId = existing?.spaceId || (await this.api.spaceId());
-    await this.api.post("saveTransactionsFanout", {
-      requestId: randomUUID(),
-      transactions: [{
-        id: randomUUID(),
-        spaceId,
-        operations: [{
-          pointer: { table: "workflow_module", id, spaceId },
-          path: [],
-          command: "update",
-          args: { alive: false }
-        }]
-      }]
-    });
+    await this.api.post("saveTransactionsFanout", this.deadTransaction(id, spaceId));
     return { removed: this.registry.remove(id) || true };
   }
 
@@ -255,7 +299,7 @@ export class McpConnectionManager {
 
   async status(id: string): Promise<JsonObject> {
     const spaceId = (this.registry.get(id)?.spaceId) || (await this.api.spaceId());
-    return this.api.post("getMcpOAuthStatus", { integrationId: id, spaceId });
+    return this.api.post("getMcpOAuthStatus", { moduleId: id, spaceId });
   }
 
   async startOAuth(serverUrl: string, name?: string): Promise<JsonObject> {
@@ -265,6 +309,11 @@ export class McpConnectionManager {
       serverUrl: normalizeServerUrl(serverUrl),
       spaceId,
       integrationId,
+      selectedScopes: [],
+      initiationContext: "connect",
+      callbackType: "popup",
+      callbackOrigin: "https://app.notion.com",
+      approvalIntent: "approve_on_connect",
       ...(name ? { name } : {})
     });
     return { integrationId, ...response };

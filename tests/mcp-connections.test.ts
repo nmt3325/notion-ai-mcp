@@ -3,7 +3,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { McpConnectionManager, McpRegistry, buildAuthHeaders, normalizeServerUrl, toolNamesFrom, type McpApi } from "../src/mcp-connections.js";
+import {
+  McpConnectionManager, McpRegistry, buildAuthHeaderList, buildAuthHeaders,
+  normalizeServerUrl, normalizeTransport, toolNamesFrom, type McpApi
+} from "../src/mcp-connections.js";
 
 function fakeApi(responses: Record<string, Record<string, unknown>> = {}): { api: McpApi; calls: Array<{ endpoint: string; body: Record<string, unknown> }> } {
   const calls: Array<{ endpoint: string; body: Record<string, unknown> }> = [];
@@ -14,7 +17,7 @@ function fakeApi(responses: Record<string, Record<string, unknown>> = {}): { api
   return { api, calls };
 }
 
-test("buildAuthHeaders covers every supported auth style", () => {
+test("auth helpers cover every supported auth style and current wire shape", () => {
   assert.deepEqual(buildAuthHeaders({ type: "bearer", token: "abc" }), { Authorization: "Bearer abc" });
   assert.deepEqual(buildAuthHeaders({ type: "token", token: "abc" }), { Authorization: "Bearer abc" });
   assert.deepEqual(buildAuthHeaders({ type: "apiKey", key: "k" }), { "X-API-Key": "k" });
@@ -24,6 +27,8 @@ test("buildAuthHeaders covers every supported auth style", () => {
   assert.deepEqual(buildAuthHeaders({ type: "oauth" }), {});
   assert.deepEqual(buildAuthHeaders({ type: "none" }), {});
   assert.deepEqual(buildAuthHeaders(undefined), {});
+  assert.deepEqual(buildAuthHeaderList({ type: "bearer", token: "abc" }), [{ name: "Authorization", value: "Bearer abc" }]);
+  assert.deepEqual(buildAuthHeaderList({ type: "none" }), []);
 });
 
 test("normalizeServerUrl requires https outside localhost", () => {
@@ -33,25 +38,49 @@ test("normalizeServerUrl requires https outside localhost", () => {
   assert.throws(() => normalizeServerUrl("not a url"), /valid URL/);
 });
 
+test("normalizeTransport accepts current values and old http alias", () => {
+  assert.equal(normalizeTransport(), "streamableHttp");
+  assert.equal(normalizeTransport("http"), "streamableHttp");
+  assert.equal(normalizeTransport("streamable-http"), "streamableHttp");
+  assert.equal(normalizeTransport("sse"), "sse");
+  assert.throws(() => normalizeTransport("stdio"), /streamableHttp or sse/);
+});
+
 test("toolNamesFrom accepts arrays and wrapped payloads", () => {
   assert.deepEqual(toolNamesFrom([{ name: "a" }]), ["a"]);
   assert.deepEqual(toolNamesFrom({ tools: [{ name: "b" }] }), ["b"]);
   assert.deepEqual(toolNamesFrom(null), []);
 });
 
-test("add() validates, creates the module, then connects it", async () => {
-  const { api, calls } = fakeApi({ validateMcpConnection: { tools: [{ name: "ask_question" }, { name: "read_wiki_contents" }] } });
+test("add() validates, creates the module, then connects it with current payloads", async () => {
+  const { api, calls } = fakeApi({ validateMcpConnection: { success: true, tools: [{ name: "ask_question" }, { name: "read_wiki_contents" }] } });
   const manager = new McpConnectionManager(api);
   const record = await manager.add({ name: "DeepWiki", serverUrl: "https://mcp.example.com/mcp", auth: { type: "bearer", token: "secret" } });
   assert.deepEqual(calls.map((call) => call.endpoint), ["validateMcpConnection", "saveTransactionsFanout", "postWorkflowsMcpServerConnect"]);
   assert.deepEqual(record.toolNames, ["ask_question", "read_wiki_contents"]);
   assert.equal(record.authType, "bearer");
+  assert.equal(record.transport, "streamableHttp");
+  assert.deepEqual(calls[0]?.body.authHeaders, [{ name: "Authorization", value: "Bearer secret" }]);
+  assert.equal(calls[0]?.body.approvalIntent, "approve_on_connect");
   const create = calls[1]?.body as { transactions: Array<{ operations: Array<{ pointer: { table: string }; args: Record<string, unknown> }> }> };
   const operation = create.transactions[0]?.operations[0];
   assert.equal(operation?.pointer.table, "workflow_module");
-  assert.equal((operation?.args as { module_type: string }).module_type, "mcp_server");
-  const connect = calls[2]?.body as { authHeaders: Record<string, string> };
-  assert.deepEqual(connect.authHeaders, { Authorization: "Bearer secret" });
+  assert.equal((operation?.args as { module_type: string }).module_type, "mcpServer");
+  const data = (operation?.args as { data: Record<string, unknown> }).data;
+  assert.equal(data.preferredTransport, "streamableHttp");
+  const connect = calls[2]?.body as { authHeaders: Array<{ name: string; value: string }>; initiationContext: string; approvalIntent: string };
+  assert.deepEqual(connect.authHeaders, [{ name: "Authorization", value: "Bearer secret" }]);
+  assert.equal(connect.initiationContext, "connect");
+  assert.equal(connect.approvalIntent, "approve_on_connect");
+});
+
+test("add() supports an unauthenticated MCP server with an empty header list", async () => {
+  const { api, calls } = fakeApi({ validateMcpConnection: { success: true, tools: [{ name: "ping" }] } });
+  const manager = new McpConnectionManager(api);
+  const record = await manager.add({ name: "Public", serverUrl: "https://mcp.example.com/mcp", auth: { type: "none" } });
+  assert.equal(record.authType, "none");
+  assert.deepEqual(calls[0]?.body.authHeaders, []);
+  assert.deepEqual(calls[2]?.body.authHeaders, []);
 });
 
 test("remove() marks the module dead in Notion", async () => {
@@ -63,12 +92,19 @@ test("remove() marks the module dead in Notion", async () => {
   assert.deepEqual(body.transactions[0]?.operations[0]?.args, { alive: false });
 });
 
+test("status uses the current moduleId payload key", async () => {
+  const { api, calls } = fakeApi();
+  const manager = new McpConnectionManager(api);
+  await manager.status("module-1");
+  assert.deepEqual(calls[0], { endpoint: "getMcpOAuthStatus", body: { moduleId: "module-1", spaceId: "space-1" } });
+});
+
 test("registry persists connections to disk", () => {
   const dir = mkdtempSync(join(tmpdir(), "mcp-registry-"));
   try {
     const path = join(dir, "registry.json");
     const registry = new McpRegistry(path);
-    registry.upsert({ id: "a", name: "A", serverUrl: "https://example.com/mcp", spaceId: "s", authType: "bearer", transport: "http", toolNames: [], createdAt: new Date().toISOString() });
+    registry.upsert({ id: "a", name: "A", serverUrl: "https://example.com/mcp", spaceId: "s", authType: "bearer", transport: "streamableHttp", toolNames: [], createdAt: new Date().toISOString() });
     assert.equal(new McpRegistry(path).list().length, 1);
     assert.equal(registry.remove("a"), true);
     assert.equal(new McpRegistry(path).list().length, 0);
