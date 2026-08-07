@@ -1,11 +1,11 @@
-researched_at=2026-08-07T11:45:55Z
+researched_at=2026-08-07T12:32:56Z
 method=wget plus webpack-runtime dependency crawl
 
 == Fetch login and initial JavaScript assets ==
 login_bytes=19225
 initial_asset_count=12
 asset_host=transcend-cdn.com asset_path=/cm/4d6a6beb-faf4-4a4e-9e1c-c7692d5f9c2f/airgap.js
-asset_host=www.notion.so asset_path=/_assets/11027-a7dc62f25bf0f6a2.js
+asset_host=www.notion.so asset_path=/_assets/11027-5b52e0cb47a1dd57.js
 asset_host=www.notion.so asset_path=/_assets/30177-67c30fe8cc742292.js
 asset_host=www.notion.so asset_path=/_assets/53939-9c0c475786de93ee.js
 asset_host=www.notion.so asset_path=/_assets/60328-40c280ce0a944a5b.js
@@ -14,14 +14,14 @@ asset_host=www.notion.so asset_path=/_assets/75467-ea994c9df6c77d88.js
 asset_host=www.notion.so asset_path=/_assets/92707-59db80a0f8adb39e.js
 asset_host=www.notion.so asset_path=/_assets/97260-60ba6ee5d579daa4.js
 asset_host=www.notion.so asset_path=/_assets/ClientFramework-648db652b249c754.js
-asset_host=www.notion.so asset_path=/_assets/app-2d409078ec19bd0b.js
+asset_host=www.notion.so asset_path=/_assets/app-3640cf8ad82980da.js
 asset_host=www.notion.so asset_path=/_assets/contentPreview-b4d956be00566486.js
 downloaded_initial_count=12
 downloaded_initial_bytes=1434187
 
 == Resolve runtime maps and crawl attachment dependencies ==
 runtime_found=true
-runtime_host=www.notion.so runtime_path=/_assets/app-2d409078ec19bd0b.js
+runtime_host=www.notion.so runtime_path=/_assets/app-3640cf8ad82980da.js
 runtime_name_count=1110 runtime_hash_count=2077
 runtime_public_paths=["/_assets/"]
 base_candidates=["/_assets/"]
@@ -31,7 +31,7 @@ crawl_depth=1 attempted=258 downloaded=258 discovered_next=234
 crawl_depth=2 attempted=234 downloaded=234 discovered_next=88
 crawl_depth=3 attempted=88 downloaded=88 discovered_next=147
 crawled_chunk_count=641
-crawled_chunk_bytes=30095652
+crawled_chunk_bytes=30095688
 
 CHUNK=831 FILE=831-b7ce0c52d92ff307.js TERM=fileSizeBytes MATCH=1
 lyUploadedFiles:t})}setValueForUploadingFile(e,t){let a=new Map(this.state.inProgressUploadFileIdsToProgress),r=a.get(e);a.set(e,{...t,timeUploaded:(null==r?void 0:r.timeUploaded)??Date.now()}),this.setState({...this.state,inProgressUploadFileIdsToProgress:a})}getTimeUploadedForUploadingFile(e){let t=new Map(this.state.inProgressUploadFileIdsToProgress).get(e);return(null==t?void 0:t.timeUploaded)??Date.now()}getTimeUploadedForUploadedFile(e){let t=new Map(this.state.originalFileUrlToSuccessfullyUploadedFiles).get(e);return(null==t?void 0:t.timeUploaded)??Date.now()}deleteValueForUploadingFile(e){let t=new Map(this.state.inProgressUploadFileIdsToProgress);t.delete(e),this.setState({...this.state,inProgressUploadFileIdsToProgress:t})}deleteValueForUploadedFile(e){let t=new Map(this.state.originalFileUrlToSuccessfullyUploadedFiles);t.delete(e),this.setState({...this.state,originalFileUrlToSuccessfullyUploadedFiles:t})}onFileUploadPercentageChanged(e){let{fileId:t,fileName:a,percentage:r,contentType:n}=e;this.setValueForUploadingFile(t,{type:"uploading",fileName:a,progress:r,contentType:n})}onFileUploadFailed(e){let{error:t}=e,{files:a}=t;a.forEach(({fileId:e,fileName:a})=>{this.setValueForUploadingFile(e,{type:"error",error:t,fileName:a})})}onFileUploadCompleted(e,t){let a=this.getTimeUploadedForUploadingFile(e);this.deleteValueForUploadingFile(e),this.setValueForUploadedFile(t.originalFileUrl,{...t,timeUploaded:a})}onComputerFileUploadCompleted(e,t){let r=this.getTimeUploadedForUploadingFile(e);this.deleteValueForUploadingFile(e),this.setValueForUploadedFile(t.originalFileUrl,{originalFileUrl:t.originalFileUrl,fileName:t.fileName,contentType:"application/pdf",base64EncodedFileUrl:"",attachmentSource:"user_upload",assistantSessionId:(0,a(882152).pg)(t.assistantSessionId),fileSizeBytes:t.fileSizeBytes,timeUploaded:r})}setCompletedFileForRetry(e){let t=this.getTimeUploadedForUploadedFile(e.originalFileUrl);this.setValueForUploadedFile(e.originalFileUrl,{...e,timeUploaded:t})}onDeleteFileUpload(e){this.deleteValueForUploadedFile(e)}isUploadInProgress(){return Array.from(this.state.inProgressUploadFileIdsToProgress.values()).filter(e=>"error"!==e.type).length>0}hasTooManyAttachments(e=n()){return this.isUploadInProgress()||this.state.originalFileUrlToSuccessfullyUploadedFiles.size>e}}a.d(t,{Gi:()=>i,bY:()=>n,yB:()=>o})},857686(e,t,a){function r(e){let{thread:t,workflowStore:r,spaceId:n}=e;if(!t.run_id)return{};let o=a(997420).t.createChildStore(r,{table:a(401188).QRx,id:t.run_id,spaceId:n}),i=o.getStatus();return{status:i,pausedReason:"paused"===i?o.getDataStore().getKeyValue("paused_reason"):void 0}}function n(e){let{thread:t,filterType:n,workflowStore:o,spaceId:i,includeUnknownStatus:l}=e;if("pending"===n){if(!t.run_id)return!1;let{status:e,pausedReason:a}=r({thread:t,workflowStore:o,spaceId:i});return void 0===e?l:"pending"===e||"paused"===e&&"needsReview"===a}if(t.run_id){let{status:e}=r({thread:t,workflowStore:o,spaceId:i});if(void 0===e)return l;if("running"===e)return!0}return function(e){let{thread:t,workflowStore:r,spaceId:n}=e;return a(723423).E.createChildStore(r,{table:"thread",id:t.id,spaceId:n}).getIsInferenceLeaseActive()}({thread:t,workflowStore:o,spaceId:i})}function o(e){let{threads:t,filterType:a,workflowStore:r,spaceId:o,includeUnknownStatus:i}=e;return("pending"===a||"in_progress"===a)&&t.some(e=>n({thread:e,filterType:a,workflowStore:r,spaceId:o,includeUnknownStatus:i}))}function i(e){let{threads:t,filterType:a,workflowStore:r,spaceId:o,includeUnknownStatus:i}=e;return"pending"!==a&&"in_progress"!==a?[]:t.filter(e=>n({
