@@ -123,3 +123,23 @@ npm run build
 
 ephemeral 環境の TTL 失効で v0.3.0〜0.7.4 の未プッシュコミット列を全損しました。
 対策として、作業単位ごとに `git push` する運用に変更しています。
+
+## 2026-08-07 Agent Service添付調査とv0.8.0
+
+Notion Webのcurrent runtime mapを `wget` で取得し、2,070/2,071 chunksをローカル解析した。
+owner module `265981` と実callerから次を復元した。
+
+- `createAgentServiceFileUploadURL` / `completeAgentServiceFileUpload`
+- `getFileContentURLForAgentThread`
+- `createAgentThread` / `sendEventToAgentThread`
+- file chat content: `[{type:"text",text}, {type:"file",file_id}]`
+- 既存thread event: `{type:"user.message",content}`
+- single-part / multipart transfer、multipart `ETag` completion
+- `getThreadTranscript` の `put/patch/remove/rewind/session/session_status/committed` protocol
+
+v0.8.0では `upload_attachment` と `download_attachment` を追加し、compiled stdio serverは18 toolsを列挙した。
+ローカル回帰は45 testsで、single-part、multipart byte境界、ETag必須、checksum、path traversal、symlink、
+byte上限、Agent Service 2-turn file chatを含めて全件成功した。
+
+この時点の新しいephemeral環境には認証済みNotion sessionがないため、実アカウントでのattachment
+upload → file chat → download checksum lifecycleは未実施であり、次のlive validation項目として残している。

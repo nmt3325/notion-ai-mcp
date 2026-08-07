@@ -74,6 +74,7 @@ test("Streamable HTTP server requires bearer auth and executes MCP tools", async
       "check_mcp_oauth_support",
       "connect_preconfigured_mcp_server",
       "create_workspace",
+      "download_attachment",
       "get_conversation",
       "get_current_workspace",
       "get_mcp_connection_status",
@@ -85,7 +86,8 @@ test("Streamable HTTP server requires bearer auth and executes MCP tools", async
       "remove_mcp_connection",
       "start_mcp_oauth",
       "switch_workspace",
-      "update_mcp_connection"
+      "update_mcp_connection",
+      "upload_attachment"
     ]);
     const result = await client.callTool({ name: "notion_ai_chat", arguments: { prompt: "Hello" } });
     assert.equal(result.content[0]?.type === "text" ? result.content[0].text : "", "Remote mock answer");

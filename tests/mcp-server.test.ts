@@ -10,6 +10,7 @@ export const EXPECTED_TOOLS = [
   "check_mcp_oauth_support",
   "connect_preconfigured_mcp_server",
   "create_workspace",
+  "download_attachment",
   "get_conversation",
   "get_current_workspace",
   "get_mcp_connection_status",
@@ -21,12 +22,15 @@ export const EXPECTED_TOOLS = [
   "remove_mcp_connection",
   "start_mcp_oauth",
   "switch_workspace",
-  "update_mcp_connection"
+  "update_mcp_connection",
+  "upload_attachment"
 ];
 
-function fakeClient(): { client: NotionClient; chatCalls: Array<Record<string, unknown>>; added: Array<Record<string, unknown>> } {
+function fakeClient(): { client: NotionClient; chatCalls: Array<Record<string, unknown>>; added: Array<Record<string, unknown>>; uploaded: Array<Record<string, unknown>>; downloaded: Array<Record<string, unknown>> } {
   const chatCalls: Array<Record<string, unknown>> = [];
   const added: Array<Record<string, unknown>> = [];
+  const uploaded: Array<Record<string, unknown>> = [];
+  const downloaded: Array<Record<string, unknown>> = [];
   const client = {
     chat: async (options: Record<string, unknown>) => {
       chatCalls.push(options);
@@ -38,6 +42,14 @@ function fakeClient(): { client: NotionClient; chatCalls: Array<Record<string, u
     getCurrentWorkspace: async () => ({ spaceId: "space-1", spaceName: "Mock Space" }),
     switchWorkspace: async (selector: string, pin = false) => ({ spaceId: selector, pinned: pin }),
     createWorkspace: async (name?: string) => ({ spaceId: "space-2", name: name ?? "auto", switched: true }),
+    uploadAttachment: async (options: Record<string, unknown>) => {
+      uploaded.push(options);
+      return { fileId: "file-1", fileName: "notes.txt", mediaType: "text/plain", sizeBytes: 5, target: { type: "user" }, file: { id: "file-1", filename: "notes.txt", media_type: "text/plain", size_bytes: 5 } };
+    },
+    downloadAttachment: async (options: Record<string, unknown>) => {
+      downloaded.push(options);
+      return { fileId: "file-1", fileName: "notes.txt", mediaType: "text/plain", sizeBytes: 5, base64: "aGVsbG8=" };
+    },
     mcp: () => ({
       list: () => [{ id: "module-1", name: "DeepWiki" }],
       add: async (input: Record<string, unknown>) => { added.push(input); return { id: "module-1", ...input }; },
@@ -50,7 +62,7 @@ function fakeClient(): { client: NotionClient; chatCalls: Array<Record<string, u
       connectPreconfigured: async () => ({ id: "preconfigured-1", connected: true })
     })
   } as unknown as NotionClient;
-  return { client, chatCalls, added };
+  return { client, chatCalls, added, uploaded, downloaded };
 }
 
 async function connect(client: NotionClient): Promise<{ mcpClient: Client; close: () => Promise<void> }> {
@@ -70,15 +82,29 @@ test("MCP server advertises chat, workspace, and MCP management tools", async ()
   } finally { await close(); }
 });
 
-test("notion_ai_chat forwards model and attachments and returns the answer text", async () => {
+test("notion_ai_chat forwards model and uploaded file IDs and returns the answer text", async () => {
   const { client, chatCalls } = fakeClient();
   const { mcpClient, close } = await connect(client);
   try {
-    const response = await mcpClient.callTool({ name: "notion_ai_chat", arguments: { prompt: "Hello", model: "thinking", attachments: [{ name: "notes.md", text: "hi" }] } });
+    const response = await mcpClient.callTool({ name: "notion_ai_chat", arguments: { prompt: "Hello", model: "thinking", fileIds: ["file-1"] } });
     assert.equal(response.isError, undefined);
     assert.equal(Array.isArray(response.content) && response.content[0]?.type === "text" ? response.content[0].text : "", "Mock answer");
     assert.equal(chatCalls[0]?.model, "thinking");
-    assert.deepEqual(chatCalls[0]?.attachments, [{ name: "notes.md", text: "hi" }]);
+    assert.deepEqual(chatCalls[0]?.fileIds, ["file-1"]);
+  } finally { await close(); }
+});
+
+test("attachment tools forward upload and download options", async () => {
+  const { client, uploaded, downloaded } = fakeClient();
+  const { mcpClient, close } = await connect(client);
+  try {
+    const upload = await mcpClient.callTool({ name: "upload_attachment", arguments: { base64: "aGVsbG8=", fileName: "notes.txt", mimeType: "text/plain" } });
+    assert.equal((upload.structuredContent as { fileId: string }).fileId, "file-1");
+    assert.deepEqual(uploaded[0], { base64: "aGVsbG8=", fileName: "notes.txt", mimeType: "text/plain" });
+    const conversationId = "11111111-1111-4111-8111-111111111111";
+    const download = await mcpClient.callTool({ name: "download_attachment", arguments: { conversationId, fileId: "file-1", returnBase64: true } });
+    assert.equal((download.structuredContent as { base64: string }).base64, "aGVsbG8=");
+    assert.deepEqual(downloaded[0], { conversationId, fileId: "file-1", returnBase64: true, overwrite: false });
   } finally { await close(); }
 });
 

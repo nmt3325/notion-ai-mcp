@@ -1,12 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { basename } from "node:path";
 import type {
-  AccountContext, ChatAttachment, ChatResult, ChatSession, Conversation, ConversationMessage,
-  ConversationSummary, ListConversationsResult, ParsedInferenceStream
+  AccountContext, AgentUploadedFile, AttachmentDownloadResult, AttachmentUploadResult, ChatAttachment,
+  ChatResult, ChatSession, Conversation, ConversationMessage, ConversationSummary, ListConversationsResult,
+  ParsedInferenceStream
 } from "./types.js";
 import type { NotionConfig } from "./config.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 import { normalizeModelName } from "./models.js";
 import { McpConnectionManager } from "./mcp-connections.js";
+import { prepareAttachmentInput, readResponseBuffer, writeAttachmentOutput, type AttachmentInput } from "./attachments.js";
+import { agentTranscriptError, applyAgentTranscriptPatches, createAgentTranscriptState, isAgentTranscriptTurnComplete, latestAgentTranscriptText } from "./agent-transcript.js";
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 const SEC_CH_UA = '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"';
@@ -15,6 +19,73 @@ type JsonObject = Record<string, unknown>;
 
 interface TranscriptPage { transcripts?: Array<Record<string, unknown>>; threadIds?: string[]; unreadThreadIds?: string[]; nextCursor?: string | null; hasMore?: boolean; recordMap?: { thread?: Record<string, unknown> } }
 interface ThreadLookup { page: TranscriptPage; transcript: Record<string, unknown> | null; thread: Record<string, unknown> }
+
+interface ChatOptions {
+  prompt: string;
+  model?: string | undefined;
+  conversationId?: string | undefined;
+  webSearch?: boolean | undefined;
+  workspaceSearch?: boolean | undefined;
+  readOnly?: boolean | undefined;
+  attachments?: ChatAttachment[] | undefined;
+  fileIds?: string[] | undefined;
+  _retryCount?: number | undefined;
+}
+
+type AgentUploadTarget = { type: "user" } | { type: "thread"; threadId: string };
+
+function signedHeaders(value: unknown): Headers {
+  const headers = new Headers();
+  if (Array.isArray(value)) {
+    for (const raw of value) {
+      const entry = object(raw);
+      const name = asString(entry.name).trim();
+      const headerValue = asString(entry.value);
+      if (name) headers.set(name, headerValue);
+    }
+  } else {
+    for (const [name, headerValue] of Object.entries(object(value))) {
+      if (typeof headerValue === "string") headers.set(name, headerValue);
+    }
+  }
+  return headers;
+}
+
+function parseUploadedFile(value: unknown): AgentUploadedFile {
+  const outer = object(value);
+  const nested = object(outer.file);
+  const file = Object.keys(nested).length > 0 ? nested : outer;
+  const id = asString(file.id).trim();
+  const filename = asString(file.filename).trim();
+  const mediaType = asString(file.media_type).trim();
+  const sizeBytes = file.size_bytes;
+  if (!id || !filename || !mediaType || typeof sizeBytes !== "number" || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0) {
+    throw new Error("Notion returned an invalid uploaded-file object");
+  }
+  const sha256 = asString(file.sha256).trim();
+  return { id, filename, media_type: mediaType, size_bytes: sizeBytes, ...(sha256 ? { sha256 } : {}) };
+}
+
+function normalizedFileIds(value: string[] | undefined): string[] {
+  const ids = [...new Set((value ?? []).map((id) => id.trim()).filter(Boolean))];
+  if (ids.length > 19) throw new Error("Notion Agent Service supports at most 19 files with one text block");
+  return ids;
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function promptWithLegacyAttachments(prompt: string, attachments: ChatAttachment[]): string {
+  if (attachments.length === 0) return prompt;
+  const sections = attachments.map((attachment) => {
+    const heading = `--- Attachment context: ${attachment.name} ---`;
+    if (attachment.text) return `${heading}\n${attachment.text}`;
+    if (attachment.url) return `${heading}\n${attachment.url}`;
+    return heading;
+  });
+  return `${prompt}\n\n${sections.join("\n\n")}`;
+}
 
 function object(value: unknown): JsonObject { return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : {}; }
 export function unwrapRecord(value: unknown): JsonObject { let current = object(value); for (let i = 0; i < 3; i += 1) { const nested = current.value; if (nested === undefined || nested === null || typeof nested !== "object" || Array.isArray(nested)) break; current = object(nested); } return current; }
@@ -145,20 +216,20 @@ export class NotionClient {
 
   private buildContext(account: AccountContext, datetime: string, hasAttachments = false): JsonObject { return { timezone: account.timezone, userName: account.userName, userId: account.userId, userEmail: account.userEmail, spaceName: account.spaceName, spaceId: account.spaceId, spaceViewId: account.spaceViewId, currentDatetime: datetime, surface: hasAttachments ? "workflows" : "ai_module" }; }
 
-  private buildInferenceBody(account: AccountContext, prompt: string, model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, session: ChatSession, attachments: ChatAttachment[] = []): JsonObject {
+  private buildInferenceBody(account: AccountContext, prompt: string, model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, session: ChatSession): JsonObject {
     const sub = session.turnCount > 0;
     const now = new Date().toISOString();
-    const userStep: JsonObject = { id: randomUUID(), type: "user", value: [[prompt]], userId: account.userId, createdAt: now, ...(attachments.length ? { attachments } : {}) };
+    const userStep: JsonObject = { id: randomUUID(), type: "user", value: [[prompt]], userId: account.userId, createdAt: now };
     const transcript: JsonObject[] = [
       { id: session.configId, type: "config", value: buildConfigValue(model, webSearch, workspaceSearch, readOnly, sub) },
-      { id: session.contextId, type: "context", value: this.buildContext(account, session.originalDatetime, attachments.length > 0) },
+      { id: session.contextId, type: "context", value: this.buildContext(account, session.originalDatetime) },
       ...session.updatedConfigIds.map((id) => ({ id, type: "updated-config" })),
       userStep
     ];
     return { traceId: randomUUID(), spaceId: account.spaceId, threadId: session.threadId, transcript, createThread: !sub, generateTitle: !sub, saveAllThreadOperations: true, setUnreadState: false, threadType: "workflow", asPatchResponse: false, isPartialTranscript: sub, ...(!sub ? { threadParentPointer: { table: "space", id: account.spaceId, spaceId: account.spaceId } } : {}), debugOverrides: { model, emitAgentSearchExtractedResults: true } };
   }
 
-  async chat(options: { prompt: string; model?: string; conversationId?: string; webSearch?: boolean; workspaceSearch?: boolean; readOnly?: boolean; attachments?: ChatAttachment[]; _retryCount?: number }): Promise<ChatResult> {
+  async chat(options: ChatOptions): Promise<ChatResult> {
     const maxRetries = this.config.maxWorkspaceRetries ?? 5;
     try { return await this._chatInternal(options); }
     catch (error) {
@@ -174,22 +245,266 @@ export class NotionClient {
     }
   }
 
-  private async _chatInternal(options: { prompt: string; model?: string; conversationId?: string; webSearch?: boolean; workspaceSearch?: boolean; readOnly?: boolean; attachments?: ChatAttachment[]; _retryCount?: number }): Promise<ChatResult> {
+  private async _chatInternal(options: ChatOptions): Promise<ChatResult> {
     const account = await this.account();
     const model = normalizeModelName(options.model, this.config.defaultModel);
+    const fileIds = normalizedFileIds(options.fileIds);
     let session: ChatSession;
     if (options.conversationId) {
       const known = this.sessions.get(options.conversationId);
       if (!known) throw new Error(`Conversation ${options.conversationId} is not an active MCP session. Start a new chat without conversationId.`);
       session = known;
-    } else { session = { threadId: randomUUID(), configId: randomUUID(), contextId: randomUUID(), originalDatetime: new Date().toISOString(), model, updatedConfigIds: [], turnCount: 0 }; }
-    const body = this.buildInferenceBody(account, options.prompt, model, options.webSearch ?? false, options.workspaceSearch ?? false, options.readOnly ?? true, session, options.attachments ?? []);
+    } else {
+      session = {
+        threadId: randomUUID(), configId: randomUUID(), contextId: randomUUID(), originalDatetime: new Date().toISOString(),
+        model, updatedConfigIds: [], turnCount: 0,
+        transport: fileIds.length > 0 ? "agent_service" : "inference_transcript"
+      };
+    }
+    if (session.transport === "agent_service") return this.agentServiceChat(account, model, session, options, fileIds);
+    if (fileIds.length > 0) throw new Error("Uploaded file IDs cannot be added to a legacy chat. Start a new chat without conversationId.");
+    const prompt = promptWithLegacyAttachments(options.prompt, options.attachments ?? []);
+    const body = this.buildInferenceBody(account, prompt, model, options.webSearch ?? false, options.workspaceSearch ?? false, options.readOnly ?? true, session);
     const response = await this.request("runInferenceTranscript", body, true);
     if (!response.body) throw new Error("runInferenceTranscript returned no response stream");
     const parsed = await parseInferenceStream(response.body);
     if (!parsed.text.trim()) throw new Error("Notion AI returned an empty response");
     session.turnCount += 1; session.updatedConfigIds.push(randomUUID()); session.model = model; this.sessions.set(session.threadId, session);
     return { conversationId: session.threadId, text: parsed.text, model, usage: { inputTokens: parsed.inputTokens, outputTokens: parsed.outputTokens } };
+  }
+
+  private async signedRequest(url: string, init: RequestInit, label: string): Promise<Response> {
+    let parsed: URL;
+    try { parsed = new URL(url); }
+    catch { throw new Error(`${label} returned an invalid URL`); }
+    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname))) {
+      throw new Error(`${label} URL must use HTTPS`);
+    }
+    const response = await this.fetchImpl(parsed, { ...init, redirect: "error", signal: AbortSignal.timeout(this.config.requestTimeoutMs) });
+    if (!response.ok) {
+      const errorBody = (await response.text()).slice(0, 500);
+      throw new Error(`${label} returned HTTP ${response.status}: ${errorBody}`);
+    }
+    return response;
+  }
+
+  async uploadAttachment(options: AttachmentInput & { conversationId?: string | undefined }): Promise<AttachmentUploadResult> {
+    const account = await this.account();
+    const maxBytes = this.config.maxAttachmentBytes ?? 20 * 1024 * 1024;
+    const root = this.config.attachmentRoot ?? process.cwd();
+    const prepared = await prepareAttachmentInput(options, root, maxBytes);
+    const target: AgentUploadTarget = options.conversationId
+      ? { type: "thread", threadId: options.conversationId }
+      : { type: "user" };
+    const known = options.conversationId ? this.sessions.get(options.conversationId) : undefined;
+    if (known && known.transport !== "agent_service") {
+      throw new Error("Attachments can only target an Agent Service conversation. Upload without conversationId for a new file chat.");
+    }
+
+    const created = await this.fetchJson("createAgentServiceFileUploadURL", {
+      spaceId: account.spaceId,
+      target,
+      filename: prepared.fileName,
+      mediaType: prepared.mediaType,
+      sizeBytes: prepared.sizeBytes
+    });
+    const upload = object(created.upload);
+    const createdFile = object(created.file);
+    const fileId = asString(createdFile.id).trim();
+    if (!fileId) throw new Error("createAgentServiceFileUploadURL did not return file.id");
+
+    let completedParts: Array<{ partNumber: number; etag: string }> | undefined;
+    if (upload.type === "single_part") {
+      const url = asString(upload.url);
+      const method = asString(upload.method).toUpperCase();
+      if (!url || !["POST", "PUT"].includes(method)) throw new Error("Notion returned an invalid single-part upload descriptor");
+      await this.signedRequest(url, { method, headers: signedHeaders(upload.headers), body: new Uint8Array(prepared.data) }, "Attachment upload");
+    } else {
+      const partSize = upload.part_size_bytes;
+      const descriptors = Array.isArray(upload.parts) ? upload.parts.map(object) : [];
+      if (typeof partSize !== "number" || !Number.isSafeInteger(partSize) || partSize <= 0 || descriptors.length === 0) {
+        throw new Error("Notion returned an invalid multipart upload descriptor");
+      }
+      completedParts = [];
+      const seen = new Set<number>();
+      for (const descriptor of descriptors) {
+        const partNumber = descriptor.part_number;
+        const url = asString(descriptor.url);
+        const method = asString(descriptor.method).toUpperCase();
+        if (typeof partNumber !== "number" || !Number.isSafeInteger(partNumber) || partNumber <= 0 || seen.has(partNumber) || !url || !["POST", "PUT"].includes(method)) {
+          throw new Error("Notion returned an invalid multipart upload part");
+        }
+        seen.add(partNumber);
+        const start = (partNumber - 1) * partSize;
+        const end = Math.min(start + partSize, prepared.sizeBytes);
+        if (start >= prepared.sizeBytes || end <= start) throw new Error(`Multipart part ${partNumber} is outside the file bounds`);
+        const response = await this.signedRequest(url, {
+          method,
+          headers: signedHeaders(descriptor.headers),
+          body: new Uint8Array(prepared.data.subarray(start, end))
+        }, `Attachment upload part ${partNumber}`);
+        const etag = response.headers.get("etag")?.trim();
+        if (!etag) throw new Error(`Attachment upload part ${partNumber} did not return an ETag`);
+        completedParts.push({ partNumber, etag });
+      }
+      const expectedParts = Math.ceil(prepared.sizeBytes / partSize);
+      if (completedParts.length !== expectedParts) throw new Error(`Multipart descriptor contained ${completedParts.length} parts; expected ${expectedParts}`);
+      completedParts.sort((left, right) => left.partNumber - right.partNumber);
+    }
+
+    const completed = await this.fetchJson("completeAgentServiceFileUpload", {
+      spaceId: account.spaceId,
+      target,
+      fileId,
+      ...(completedParts ? { parts: completedParts } : {})
+    });
+    const file = parseUploadedFile(completed);
+    if (file.id !== fileId) throw new Error("Completed upload returned a different file ID");
+    if (file.size_bytes !== prepared.sizeBytes) throw new Error("Completed upload returned a different file size");
+    return {
+      fileId: file.id,
+      fileName: file.filename,
+      mediaType: file.media_type,
+      sizeBytes: file.size_bytes,
+      ...(file.sha256 ? { sha256: file.sha256 } : {}),
+      target,
+      file
+    };
+  }
+
+  async downloadAttachment(options: {
+    conversationId: string;
+    fileId: string;
+    outputPath?: string | undefined;
+    returnBase64?: boolean | undefined;
+    overwrite?: boolean | undefined;
+  }): Promise<AttachmentDownloadResult> {
+    const account = await this.account();
+    const maxBytes = this.config.maxAttachmentBytes ?? 20 * 1024 * 1024;
+    const descriptor = await this.fetchJson("getFileContentURLForAgentThread", {
+      spaceId: account.spaceId,
+      threadId: options.conversationId,
+      fileId: options.fileId,
+      includeFileMetadata: true
+    });
+    const url = asString(descriptor.url);
+    if (!url) throw new Error("getFileContentURLForAgentThread did not return a URL");
+    const metadata = object(descriptor.file);
+    const metadataId = asString(metadata.id).trim();
+    if (metadataId && metadataId !== options.fileId) throw new Error("Downloaded attachment metadata returned a different file ID");
+    const declaredSize = metadata.size_bytes;
+    if (typeof declaredSize === "number" && declaredSize > maxBytes) throw new Error(`Download exceeds the ${maxBytes}-byte limit`);
+    const response = await this.signedRequest(url, { method: "GET" }, "Attachment download");
+    const data = await readResponseBuffer(response, maxBytes);
+    if (typeof declaredSize === "number" && Number.isSafeInteger(declaredSize) && declaredSize >= 0 && data.byteLength !== declaredSize) {
+      throw new Error("Downloaded attachment size did not match Notion metadata");
+    }
+    const sha256 = asString(metadata.sha256).trim();
+    if (sha256) {
+      const actual = createHash("sha256").update(data).digest("hex");
+      if (actual.toLowerCase() !== sha256.toLowerCase()) throw new Error("Downloaded attachment checksum did not match Notion metadata");
+    }
+    const rawName = asString(metadata.filename).replaceAll("\0", "").trim();
+    const fileName = basename(rawName || `${options.fileId}.bin`) || `${options.fileId}.bin`;
+    const mediaType = asString(metadata.media_type).trim() || response.headers.get("content-type")?.split(";", 1)[0]?.trim() || "application/octet-stream";
+    let outputPath: string | undefined;
+    const requestedOutput = options.outputPath ?? (options.returnBase64 ? undefined : `downloads/${fileName}`);
+    if (requestedOutput) outputPath = await writeAttachmentOutput(data, requestedOutput, this.config.attachmentRoot ?? process.cwd(), options.overwrite ?? false);
+    return {
+      fileId: options.fileId,
+      fileName,
+      mediaType,
+      sizeBytes: data.byteLength,
+      ...(outputPath ? { path: outputPath } : {}),
+      ...(options.returnBase64 ? { base64: data.toString("base64") } : {}),
+      ...(sha256 ? { sha256 } : {})
+    };
+  }
+
+  private async latestAgentTranscriptCursor(account: AccountContext, threadId: string): Promise<unknown> {
+    let cursor: unknown;
+    for (let pageIndex = 0; pageIndex < 100; pageIndex += 1) {
+      const page = await this.fetchJson("getThreadTranscript", {
+        spaceId: account.spaceId,
+        threadId,
+        direction: "forward",
+        limit: 100,
+        ...(cursor !== undefined ? { cursor } : {})
+      });
+      const next = page.forward_cursor;
+      if (page.has_more_forward !== true) return next;
+      if (next === undefined || Object.is(next, cursor)) throw new Error("getThreadTranscript pagination did not advance");
+      cursor = next;
+    }
+    throw new Error("getThreadTranscript exceeded 100 pages");
+  }
+
+  private async waitForAgentServiceTurn(account: AccountContext, threadId: string, initialCursor: unknown): Promise<string> {
+    const state = createAgentTranscriptState();
+    const deadline = Date.now() + this.config.requestTimeoutMs;
+    let cursor = initialCursor;
+    while (Date.now() < deadline) {
+      const page = await this.fetchJson("getThreadTranscript", {
+        spaceId: account.spaceId,
+        threadId,
+        direction: "forward",
+        limit: 100,
+        ...(cursor !== undefined ? { cursor } : {})
+      });
+      applyAgentTranscriptPatches(state, page.patches);
+      const error = agentTranscriptError(state);
+      if (error) throw new Error(`Notion Agent Service error: ${error}`);
+      const text = latestAgentTranscriptText(state);
+      if (text && isAgentTranscriptTurnComplete(state)) return text;
+      const session = Object.keys(object(page.session)).length > 0 ? object(page.session) : state.session ?? {};
+      const sessionStatus = asString(session.status);
+      if (text && ["completed", "idle", "stopped"].includes(sessionStatus)) return text;
+      const next = page.forward_cursor;
+      const hasMore = page.has_more_forward === true;
+      if (next !== undefined) cursor = next;
+      if (!hasMore) await sleep(250);
+    }
+    throw new Error("Timed out waiting for the Notion Agent Service response");
+  }
+
+  private async agentServiceChat(account: AccountContext, model: string, session: ChatSession, options: ChatOptions, fileIds: string[]): Promise<ChatResult> {
+    if (options.attachments?.length) throw new Error("For real file attachments, use upload_attachment and pass the returned IDs as fileIds");
+    const content: JsonObject[] = [
+      { type: "text", text: options.prompt },
+      ...fileIds.map((fileId) => ({ type: "file", file_id: fileId }))
+    ];
+    const clientMessageId = randomUUID();
+    const existing = session.turnCount > 0;
+    const cursor = existing ? await this.latestAgentTranscriptCursor(account, session.threadId) : undefined;
+    if (existing) {
+      await this.fetchJson("sendEventToAgentThread", {
+        spaceId: account.spaceId,
+        threadId: session.threadId,
+        event: { type: "user.message", content },
+        model,
+        policies: { approval_mode: "ask" },
+        browserEnabled: options.webSearch ?? false,
+        clientEventId: clientMessageId
+      });
+    } else {
+      await this.fetchJson("createAgentThread", {
+        type: "personal_agent",
+        spaceId: account.spaceId,
+        threadId: session.threadId,
+        content,
+        model,
+        policies: { approval_mode: "ask" },
+        browserEnabled: options.webSearch ?? false,
+        clientMessageId
+      });
+    }
+    const text = await this.waitForAgentServiceTurn(account, session.threadId, cursor);
+    if (!text.trim()) throw new Error("Notion Agent Service returned an empty response");
+    session.turnCount += 1;
+    session.model = model;
+    session.transport = "agent_service";
+    this.sessions.set(session.threadId, session);
+    return { conversationId: session.threadId, text, model, usage: { inputTokens: 0, outputTokens: 0 } };
   }
 
   /** Raw internal-API POST used by the management tools. */
