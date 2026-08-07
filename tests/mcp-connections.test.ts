@@ -29,17 +29,27 @@ function fakeApi(responses: Record<string, FakeResponse> = {}): { api: McpApi; c
       if (configured) return configured;
       if (endpoint === "syncRecordValuesMain") return spaceViewResponse();
       if (endpoint === "syncRecordValues") {
-        const request = (body.requests as Array<Record<string, unknown>>)[0];
-        const pointer = request?.pointer as Record<string, unknown>;
-        const table = String(pointer?.table ?? "");
-        const id = String(pointer?.id ?? "");
-        if (table === "workflow_module") return { recordMap: { workflow_module: { [id]: { value: {
-          id, alive: true, module_type: "mcpServer", space_id: context.spaceId,
-          data: { preferredTransport: "streamableHttp", connectionPointer: { table: "external_connection", id: "connection-1", spaceId: context.spaceId } }
-        } } } } };
-        if (table === "external_connection") return { recordMap: { external_connection: { [id]: { value: {
-          id, alive: true, space_id: context.spaceId, data: { authenticated: true }
-        } } } } };
+        const recordMap: Record<string, Record<string, unknown>> = {};
+        for (const request of body.requests as Array<Record<string, unknown>>) {
+          const pointer = request.pointer as Record<string, unknown>;
+          const table = String(pointer?.table ?? "");
+          const id = String(pointer?.id ?? "");
+          recordMap[table] ??= {};
+          if (table === "workflow_module") recordMap[table][id] = { value: {
+            id, alive: true, module_type: "mcpServer", space_id: context.spaceId, created_time: 1_700_000_000_000,
+            data: {
+              name: `Remote ${id}`,
+              serverUrl: `https://${id}.example.com/mcp`,
+              preferredTransport: "streamableHttp",
+              tools: [{ name: "ask_question" }],
+              connectionPointer: { table: "external_connection", id: "connection-1", spaceId: context.spaceId }
+            }
+          } };
+          if (table === "external_connection") recordMap[table][id] = { value: {
+            id, alive: true, space_id: context.spaceId, data: { authenticated: true }
+          } };
+        }
+        return { recordMap };
       }
       return {};
     },
@@ -85,6 +95,40 @@ test("toolNamesFrom accepts arrays and wrapped payloads", () => {
   assert.deepEqual(toolNamesFrom([{ name: "a" }]), ["a"]);
   assert.deepEqual(toolNamesFrom({ tools: [{ name: "b" }] }), ["b"]);
   assert.deepEqual(toolNamesFrom(null), []);
+});
+
+test("list() discovers linked modules and merges only current-workspace registry metadata", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mcp-list-"));
+  try {
+    const registryPath = join(dir, "registry.json");
+    const registry = new McpRegistry(registryPath);
+    const baseRecord = { name: "Local", serverUrl: "https://local.example.com/mcp", spaceId: context.spaceId, spaceViewId: context.spaceViewId, authType: "bearer" as const, transport: "streamableHttp", toolNames: ["local_tool"], createdAt: "2026-08-07T00:00:00.000Z" };
+    registry.upsert({ id: "existing-module", ...baseRecord });
+    registry.upsert({ id: "stale-local", ...baseRecord });
+    registry.upsert({ id: "other-workspace", ...baseRecord, spaceId: "space-2" });
+    const remoteOnly = { pointer: { table: "workflow_module", id: "remote-only", spaceId: context.spaceId }, defaultEnabled: true };
+    const { api, calls } = fakeApi({ syncRecordValuesMain: spaceViewResponse([existingModule, remoteOnly]) });
+    const manager = new McpConnectionManager(api, registryPath);
+    const listed = await manager.list();
+    assert.deepEqual(calls.map((call) => call.endpoint), ["syncRecordValuesMain", "syncRecordValues"]);
+    assert.equal(((calls[1]?.body.requests as unknown[]) ?? []).length, 2);
+    assert.equal(listed.length, 3);
+    const merged = listed.find((item) => item.id === "existing-module");
+    assert.equal(merged?.source, "notion_and_registry");
+    assert.equal(merged?.authType, "bearer");
+    assert.equal(merged?.name, "Remote existing-module");
+    assert.deepEqual(merged?.toolNames, ["ask_question"]);
+    const remote = listed.find((item) => item.id === "remote-only");
+    assert.equal(remote?.source, "notion");
+    assert.equal(remote?.authType, "unknown");
+    assert.equal(remote?.defaultEnabled, true);
+    const stale = listed.find((item) => item.id === "stale-local");
+    assert.equal(stale?.source, "registry_only");
+    assert.equal(stale?.linked, false);
+    assert.equal(stale?.alive, null);
+    assert.equal(listed.some((item) => item.id === "other-workspace"), false);
+    assert.equal(listed.some((item) => "connectionPointer" in item), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("add() uses the current factory record and preserves space-view modules", async () => {

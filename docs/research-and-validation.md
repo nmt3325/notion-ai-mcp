@@ -138,7 +138,7 @@ owner module `265981` と実callerから次を復元した。
 - `getThreadTranscript` の `put/patch/remove/rewind/session/session_status/committed` protocol
 
 v0.8.0では `upload_attachment` と `download_attachment` を追加し、compiled stdio serverは18 toolsを列挙した。
-ローカル回帰は63 testsで、single-part、multipart byte境界、ETag必須、checksum、path traversal、symlink、
+ローカル回帰は64 testsで、single-part、multipart byte境界、ETag必須、checksum、path traversal、symlink、
 byte上限、Agent Service 2-turn file chatに加え、workspace partial commit・delayed visibility・429/502・
 no-retryを含めて全件成功した。追加hardeningでは、unknown/duplicate/out-of-range/missing multipart descriptorを
 転送前に拒否し、signed request timeout、invalid create/complete response、upload/download size・SHA-256不整合、
@@ -192,6 +192,8 @@ commit `2d3eace`に対するself-reporting CIはNode 24でTypeScript check、54/
 | remove | 成功、registryは0件へ復元 |
 | remote cleanup | 同じmodule IDが`alive:false`, `linked:false`, `status:disconnected` |
 | pre-existing module | 1件を変更せず保持 |
-| automated regression | 63/63 tests、TypeScript check/build、compiled stdio smoke成功 |
+| automated regression | 64/64 tests、TypeScript check/build、compiled stdio smoke成功 |
+
+続くread-only compiled-stdio検証では、local registryが空でもcurrent Personal Agentのlinked module 1件を検出し、alive/linked、3 tool names、`source:notion`、`authType:unknown`を返した。registry fileは作成されず、出力のsecret-like keyは0件だった。
 
 旧status実装はglobal moduleへworkflow専用`getMcpOAuthStatus`を`workflowId`なしで送り400になった。公式UIも`workflowId && moduleId`の場合だけこのrouteを呼ぶため、global module statusはrecord-derivedへ修正した。live harness/resultと認証・bundle調査artifactはrepository外またはignored pathにmode 0600で保持した。
