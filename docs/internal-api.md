@@ -135,3 +135,38 @@ message ID を100件ずつ取得する。表示対象は次だけである。
   `syncInternalThreadMessages`, `getMessagesFromInternalThread`
 
 詳細な検証結果は [research-and-validation.md](research-and-validation.md) を参照。
+
+## MCP 接続関連エンドポイント
+
+いずれも `POST /api/v3/<name>` で、Cookie に `token_v2`、ヘッダーに `x-notion-space-id` と
+`x-notion-active-user-header` を付与します。
+
+| endpoint | body | 用途 |
+|---|---|---|
+| `checkMcpOAuthSupport` | `{ serverUrl }` | OAuth 対応の確認 |
+| `validateMcpConnection` | `{ serverUrl, spaceId, authHeaders }` | 接続検証と tool 一覧取得 |
+| `saveTransactionsFanout` | `{ requestId, transactions: [...] }` | `workflow_module` の作成/更新/削除 |
+| `postWorkflowsMcpServerConnect` | `{ integrationId, spaceId, authHeaders, initiationContext }` | 接続確定 |
+| `initiateMcpOAuth` | `{ serverUrl, spaceId, integrationId, name? }` | `authorizationUrl` を返す |
+| `getPreconfiguredMcpServers` | `{}` | Notion 標準の MCP カタログ（21 件） |
+
+`workflow_module` レコードの主要キー: `alive, created_by_id, created_by_table, created_time, data, id,
+last_edited_by_id, last_edited_by_table, last_edited_time, module_type, parent_id, parent_table, space_id, version`。
+`data` の中身: `connectionPointer, icon, id, name, officialName, preferredTransport, runReadToolsAutomatically,
+runWriteToolsAutomatically, serverInstructions, serverUrl, tools`。
+
+削除は `saveTransactionsFanout` で `args: { alive: false }`、更新は `path: ["data"]` と `path: []` の
+2 オペレーションを送ります。
+
+## モデルレジストリ
+
+Web バンドルの chunk に、全モデルの定義がインラインで含まれます（ログイン不要）。
+
+```
+{ notionName: "oatmeal-cookie", modelFamily: "openai", maxOutputTokens: 128000,
+  maxContextTokens: 400000, isProductionCallable: true, isProductionPickable: true,
+  isThinkingEnabled: true, pricing: {...},
+  displayName: "GPT 5.2", displayNameWithProvider: "GPT 5.2", displayGroup: "fast" }
+```
+
+179 エントリ中 74 が `isProductionCallable`。`src/models.ts` はこれを取り込んだカタログです。

@@ -1,11 +1,25 @@
 # Notion AI MCP Server
 
 Notion AI の非公式な内部 API を MCP サーバーとしてラップする、個人検証用の TypeScript 実装です。
-stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursorなどから次の3ツールを利用できます。
+stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次の 16 ツールを利用できます。
 
-- `notion_ai_chat`: Notion AI にプロンプトを送信し、NDJSON/SSE ストリームを集約して返す
+**チャット / 履歴**
+
+- `notion_ai_chat`: Notion AI にプロンプトを送信し、NDJSON/SSE ストリームを集約して返す（モデル指定・添付対応）
 - `list_conversations`: Notion AI の workflow/chat thread をページング取得する
 - `get_conversation`: 指定 thread の user-visible な user/assistant メッセージを取得する
+
+**ワークスペース**
+
+- `list_workspaces` / `get_current_workspace`: アカウント内の workspace 一覧と現在の workspace
+- `switch_workspace`: space ID または名前（部分一致可）で切り替え、`pin` で固定
+- `create_workspace`: 新規 workspace を作成して切り替え（無料枠の AI クレジットをリセットする目的）
+
+**MCP 接続管理（Notion 側の Settings > Connections > MCP を API から操作）**
+
+- `list_mcp_connections` / `add_mcp_connection` / `update_mcp_connection` / `remove_mcp_connection`
+- `get_mcp_connection_status` / `check_mcp_oauth_support` / `start_mcp_oauth`
+- `list_preconfigured_mcp_servers` / `connect_preconfigured_mcp_server`
 
 ## 重要な注意
 
@@ -62,6 +76,8 @@ node dist/src/index.js
 | `NOTION_API_BASE` | 任意 | 既定 `https://www.notion.so/api/v3` |
 | `NOTION_REQUEST_TIMEOUT_MS` | 任意 | 履歴取得/ストリーム全体の timeout。既定 300000 ms |
 | `NOTION_FULL_COOKIE` | 任意 | 必要な場合だけ完全な Cookie header を指定 |
+| `NOTION_MODEL_ALIASES` | 任意 | モデル別名を追加/上書きする JSON。例 `{"my-fast":"oatmeal-cookie"}` |
+| `NOTION_MCP_REGISTRY_FILE` | 任意 | 登録済み MCP 接続の保存先（mode 0600） |
 
 ## Remote Streamable HTTP
 
@@ -206,6 +222,70 @@ NOTION_ACCOUNT_FILE=/absolute/path/account.json NOTION_SMOKE_CHAT=1 npm run smok
 
 内部 API の request/response 仕様は [docs/internal-api.md](docs/internal-api.md)、調査根拠と実環境結果は
 [docs/research-and-validation.md](docs/research-and-validation.md) に記録しています。
+
+## モデル指定
+
+`notion_ai_chat` の `model` には、内部 ID・ベンダー名・ティア別名のいずれでも指定できます。
+別名テーブルは Notion Web バンドルの model registry から生成した 74 モデル / 235 別名です（`src/models.ts`）。
+
+| 指定例 | 解決される内部 ID |
+|---|---|
+| `fast` / `default` | `almond-croissant-low`（Sonnet 4.6 Low） |
+| `standard` / `balanced` | `almond-croissant-high`（Sonnet 4.6 High） |
+| `thinking` / `reasoning` / `deep` | `oatmeal-cookie`（GPT 5.2） |
+| `GPT 5.2` / `gpt-5.4-high` | `oatmeal-cookie` / `oval-kumquat-high` |
+| `Claude Opus 4.5` | `apple-danish` |
+| `Gemini 3.5 Flash` | `vertex-gemini-3.5-flash` |
+| `Grok 4.5` | `strawberry-whoopiepie` |
+
+別名は大文字小文字・空白・`_`・`()` を無視して照合します。未知の値はそのまま Notion に渡します。
+`NOTION_MODEL_ALIASES` の JSON で別名を上書きできます。レジストリの再抽出は `scripts/extract-models.cjs` を使います。
+
+## ワークスペース切り替えとクレジット対策
+
+無料プランの AI 応答枚数を使い切ると、ストリームに `premium-feature-unavailable` が流れます。
+本実装はこのイベントの `featureAvailability.limit` を読み、`AI credit limit reached: 78/75` のように
+実数値を含めたエラーを返します。同時に workspace を自動ローテーションして再試行します（`NOTION_MAX_WORKSPACE_RETRIES`）。
+手動で回避する場合は `create_workspace` で新規 workspace を作成し、`pin` で固定します。
+
+注意: 新規 workspace では Custom MCP サーバーが既定で無効のことがあり、`add_mcp_connection` が
+`ForbiddenError: Custom MCP servers are disabled for this workspace` で失敗します。その場合は Notion の
+ワークスペース設定で有効化してください。
+
+## MCP 接続管理
+
+`add_mcp_connection` は次の 3 段階を順に実行します。
+
+1. `validateMcpConnection`（serverUrl と authHeaders で tool 一覧を取得）
+2. `saveTransactionsFanout`（`workflow_module` レコードを `module_type: mcp_server` で作成）
+3. `postWorkflowsMcpServerConnect`（`initiationContext: connect` で接続を確定）
+
+認証方式は `auth.type` で指定します。
+
+| `auth.type` | 必要フィールド | 送出ヘッダー |
+|---|---|---|
+| `bearer` / `token` | `token` | `Authorization: Bearer <token>` |
+| `apiKey` | `key`（`headerName` 任意） | `X-API-Key: <key>` または指定ヘッダー |
+| `basic` | `username`, `password` | `Authorization: Basic <base64>` |
+| `header` | `headers`（任意の map） | 指定したヘッダーをそのまま |
+| `oauth` | なし | `start_mcp_oauth` で取得した URL をブラウザで開く |
+| `none` | なし | なし |
+
+登録済み接続は `NOTION_MCP_REGISTRY_FILE`（既定はメモリ内のみ）に mode 0600 で保存され、
+`list_mcp_connections` / `get_mcp_connection_status` から参照できます。serverUrl は https または localhost のみ許可します。
+
+## 添付ファイル
+
+`notion_ai_chat` に `attachments` を渡すと、transcript の user step に添付として付与します。
+
+```json
+{
+  "prompt": "このメモを要約して",
+  "attachments": [{ "name": "notes.md", "text": "..." }]
+}
+```
+
+添付がある場合は context step の `surface` を `workflows` に切り替えます（UI と同じ振る舞い）。
 
 ## 既知の制限
 
