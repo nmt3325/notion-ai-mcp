@@ -97,3 +97,29 @@ npm run build
 - ページ途中 cursor
 - 初回/継続 chat body
 - MCP initialize / tools/list / tools/call
+
+## バンドル解析の手順（ログイン不要）
+
+1. ログインページを `wget` で取得し、`/_assets/*.js` を抽出する。
+2. `app-*.js` に含まれる webpack の chunk マップ（`{id:"hash"}` の列、2099 件）を正規表現で抽出する。
+3. `/_assets/<id>-<hash>.js` を並列ダウンロードする（`xargs -P 32`、24 秒で 960 ファイル / 47MB）。
+4. `grep` で目的の識別子を探す。例: `oatmeal-cookie` → 9 chunk、うち model registry は 1 chunk。
+
+この手順で model registry、workflow config キー、MCP 接続 UI のリクエスト形状を復元できます。
+
+## クレジット枯渇の検出
+
+無料プランの上限に達するとストリームに次のイベントが流れます。
+
+```json
+{ "type": "premium-feature-unavailable",
+  "featureAvailability": { "limit": { "type": "cumulative", "total": 75, "current": 78 } } }
+```
+
+実測例: `animationsaver’s Space` で 78/75。これを検出して workspace ローテーションにつなげています。
+なお、クレジット枯渇と MCP モジュールの可視性は無関係であることを、クレジットのある別 workspace で確認済みです。
+
+## 環境失効からの復旧（2026-08-07）
+
+ephemeral 環境の TTL 失効で v0.3.0〜0.7.4 の未プッシュコミット列を全損しました。
+対策として、作業単位ごとに `git push` する運用に変更しています。
