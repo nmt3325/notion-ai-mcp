@@ -37,6 +37,7 @@ export function loadConfig(): NotionConfig {
   const tokenV2 = optional("NOTION_TOKEN_V2", fileString(file, "token_v2"));
   if (!tokenV2) throw new Error("NOTION_TOKEN_V2 or NOTION_ACCOUNT_FILE with token_v2 is required");
   const fullCookie = optional("NOTION_FULL_COOKIE", fileString(file, "full_cookie"));
+  const pinnedSpaceId = optional("NOTION_PINNED_SPACE_ID", fileString(file, "pinned_space_id"));
   const maxRetries = Number(optional("NOTION_MAX_WORKSPACE_RETRIES", "5"));
   const maxAttachmentBytes = Number(optional("NOTION_MAX_ATTACHMENT_BYTES", String(20 * 1024 * 1024)));
   if (!Number.isSafeInteger(maxAttachmentBytes) || maxAttachmentBytes <= 0) throw new Error("NOTION_MAX_ATTACHMENT_BYTES must be a positive safe integer");
@@ -61,7 +62,8 @@ export function loadConfig(): NotionConfig {
       clientVersion: optional("NOTION_CLIENT_VERSION", fileString(file, "client_version") || "23.13.20260313.1423"),
       browserId: optional("NOTION_BROWSER_ID", fileString(file, "browser_id") || randomUUID()),
       deviceId: optional("NOTION_DEVICE_ID", fileString(file, "device_id") || randomUUID()),
-      ...(fullCookie ? { fullCookie } : {})
+      ...(fullCookie ? { fullCookie } : {}),
+      ...(pinnedSpaceId ? { pinnedSpaceId } : {})
     }
   };
 }
