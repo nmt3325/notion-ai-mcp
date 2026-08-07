@@ -10,6 +10,8 @@
 | 用途 | Method | Path | 認証 | リクエスト | レスポンス |
 |---|---|---|---|---|---|
 | アカウント/ワークスペース検出 | POST | `/api/v3/loadUserContent` | `token_v2` Cookie | `{}` | JSON `recordMap` (`notion_user`, `user_root`, `space`, `user_settings`) |
+| workspace base作成 | POST | `/api/v3/createSpace` | 同上 | name, plan, persona, device, source | JSON `spaceId` |
+| workspace join transaction | POST | `/api/v3/saveTransactionsFanout` | 同上 | `space_view`作成 + user root 2 list更新 | JSON `{}` |
 | Notion AI 送信 | POST | `/api/v3/runInferenceTranscript` | `token_v2` Cookie + user/space headers | workflow transcript | `application/x-ndjson`。環境差に備えて SSE `data:` 形式も許容 |
 | 会話一覧 | POST | `/api/v3/getInferenceTranscriptsForUser` | 同上 | space pointer、種別、cursor | JSON `transcripts`, `recordMap.thread`, `nextCursor`, `hasMore` |
 | メッセージ本体 | POST | `/api/v3/syncRecordValuesMain` | 同上 | `thread_message` pointer 配列 | JSON `recordMap.thread_message` |
@@ -81,6 +83,59 @@ tool use は回答本文へ混ぜない。`inputTokens` / `outputTokens` は完�
 
 互換性のため、同じ JSON が `data: {...}` で包まれた SSE と `data: [DONE]` もパーサーが
 受理する。
+
+## Workspace作成と検証
+
+公式Web clientが送るbase request:
+
+```json
+{
+  "name": "New workspace",
+  "planType": "personal",
+  "planSelection": "personal",
+  "initialPersona": "other",
+  "deviceId": "<device-id>",
+  "deviceType": "web-desktop",
+  "source": "sidebar_switcher"
+}
+```
+
+`/createSpace` が返した `spaceId` のspace short IDを埋め込んだversion-8 UUIDを
+`space_view` IDとして生成する。続く `/saveTransactionsFanout` は新しいworkspaceを
+transaction bodyの`spaceId`と`cellTarget.spaceWithId`に指定し、次の3 operationを1 transactionで送る。
+
+1. `space_view` recordを`set` (`parent_table:"user_root"`, `alive:true`, `joined:true`)
+2. `user_root.space_views`へ`listAfter`
+3. `user_root.space_view_pointers`へ`keyedObjectListAfter`
+
+このfanout requestのHTTP `x-notion-space-id`は、まだ有効な**現在のworkspace**に維持する。
+新しいworkspaceをrouting headerへ先に設定すると、cell provisioning前のrequestを誤ったcellへ送る可能性がある。
+
+作成後はbounded pollingで次をすべて確認する。
+
+- 生成IDが`user_root.space_views`にちょうど1回存在
+- `{table:"space_view", id, spaceId}`が`space_view_pointers`にちょうど1回存在
+- 新しい`space` recordが存在
+- `syncRecordValuesMain`で取得した`space_view`の`id`, `space_id`, `parent_id`,
+  `parent_table`, `alive`, `joined`が期待値と一致
+
+pointerだけ見える状態は成功ではない。完全検証後にだけactive workspaceの切り替え、pin、
+account JSONの更新を行う。account JSON更新ではcredentialと未知フィールドを保持し、mode `0600`にする。
+
+重複作成を避けるため、`/createSpace`は1回だけ送る。base作成後のtransaction失敗や検証timeoutも
+自動再試行しない。HTTP errorはstatus、最大2 KiBのbody、存在する場合は`Retry-After`を返す。
+
+### `space_view` record検証request
+
+```json
+{
+  "requests": [{
+    "pointer": { "table": "space_view", "id": "<space-view-id>" },
+    "version": -1
+  }],
+  "spacePointer": { "table": "space", "id": "<current-space-id>" }
+}
+```
 
 ## Agent Service chat と添付
 

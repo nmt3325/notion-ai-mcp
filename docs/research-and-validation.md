@@ -138,8 +138,33 @@ owner module `265981` と実callerから次を復元した。
 - `getThreadTranscript` の `put/patch/remove/rewind/session/session_status/committed` protocol
 
 v0.8.0では `upload_attachment` と `download_attachment` を追加し、compiled stdio serverは18 toolsを列挙した。
-ローカル回帰は45 testsで、single-part、multipart byte境界、ETag必須、checksum、path traversal、symlink、
-byte上限、Agent Service 2-turn file chatを含めて全件成功した。
+ローカル回帰は54 testsで、single-part、multipart byte境界、ETag必須、checksum、path traversal、symlink、
+byte上限、Agent Service 2-turn file chatに加え、workspace partial commit・delayed visibility・429/502・
+no-retryを含めて全件成功した。
 
-この時点の新しいephemeral環境には認証済みNotion sessionがないため、実アカウントでのattachment
-upload → file chat → download checksum lifecycleは未実施であり、次のlive validation項目として残している。
+認証復旧後、既存workspaceでAgent Service upload URL作成がHTTP 500、direct thread作成がHTTP 400に
+なることを確認した。利用可能quotaを持つ新規workspaceでのupload → file chat → download checksum
+lifecycleは、workspace作成rate limitの解除後に行うlive validation項目として残している。
+
+## 2026-08-07 Workspace transaction・record-level検証
+
+認証済みWeb UI、Rspack runtime、model factoryをローカル解析し、公式workspace作成手順を復元した。
+base `/createSpace` の後に、space short IDを埋め込んだ`space_view` UUIDを生成し、`set`, `listAfter`,
+`keyedObjectListAfter`の3 operationを`saveTransactionsFanout`へ送る。transaction bodyは新workspaceを
+対象にする一方、HTTP routing headerは現在の有効workspaceに維持する。
+
+初期実装がroot pointerの存在だけで成功判定した結果、`space_view` recordを欠くdangling entryが発生した。
+read-only probeでrecord欠落を確認してから、対象IDがrootの両listにちょうど1件あることを検証し、
+`listRemove`と`keyedObjectListRemove`を1 transactionで送ってdangling entryだけを削除した。
+既存の正常なworkspaceとactive accountは変更していない。
+
+修正版はroot 2 listの一意性、新しいspace record、`syncRecordValuesMain`で取得する完全な`space_view`
+recordをすべて確認する。pointer-only、duplicate、missing recordは失敗し、切り替え・pin・永続化を行わない。
+base作成後の失敗はpartial creationとして報告し、`/createSpace`もtransactionも再試行しない。
+
+compiled stdio serverで1回だけlive作成を試したところ、`/createSpace`はHTTP 429を返した。実装は
+response bodyを保持して終了し、再試行しなかった。前後のdiscoverable workspace数とactive workspaceは
+不変で、account fileはmode `0600`、credentialも保持された。rate limit解除までは追加作成を行わない。
+
+commit `2d3eace`に対するself-reporting CIはNode 24でTypeScript check、54/54 tests、build、
+18-tool compiled stdio smoke、diff checkの全項目に成功した。

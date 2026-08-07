@@ -193,7 +193,13 @@ export class NotionClient {
         browserId: sharedAccount.browserId || randomUUID(),
         deviceId: sharedAccount.deviceId || randomUUID()
       });
-      this.workspaceManager = new WorkspaceManager(sharedAccount, config.apiBase, fetchImpl, config.accountFilePath);
+      this.workspaceManager = new WorkspaceManager(
+        sharedAccount,
+        config.apiBase,
+        fetchImpl,
+        config.accountFilePath,
+        { requestTimeoutMs: config.requestTimeoutMs }
+      );
     }
   }
 
