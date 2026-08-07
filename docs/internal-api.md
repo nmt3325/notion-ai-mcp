@@ -326,9 +326,9 @@ message ID を100件ずつ取得する。表示対象は次だけである。
 | endpoint | body | 用途 |
 |---|---|---|
 | `checkMcpOAuthSupport` | `{ serverUrl }` | OAuth 対応の確認 |
-| `validateMcpConnection` | `{ serverUrl, spaceId, authHeaders }` | 接続検証と tool 一覧取得 |
+| `validateMcpConnection` | `{ serverUrl, spaceId, authHeaders, approvalIntent }` | 接続検証と tool 一覧取得 |
 | `saveTransactionsFanout` | `{ requestId, transactions: [...] }` | `workflow_module` の作成/更新/削除 |
-| `postWorkflowsMcpServerConnect` | `{ integrationId, spaceId, authHeaders, initiationContext }` | 接続確定 |
+| `postWorkflowsMcpServerConnect` | `{ integrationId, spaceId, authHeaders, initiationContext, approvalIntent }` | 接続確定 |
 | `initiateMcpOAuth` | `{ serverUrl, spaceId, integrationId, name? }` | `authorizationUrl` を返す |
 | `getPreconfiguredMcpServers` | `{}` | Notion 標準の MCP カタログ（21 件） |
 
@@ -339,6 +339,17 @@ runWriteToolsAutomatically, serverInstructions, serverUrl, tools`。
 
 削除は `saveTransactionsFanout` で `args: { alive: false }`、更新は `path: ["data"]` と `path: []` の
 2 オペレーションを送ります。
+
+### Personal Agent MCP 永続化とstatus
+
+Personal/global MCP接続は2 recordを協調更新する。
+
+1. `workflow_module`はcurrent model factoryと同じ必須fieldで作成する。`created_time`と`last_edited_time`は1つのtimestampを共有し、creator/editor tableとparent tableはいずれも`notion_user`、parent IDはcurrent userとする。
+2. current `space_view`を`syncRecordValuesMain`で読み、settings全体と既存`agent_chat_modules`を保持したまま、`{pointer:{table:"workflow_module",id,spaceId},defaultEnabled:false}`を重複なく追加する。
+
+connectはこの2 commitの間で実行する。connect、visibility commit、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、そのmodule IDに一致するpointerだけを削除する。removeもdead + unlinkを1 transactionで行い、他のsettings/module pointerは変更しない。registry recordのworkspace/viewがactive contextと異なるupdate/remove/statusは拒否する。
+
+Personal Agent moduleには`workflowId`がないため、`getMcpOAuthStatus`は使用できない。statusは`syncRecordValues`で`workflow_module`と参照先`external_connection`を読み、space-view linkageと合わせて判定する。pointerなしは`needs_setup`、external connectionの`authenticated:false`は`needs_reauth`、liveかつlinkedでそれ以外は`connected`、deadまたはunlinkedは`disconnected`となる。2026-08-07のcompiled-stdio live lifecycleと63/63 testsで検証した。
 
 ## モデルレジストリ
 

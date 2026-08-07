@@ -8,13 +8,48 @@ import {
   normalizeServerUrl, normalizeTransport, toolNamesFrom, type McpApi
 } from "../src/mcp-connections.js";
 
-function fakeApi(responses: Record<string, Record<string, unknown>> = {}): { api: McpApi; calls: Array<{ endpoint: string; body: Record<string, unknown> }> } {
+const context = { spaceId: "space-1", userId: "user-1", spaceViewId: "view-1" };
+const existingModule = { pointer: { table: "workflow_module", id: "existing-module", spaceId: context.spaceId }, defaultEnabled: false };
+function spaceViewResponse(agentChatModules: unknown[] = [existingModule]): Record<string, unknown> {
+  return { recordMap: { space_view: { [context.spaceViewId]: { value: {
+    id: context.spaceViewId,
+    space_id: context.spaceId,
+    alive: true,
+    settings: { retained_setting: { enabled: true }, agent_chat_modules: agentChatModules }
+  } } } } };
+}
+type FakeResponse = Record<string, unknown> | Error;
+function fakeApi(responses: Record<string, FakeResponse> = {}): { api: McpApi; calls: Array<{ endpoint: string; body: Record<string, unknown> }> } {
   const calls: Array<{ endpoint: string; body: Record<string, unknown> }> = [];
   const api: McpApi = {
-    post: async (endpoint, body) => { calls.push({ endpoint, body }); return responses[endpoint] ?? {}; },
-    spaceId: async () => "space-1"
+    post: async (endpoint, body) => {
+      calls.push({ endpoint, body });
+      const configured = responses[endpoint];
+      if (configured instanceof Error) throw configured;
+      if (configured) return configured;
+      if (endpoint === "syncRecordValuesMain") return spaceViewResponse();
+      if (endpoint === "syncRecordValues") {
+        const request = (body.requests as Array<Record<string, unknown>>)[0];
+        const pointer = request?.pointer as Record<string, unknown>;
+        const table = String(pointer?.table ?? "");
+        const id = String(pointer?.id ?? "");
+        if (table === "workflow_module") return { recordMap: { workflow_module: { [id]: { value: {
+          id, alive: true, module_type: "mcpServer", space_id: context.spaceId,
+          data: { preferredTransport: "streamableHttp", connectionPointer: { table: "external_connection", id: "connection-1", spaceId: context.spaceId } }
+        } } } } };
+        if (table === "external_connection") return { recordMap: { external_connection: { [id]: { value: {
+          id, alive: true, space_id: context.spaceId, data: { authenticated: true }
+        } } } } };
+      }
+      return {};
+    },
+    context: async () => context
   };
   return { api, calls };
+}
+function operations(call: { body: Record<string, unknown> } | undefined): Array<Record<string, unknown>> {
+  const transactions = call?.body.transactions as Array<Record<string, unknown>> | undefined;
+  return (transactions?.[0]?.operations as Array<Record<string, unknown>> | undefined) ?? [];
 }
 
 test("auth helpers cover every supported auth style and current wire shape", () => {
@@ -52,26 +87,50 @@ test("toolNamesFrom accepts arrays and wrapped payloads", () => {
   assert.deepEqual(toolNamesFrom(null), []);
 });
 
-test("add() validates, creates the module, then connects it with current payloads", async () => {
+test("add() uses the current factory record and preserves space-view modules", async () => {
   const { api, calls } = fakeApi({ validateMcpConnection: { success: true, tools: [{ name: "ask_question" }, { name: "read_wiki_contents" }] } });
   const manager = new McpConnectionManager(api);
   const record = await manager.add({ name: "DeepWiki", serverUrl: "https://mcp.example.com/mcp", auth: { type: "bearer", token: "secret" } });
-  assert.deepEqual(calls.map((call) => call.endpoint), ["validateMcpConnection", "saveTransactionsFanout", "postWorkflowsMcpServerConnect"]);
+  assert.deepEqual(calls.map((call) => call.endpoint), [
+    "validateMcpConnection", "saveTransactionsFanout", "postWorkflowsMcpServerConnect", "syncRecordValuesMain", "saveTransactionsFanout"
+  ]);
   assert.deepEqual(record.toolNames, ["ask_question", "read_wiki_contents"]);
   assert.equal(record.authType, "bearer");
   assert.equal(record.transport, "streamableHttp");
+  assert.equal(record.spaceViewId, context.spaceViewId);
   assert.deepEqual(calls[0]?.body.authHeaders, [{ name: "Authorization", value: "Bearer secret" }]);
   assert.equal(calls[0]?.body.approvalIntent, "approve_on_connect");
-  const create = calls[1]?.body as { transactions: Array<{ operations: Array<{ pointer: { table: string }; args: Record<string, unknown> }> }> };
-  const operation = create.transactions[0]?.operations[0];
-  assert.equal(operation?.pointer.table, "workflow_module");
-  assert.equal((operation?.args as { module_type: string }).module_type, "mcpServer");
-  const data = (operation?.args as { data: Record<string, unknown> }).data;
+
+  const createOperation = operations(calls[1])[0];
+  assert.equal((createOperation?.pointer as Record<string, unknown>)?.table, "workflow_module");
+  const createArgs = createOperation?.args as Record<string, unknown>;
+  assert.equal(createArgs.module_type, "mcpServer");
+  assert.equal(createArgs.created_by_id, context.userId);
+  assert.equal(createArgs.created_by_table, "notion_user");
+  assert.equal(createArgs.last_edited_by_id, context.userId);
+  assert.equal(createArgs.last_edited_by_table, "notion_user");
+  assert.equal(createArgs.parent_id, context.userId);
+  assert.equal(createArgs.parent_table, "notion_user");
+  assert.equal(typeof createArgs.created_time, "number");
+  assert.equal(createArgs.created_time, createArgs.last_edited_time);
+  const data = createArgs.data as Record<string, unknown>;
   assert.equal(data.preferredTransport, "streamableHttp");
+
   const connect = calls[2]?.body as { authHeaders: Array<{ name: string; value: string }>; initiationContext: string; approvalIntent: string };
   assert.deepEqual(connect.authHeaders, [{ name: "Authorization", value: "Bearer secret" }]);
   assert.equal(connect.initiationContext, "connect");
   assert.equal(connect.approvalIntent, "approve_on_connect");
+
+  const settingsOperation = operations(calls[4])[0];
+  assert.equal((settingsOperation?.pointer as Record<string, unknown>)?.table, "space_view");
+  assert.deepEqual(settingsOperation?.path, ["settings"]);
+  assert.equal(settingsOperation?.command, "update");
+  const settingsArgs = settingsOperation?.args as Record<string, unknown>;
+  assert.deepEqual(settingsArgs.retained_setting, { enabled: true });
+  const linked = settingsArgs.agent_chat_modules as Array<Record<string, unknown>>;
+  assert.equal(linked.length, 2);
+  assert.deepEqual(linked[0], existingModule);
+  assert.equal(((linked[1]?.pointer as Record<string, unknown>)?.id), record.id);
 });
 
 test("add() supports an unauthenticated MCP server with an empty header list", async () => {
@@ -83,20 +142,47 @@ test("add() supports an unauthenticated MCP server with an empty header list", a
   assert.deepEqual(calls[2]?.body.authHeaders, []);
 });
 
-test("remove() marks the module dead in Notion", async () => {
+test("add() deactivates and unlinks a module when connect fails", async () => {
+  const { api, calls } = fakeApi({
+    validateMcpConnection: { success: true, tools: [{ name: "ping" }] },
+    postWorkflowsMcpServerConnect: new Error("connect failed")
+  });
+  const manager = new McpConnectionManager(api);
+  await assert.rejects(() => manager.add({ name: "Broken", serverUrl: "https://mcp.example.com/mcp" }), /connect failed/);
+  assert.deepEqual(calls.map((call) => call.endpoint), [
+    "validateMcpConnection", "saveTransactionsFanout", "postWorkflowsMcpServerConnect", "syncRecordValuesMain", "saveTransactionsFanout"
+  ]);
+  const createdId = ((operations(calls[1])[0]?.pointer as Record<string, unknown>)?.id);
+  const cleanup = operations(calls[4]);
+  assert.equal((cleanup[0]?.pointer as Record<string, unknown>)?.id, createdId);
+  assert.deepEqual(cleanup[0]?.args, { alive: false });
+  const remaining = ((cleanup[1]?.args as Record<string, unknown>).agent_chat_modules as Array<Record<string, unknown>>);
+  assert.deepEqual(remaining, [existingModule]);
+});
+
+test("remove() marks the module dead and preserves unrelated space-view settings", async () => {
   const { api, calls } = fakeApi();
   const manager = new McpConnectionManager(api);
   await manager.remove("module-1");
-  assert.deepEqual(calls.map((call) => call.endpoint), ["saveTransactionsFanout"]);
-  const body = calls[0]?.body as { transactions: Array<{ operations: Array<{ args: Record<string, unknown> }> }> };
-  assert.deepEqual(body.transactions[0]?.operations[0]?.args, { alive: false });
+  assert.deepEqual(calls.map((call) => call.endpoint), ["syncRecordValuesMain", "saveTransactionsFanout"]);
+  const cleanup = operations(calls[1]);
+  assert.deepEqual(cleanup[0]?.args, { alive: false });
+  assert.deepEqual((cleanup[1]?.args as Record<string, unknown>).retained_setting, { enabled: true });
+  assert.deepEqual((cleanup[1]?.args as Record<string, unknown>).agent_chat_modules, [existingModule]);
 });
 
-test("status uses the current moduleId payload key", async () => {
-  const { api, calls } = fakeApi();
+test("status derives global-module health without the workflow-only OAuth endpoint", async () => {
+  const linked = { pointer: { table: "workflow_module", id: "module-1", spaceId: context.spaceId }, defaultEnabled: false };
+  const { api, calls } = fakeApi({ syncRecordValuesMain: spaceViewResponse([existingModule, linked]) });
   const manager = new McpConnectionManager(api);
-  await manager.status("module-1");
-  assert.deepEqual(calls[0], { endpoint: "getMcpOAuthStatus", body: { moduleId: "module-1", spaceId: "space-1" } });
+  const status = await manager.status("module-1");
+  assert.deepEqual(calls.map((call) => call.endpoint), ["syncRecordValuesMain", "syncRecordValues", "syncRecordValues"]);
+  assert.equal(status.status, "connected");
+  assert.equal(status.connected, true);
+  assert.equal(status.alive, true);
+  assert.equal(status.linked, true);
+  assert.equal(status.transport, "streamableHttp");
+  assert.equal((status.connectionPointer as Record<string, unknown>).table, "external_connection");
 });
 
 test("registry persists connections to disk", () => {
@@ -104,7 +190,7 @@ test("registry persists connections to disk", () => {
   try {
     const path = join(dir, "registry.json");
     const registry = new McpRegistry(path);
-    registry.upsert({ id: "a", name: "A", serverUrl: "https://example.com/mcp", spaceId: "s", authType: "bearer", transport: "streamableHttp", toolNames: [], createdAt: new Date().toISOString() });
+    registry.upsert({ id: "a", name: "A", serverUrl: "https://example.com/mcp", spaceId: "s", spaceViewId: "v", authType: "bearer", transport: "streamableHttp", toolNames: [], createdAt: new Date().toISOString() });
     assert.equal(new McpRegistry(path).list().length, 1);
     assert.equal(registry.remove("a"), true);
     assert.equal(new McpRegistry(path).list().length, 0);
