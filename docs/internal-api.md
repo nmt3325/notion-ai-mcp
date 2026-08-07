@@ -237,6 +237,27 @@ thread fileのdownloadは `getFileContentURLForAgentThread({spaceId,threadId,fil
 が返す `{url,file}` を使用する。signed URLはHTTPS（localhostだけHTTP可）、redirect禁止、request timeout付きで
 取得し、metadataのsizeとSHA-256をdownload bytesに対して検証する。
 
+legacy artifactは、元URLとpermission pointerが取得済みの場合に次のrequestで再署名する。
+
+```json
+{
+  "urls": [{
+    "url": "<original-file-url>",
+    "download": true,
+    "downloadName": "artifact.md",
+    "permissionRecord": {
+      "table": "thread",
+      "id": "<thread-id>",
+      "spaceId": "<space-id>"
+    }
+  }]
+}
+```
+
+`getSignedFileUrls`のresponseは入力順の `signedUrls` array。legacy downloadはexactly one URLを要求し、
+permissionRecordのspaceIdがactive workspaceと異なる場合は署名request前に拒否する。署名後のGETは
+Agent Service downloadと同じtimeout・redirect・byte-limit・safe-output制約を使い、SHA-256を計算して返す。
+
 ## `getInferenceTranscriptsForUser`
 
 ```json

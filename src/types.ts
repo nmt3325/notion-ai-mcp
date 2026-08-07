@@ -11,4 +11,5 @@ export interface ChatAttachment { name:string; url?:string|undefined; text?:stri
 
 export interface AgentUploadedFile { id:string; filename:string; media_type:string; size_bytes:number; sha256?:string|undefined }
 export interface AttachmentUploadResult { fileId:string; fileName:string; mediaType:string; sizeBytes:number; sha256?:string|undefined; target:{type:"user"}|{type:"thread";threadId:string}; file:AgentUploadedFile }
-export interface AttachmentDownloadResult { fileId:string; fileName:string; mediaType:string; sizeBytes:number; path?:string|undefined; base64?:string|undefined; sha256?:string|undefined }
+export interface LegacyAttachmentDownloadInput { url:string; fileName:string; mimeType?:string|undefined; permissionRecord:{table:string;id:string;spaceId:string} }
+export interface AttachmentDownloadResult { source:"agent_service"|"legacy_signed_url"; fileId?:string|undefined; fileName:string; mediaType:string; sizeBytes:number; path?:string|undefined; base64?:string|undefined; sha256?:string|undefined }

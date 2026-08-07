@@ -116,19 +116,30 @@ export function createServer(client: NotionClient): McpServer {
 
   server.registerTool("download_attachment", {
     title: "Download an attachment",
-    description: "Download an Agent Service thread file to a safe local path and/or return base64, enforcing the configured byte limit and checksum.",
+    description: "Download either an Agent Service thread file (conversationId + fileId) or a legacy Notion artifact (legacy URL + permissionRecord) to a safe local path and/or return base64.",
     inputSchema: {
-      conversationId: z.string().uuid(),
-      fileId: z.string().min(1),
+      conversationId: z.string().uuid().optional().describe("Agent Service conversation ID; provide together with fileId"),
+      fileId: z.string().min(1).optional().describe("Agent Service file ID; provide together with conversationId"),
+      legacy: z.object({
+        url: z.string().min(1).max(8192).describe("Original HTTPS or root-relative Notion file URL"),
+        fileName: z.string().min(1).max(255).describe("Plain output/download file name"),
+        mimeType: z.string().min(1).max(255).optional(),
+        permissionRecord: z.object({
+          table: z.string().min(1).max(64).regex(/^[a-z][a-z0-9_]*$/),
+          id: z.string().uuid(),
+          spaceId: z.string().uuid()
+        })
+      }).optional().describe("Legacy getSignedFileUrls mode; mutually exclusive with conversationId/fileId"),
       outputPath: z.string().min(1).optional().describe("Destination path under NOTION_ATTACHMENT_ROOT; defaults to downloads/<filename>"),
       returnBase64: z.boolean().default(false),
       overwrite: z.boolean().default(false)
     }
   }, async (input) => result(await client.downloadAttachment({
-    conversationId: input.conversationId,
-    fileId: input.fileId,
     returnBase64: input.returnBase64,
     overwrite: input.overwrite,
+    ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+    ...(input.fileId ? { fileId: input.fileId } : {}),
+    ...(input.legacy ? { legacy: input.legacy } : {}),
     ...(input.outputPath ? { outputPath: input.outputPath } : {})
   })));
 

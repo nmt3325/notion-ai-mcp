@@ -347,6 +347,28 @@ download例:
 }
 ```
 
+legacy artifact download例（`conversationId` / `fileId`とは排他的）:
+
+```json
+{
+  "legacy": {
+    "url": "<original Notion file URL>",
+    "fileName": "artifact.md",
+    "mimeType": "text/markdown",
+    "permissionRecord": {
+      "table": "thread",
+      "id": "<thread UUID>",
+      "spaceId": "<active workspace UUID>"
+    }
+  },
+  "returnBase64": false
+}
+```
+
+legacy modeは公式Web clientと同じ `getSignedFileUrls` request（`download:true`）を使います。
+permission recordのworkspaceはactive workspaceと一致する必要があり、返されたsigned URLにもtimeout、
+redirect拒否、byte上限、安全な出力pathを適用します。downloadしたbytesのSHA-256を常に返します。
+
 upload は `createAgentServiceFileUploadURL` の `single_part` / `multipart` descriptorだけを許可します。
 multipartはpart数・一意な連番・file境界・method・URLを**転送開始前に全件検証**し、各partの `ETag` を
 `completeAgentServiceFileUpload` に渡します。signed URL requestはredirectを拒否し、
