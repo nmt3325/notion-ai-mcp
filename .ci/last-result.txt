@@ -1,7 +1,7 @@
-commit=2d3eacec90a98c5dc3125e26e2a749b72eeb60dc
-checked_at=2026-08-07T09:13:21Z
-node=v24.18.0
-npm=11.16.0
+commit=c78fba763194660138b1f3f25ab21d6fb208ec09
+checked_at=2026-08-07T09:18:25Z
+node=v24.19.0
+npm=11.17.0
 check_status=0
 test_status=0
 build_status=0
@@ -19,60 +19,60 @@ diff_status=0
 > notion-ai-mcp@0.8.0 test
 > node --import tsx --test tests/**/*.test.ts
 
-✔ Agent Service transcript applies append patches and detects completion (2.271984ms)
-✔ Agent Service transcript handles pending patches, rewinds, and errors (0.604501ms)
-✔ Agent Service transcript rejects invalid rewind and orphan provisional append (0.529599ms)
-✔ NotionClient performs single-part Agent Service upload and completion (38.523384ms)
-✔ NotionClient uploads multipart bytes and completes with sorted ETags (5.061874ms)
-✔ NotionClient rejects multipart upload parts without ETags (2.741011ms)
-✔ NotionClient downloads thread files, verifies checksum, and writes safely (62.125468ms)
-✔ file-ID chat uses current Agent Service create and send event content (7.984544ms)
-✔ attachment input accepts safe paths and strict base64 (14.32391ms)
-✔ attachment output rejects traversal and symlink parents (7.085169ms)
-✔ download reader enforces declared and streamed byte limits (37.600739ms)
-✔ Streamable HTTP server requires bearer auth and executes MCP tools (198.532465ms)
-✔ auth helpers cover every supported auth style and current wire shape (1.771791ms)
-✔ normalizeServerUrl requires https outside localhost (0.568627ms)
-✔ normalizeTransport accepts current values and old http alias (0.170727ms)
-✔ toolNamesFrom accepts arrays and wrapped payloads (0.231388ms)
-✔ add() validates, creates the module, then connects it with current payloads (1.164885ms)
-✔ add() supports an unauthenticated MCP server with an empty header list (0.302436ms)
-✔ remove() marks the module dead in Notion (0.284569ms)
-✔ status uses the current moduleId payload key (0.299321ms)
-✔ registry persists connections to disk (0.917543ms)
-✔ MCP server advertises chat, workspace, and MCP management tools (27.473449ms)
-✔ notion_ai_chat forwards model and uploaded file IDs and returns the answer text (9.743205ms)
-✔ attachment tools forward upload and download options (8.005697ms)
-✔ management tools reach the workspace and MCP managers (8.22357ms)
-✔ toMcpAuth rejects incomplete credentials (0.618663ms)
-✔ tier aliases map to internal model IDs (3.079872ms)
-✔ vendor names from the Notion model registry resolve to internal IDs (2.908804ms)
-✔ unknown model values pass through and blanks fall back (1.318197ms)
-✔ NOTION_MODEL_ALIASES overrides the builtin table (1.097825ms)
-✔ listModels groups aliases per model (1.557708ms)
-✔ Notion rich text is converted to Markdown (0.996342ms)
-✔ conversation records keep only user-visible user and assistant text (0.892725ms)
-✔ cumulative agent-inference NDJSON returns only the final text and usage (0.439312ms)
-✔ SSE data framing is accepted in addition to native NDJSON (0.220803ms)
-✔ patch NDJSON ignores thinking and aggregates text (0.279361ms)
-✔ history endpoints use transcript listing then batched thread_message sync (24.663969ms)
-✔ list cursor preserves unreturned conversations within one Notion page (1.212147ms)
-✔ chat creates a workflow thread and continues it with a partial transcript (5.675284ms)
-✔ workspace switching and creation stay active in the same client process (4.075994ms)
-✔ listWorkspaces flags current, exhausted and pinned workspaces (25.416404ms)
-✔ switchWorkspace matches by id, dashless id and partial name (2.32914ms)
-✔ switchWorkspace rejects blank, unknown and inactivatable workspaces (1.64903ms)
-✔ createAndSwitchWorkspace creates, activates and optionally pins (3.007528ms)
-✔ restorePinnedWorkspace is a no-op when the pin is already current (0.705283ms)
-✔ markCurrentExhausted marks the active workspace as used up (0.664752ms)
-✔ account persistence retains credentials, unknown fields and the pinned workspace (1.659241ms)
-✔ workspace creation uses the official body and commits a discoverable space_view (1.316434ms)
-✔ workspace creation refuses success without a discoverable space_view (1.138105ms)
-✔ workspace creation rejects a pointer-only partial commit (1.530788ms)
-✔ workspace creation waits for both pointer and record visibility (1.275713ms)
-✔ workspace creation reports Retry-After and never retries createSpace (0.835019ms)
-✔ workspace transaction failures are not retried (0.6637ms)
-✔ space-scoped IDs preserve the workspace short ID (0.276907ms)
+✔ Agent Service transcript applies append patches and detects completion (1.964958ms)
+✔ Agent Service transcript handles pending patches, rewinds, and errors (0.721096ms)
+✔ Agent Service transcript rejects invalid rewind and orphan provisional append (0.617162ms)
+✔ NotionClient performs single-part Agent Service upload and completion (47.730936ms)
+✔ NotionClient uploads multipart bytes and completes with sorted ETags (7.267406ms)
+✔ NotionClient rejects multipart upload parts without ETags (3.440474ms)
+✔ NotionClient downloads thread files, verifies checksum, and writes safely (44.409856ms)
+✔ file-ID chat uses current Agent Service create and send event content (15.911909ms)
+✔ attachment input accepts safe paths and strict base64 (25.1462ms)
+✔ attachment output rejects traversal and symlink parents (7.656615ms)
+✔ download reader enforces declared and streamed byte limits (49.478189ms)
+✔ Streamable HTTP server requires bearer auth and executes MCP tools (233.199757ms)
+✔ auth helpers cover every supported auth style and current wire shape (2.494778ms)
+✔ normalizeServerUrl requires https outside localhost (0.758847ms)
+✔ normalizeTransport accepts current values and old http alias (0.232814ms)
+✔ toolNamesFrom accepts arrays and wrapped payloads (0.2997ms)
+✔ add() validates, creates the module, then connects it with current payloads (1.520669ms)
+✔ add() supports an unauthenticated MCP server with an empty header list (0.437968ms)
+✔ remove() marks the module dead in Notion (0.408382ms)
+✔ status uses the current moduleId payload key (0.442025ms)
+✔ registry persists connections to disk (1.208136ms)
+✔ MCP server advertises chat, workspace, and MCP management tools (37.360183ms)
+✔ notion_ai_chat forwards model and uploaded file IDs and returns the answer text (13.125154ms)
+✔ attachment tools forward upload and download options (15.589338ms)
+✔ management tools reach the workspace and MCP managers (11.017323ms)
+✔ toMcpAuth rejects incomplete credentials (0.768593ms)
+✔ tier aliases map to internal model IDs (4.133848ms)
+✔ vendor names from the Notion model registry resolve to internal IDs (4.405785ms)
+✔ unknown model values pass through and blanks fall back (2.008986ms)
+✔ NOTION_MODEL_ALIASES overrides the builtin table (1.119047ms)
+✔ listModels groups aliases per model (1.604241ms)
+✔ Notion rich text is converted to Markdown (1.095062ms)
+✔ conversation records keep only user-visible user and assistant text (0.934121ms)
+✔ cumulative agent-inference NDJSON returns only the final text and usage (0.52033ms)
+✔ SSE data framing is accepted in addition to native NDJSON (0.194913ms)
+✔ patch NDJSON ignores thinking and aggregates text (0.302664ms)
+✔ history endpoints use transcript listing then batched thread_message sync (26.318384ms)
+✔ list cursor preserves unreturned conversations within one Notion page (1.236967ms)
+✔ chat creates a workflow thread and continues it with a partial transcript (5.615981ms)
+✔ workspace switching and creation stay active in the same client process (4.249253ms)
+✔ listWorkspaces flags current, exhausted and pinned workspaces (26.533435ms)
+✔ switchWorkspace matches by id, dashless id and partial name (2.458153ms)
+✔ switchWorkspace rejects blank, unknown and inactivatable workspaces (1.457689ms)
+✔ createAndSwitchWorkspace creates, activates and optionally pins (2.666913ms)
+✔ restorePinnedWorkspace is a no-op when the pin is already current (0.640925ms)
+✔ markCurrentExhausted marks the active workspace as used up (0.928552ms)
+✔ account persistence retains credentials, unknown fields and the pinned workspace (1.511739ms)
+✔ workspace creation uses the official body and commits a discoverable space_view (1.334739ms)
+✔ workspace creation refuses success without a discoverable space_view (1.165312ms)
+✔ workspace creation rejects a pointer-only partial commit (1.670916ms)
+✔ workspace creation waits for both pointer and record visibility (1.293572ms)
+✔ workspace creation reports Retry-After and never retries createSpace (0.874501ms)
+✔ workspace transaction failures are not retried (0.634343ms)
+✔ space-scoped IDs preserve the workspace short ID (0.254224ms)
 ℹ tests 54
 ℹ suites 0
 ℹ pass 54
@@ -80,7 +80,7 @@ diff_status=0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 2975.829254
+ℹ duration_ms 4011.94866
 
 == npm run build ==
 
