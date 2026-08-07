@@ -67,6 +67,9 @@ jobs:
       - name: Research current attachment APIs with wget
         continue-on-error: true
         run: bash scripts/research-attachments.sh
+      - name: Extract current attachment endpoint payloads with wget
+        continue-on-error: true
+        run: bash scripts/research-attachment-endpoints.sh
       - name: Record validation and research results
         if: always()
         shell: bash
@@ -78,7 +81,7 @@ jobs:
           git config user.name github-actions
           git config user.email github-actions@github.com
           git add .ci/last-result.txt
-          for file in .ci/stdio-smoke.json .ci/attachment-research.txt; do if [ -f "$file" ]; then git add "$file"; fi; done
+          for file in .ci/stdio-smoke.json .ci/attachment-research.txt .ci/attachment-endpoints.txt; do if [ -f "$file" ]; then git add "$file"; fi; done
           git commit -m "ci: record validation for ${GITHUB_SHA::7} [skip ci]" || true
           git push
       - name: Propagate validation failure
