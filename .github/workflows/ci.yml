@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - ".ci/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Run validation and capture result
+        id: validation
+        shell: bash
+        run: |
+          set +e
+          npm run check > /tmp/check.log 2>&1
+          check_status=$?
+          npm test > /tmp/test.log 2>&1
+          test_status=$?
+          git diff --check > /tmp/diff.log 2>&1
+          diff_status=$?
+          overall=0
+          if [ "$check_status" -ne 0 ] || [ "$test_status" -ne 0 ] || [ "$diff_status" -ne 0 ]; then overall=1; fi
+          mkdir -p .ci
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "node=$(node -v)"
+            echo "npm=$(npm -v)"
+            echo "check_status=$check_status"
+            echo "test_status=$test_status"
+            echo "diff_status=$diff_status"
+            echo
+            echo "== npm run check =="
+            tail -200 /tmp/check.log
+            echo
+            echo "== npm test =="
+            tail -300 /tmp/test.log
+            echo
+            echo "== git diff --check =="
+            tail -100 /tmp/diff.log
+          } > .ci/last-result.txt
+          echo "overall=$overall" >> "$GITHUB_OUTPUT"
+      - name: Record validation result
+        if: always()
+        shell: bash
+        run: |
+          if [ ! -f .ci/last-result.txt ]; then
+            mkdir -p .ci
+            printf 'commit=%s\nchecked_at=%s\nsetup_or_install_failed=true\n' "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > .ci/last-result.txt
+          fi
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add .ci/last-result.txt
+          git commit -m "ci: record validation for ${GITHUB_SHA::7} [skip ci]" || true
+          git push
+      - name: Propagate validation failure
+        if: steps.validation.outputs.overall != '0'
+        run: exit 1
