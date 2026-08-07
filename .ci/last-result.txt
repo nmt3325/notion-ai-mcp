@@ -1,5 +1,5 @@
-commit=7d5d57227ed30c60332ad606e7e94a35a9b5888f
-checked_at=2026-08-07T01:21:07Z
+commit=3b348b8291ba94a1b615eebacb6cff5e3a3aef74
+checked_at=2026-08-07T01:24:45Z
 node=v24.18.0
 npm=11.16.0
 check_status=0
@@ -19,39 +19,39 @@ diff_status=0
 > notion-ai-mcp@0.7.5 test
 > node --import tsx --test tests/**/*.test.ts
 
-✔ Streamable HTTP server requires bearer auth and executes MCP tools (187.108983ms)
-✔ auth helpers cover every supported auth style and current wire shape (1.332607ms)
-✔ normalizeServerUrl requires https outside localhost (0.482152ms)
-✔ normalizeTransport accepts current values and old http alias (0.120077ms)
-✔ toolNamesFrom accepts arrays and wrapped payloads (0.174044ms)
-✔ add() validates, creates the module, then connects it with current payloads (0.878155ms)
-✔ add() supports an unauthenticated MCP server with an empty header list (0.238302ms)
-✔ remove() marks the module dead in Notion (0.230537ms)
-✔ status uses the current moduleId payload key (0.213091ms)
-✔ registry persists connections to disk (242.759786ms)
-✔ MCP server advertises chat, workspace, and MCP management tools (20.195456ms)
-✔ notion_ai_chat forwards model and attachments and returns the answer text (8.238223ms)
-✔ management tools reach the workspace and MCP managers (6.021927ms)
-✔ toMcpAuth rejects incomplete credentials (0.449948ms)
-✔ tier aliases map to internal model IDs (2.462071ms)
-✔ vendor names from the Notion model registry resolve to internal IDs (2.402592ms)
-✔ unknown model values pass through and blanks fall back (1.068605ms)
-✔ NOTION_MODEL_ALIASES overrides the builtin table (0.825048ms)
-✔ listModels groups aliases per model (1.282081ms)
-✔ Notion rich text is converted to Markdown (0.757271ms)
-✔ conversation records keep only user-visible user and assistant text (1.489759ms)
-✔ cumulative agent-inference NDJSON returns only the final text and usage (0.402364ms)
-✔ SSE data framing is accepted in addition to native NDJSON (0.126423ms)
-✔ patch NDJSON ignores thinking and aggregates text (0.242999ms)
-✔ history endpoints use transcript listing then batched thread_message sync (18.732373ms)
-✔ list cursor preserves unreturned conversations within one Notion page (0.932602ms)
-✔ chat creates a workflow thread and continues it with a partial transcript (3.629782ms)
-✔ listWorkspaces flags current, exhausted and pinned workspaces (18.392765ms)
-✔ switchWorkspace matches by id, dashless id and partial name (2.813015ms)
-✔ switchWorkspace rejects blank, unknown and inactivatable workspaces (1.357947ms)
-✔ createAndSwitchWorkspace creates, activates and optionally pins (0.676294ms)
-✔ restorePinnedWorkspace is a no-op when the pin is already current (0.636582ms)
-✔ markCurrentExhausted marks the active workspace as used up (0.725296ms)
+✔ Streamable HTTP server requires bearer auth and executes MCP tools (183.655589ms)
+✔ auth helpers cover every supported auth style and current wire shape (1.95095ms)
+✔ normalizeServerUrl requires https outside localhost (0.602133ms)
+✔ normalizeTransport accepts current values and old http alias (0.183072ms)
+✔ toolNamesFrom accepts arrays and wrapped payloads (0.256949ms)
+✔ add() validates, creates the module, then connects it with current payloads (1.229013ms)
+✔ add() supports an unauthenticated MCP server with an empty header list (0.293848ms)
+✔ remove() marks the module dead in Notion (0.321449ms)
+✔ status uses the current moduleId payload key (0.343251ms)
+✔ registry persists connections to disk (0.888675ms)
+✔ MCP server advertises chat, workspace, and MCP management tools (30.277683ms)
+✔ notion_ai_chat forwards model and attachments and returns the answer text (9.152509ms)
+✔ management tools reach the workspace and MCP managers (8.15593ms)
+✔ toMcpAuth rejects incomplete credentials (0.592275ms)
+✔ tier aliases map to internal model IDs (3.05983ms)
+✔ vendor names from the Notion model registry resolve to internal IDs (2.930068ms)
+✔ unknown model values pass through and blanks fall back (1.349809ms)
+✔ NOTION_MODEL_ALIASES overrides the builtin table (1.152701ms)
+✔ listModels groups aliases per model (1.663384ms)
+✔ Notion rich text is converted to Markdown (1.076719ms)
+✔ conversation records keep only user-visible user and assistant text (1.803085ms)
+✔ cumulative agent-inference NDJSON returns only the final text and usage (0.461822ms)
+✔ SSE data framing is accepted in addition to native NDJSON (0.186919ms)
+✔ patch NDJSON ignores thinking and aggregates text (0.31054ms)
+✔ history endpoints use transcript listing then batched thread_message sync (25.888462ms)
+✔ list cursor preserves unreturned conversations within one Notion page (1.314243ms)
+✔ chat creates a workflow thread and continues it with a partial transcript (4.535984ms)
+✔ listWorkspaces flags current, exhausted and pinned workspaces (25.245742ms)
+✔ switchWorkspace matches by id, dashless id and partial name (3.499864ms)
+✔ switchWorkspace rejects blank, unknown and inactivatable workspaces (1.817071ms)
+✔ createAndSwitchWorkspace creates, activates and optionally pins (1.005116ms)
+✔ restorePinnedWorkspace is a no-op when the pin is already current (0.855456ms)
+✔ markCurrentExhausted marks the active workspace as used up (1.03434ms)
 ℹ tests 33
 ℹ suites 0
 ℹ pass 33
@@ -59,7 +59,7 @@ diff_status=0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 1987.825257
+ℹ duration_ms 2227.800849
 
 == npm run build ==
 
