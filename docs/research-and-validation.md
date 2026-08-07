@@ -154,6 +154,26 @@ UUID pointer、active-workspace一致、invalid signer response、safe signed GE
 なることを確認した。利用可能quotaを持つ新規workspaceでのupload → file chat → download checksum
 lifecycleは、workspace作成rate limitの解除後に行うlive validation項目として残している。
 
+## 2026-08-07 Assistant-transcript upload fallback
+
+認証済みassistant UIが実際に読み込んだ714 JavaScript files（41,916,016 bytes）を`wget`で取得し、
+current upload implementationをローカル解析した。ブラウザcaptureでも
+`getUploadFileUrlForAssistantChatTranscriptUpload` HTTP 200、S3 multipart/form-data POST HTTP 204、
+preview用`getSignedFileUrls` HTTP 200を確認した。requestはthread pointer、content length/type、
+UUID upload name、`createThread:true`を含み、responseは`url`, `signedGetUrl`, `signedUploadPostUrl`,
+array-shaped `postHeaders`, ordered `fields`, `chatId`を返した。form fieldが先、fileが最後である。
+
+CSV processingでは`processAgentAttachment`の`enqueueTask`がHTTP 200になった一方、240秒後もUIのsend buttonは
+disabledのままで、file-backed inference requestは取得できなかった。captureはallowlisted shapeだけをmode 0600で保存し、
+raw signed URL、policy、security token、cookie、profile、arbitrary PIIを保持していない。bundleからはprocessed
+`attachment` stepとunsupported時の`computer-file` stepを復元したため、現段階のMCP fallbackは後者を使用する。
+
+実装は`auto | agent_service | inference_transcript`選択、既知generation failureだけのauto fallback、
+200/204限定S3 POST、header/field/URL/pointer/host検証、redirect/timeout/byte limit、opaque in-memory handle、
+thread/workspace/transport isolation、一度だけのtranscript staging、継続partial transcript、署名downloadとSHA-256再検証を追加した。
+署名URL・S3 policy・一時credentialは保存・出力しない。自動回帰は70/70 tests、TypeScript check、build、
+18-tool compiled stdio smoke、diff/EOF checkに成功した。live upload/chat/download lifecycleは次の検証項目である。
+
 ## 2026-08-07 Workspace transaction・record-level検証
 
 認証済みWeb UI、Rspack runtime、model factoryをローカル解析し、公式workspace作成手順を復元した。
