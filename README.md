@@ -309,11 +309,13 @@ join transactionが失敗した場合も、自動で再作成せずpartial failu
 | `oauth` | なし | `start_mcp_oauth` で取得した URL をブラウザで開く |
 | `none` | なし | なし |
 
-このserverで作成したcredential-free metadataは `NOTION_MCP_REGISTRY_FILE`（既定はメモリ内のみ）にmode 0600で保存します。`list_mcp_connections`はcurrent `space_view.settings.agent_chat_modules`を読み、linked済み`workflow_module`を1回のbatch requestで取得してlocal metadataとmergeします。別clientやUIが作成したmoduleも列挙でき、registryにないauth方式は`unknown`として返します。raw external-connection recordやcredentialは返しません。serverUrlはhttpsまたはlocalhostのみ許可します。
+このserverで作成したcredential-free metadataは `NOTION_MCP_REGISTRY_FILE`（既定はメモリ内のみ）にmode 0600で保存します。`list_mcp_connections`はcurrent `space_view.settings.agent_chat_modules`をsource of truthとしてlinked済み`workflow_module`を1回のbatch requestで取得し、current workspace/viewのlocal metadataだけをmergeします。別clientやUIが作成したmoduleも列挙でき、registryにないauth方式は`unknown`として返します。raw external-connection recordやcredentialは返しません。serverUrlはhttpsまたはlocalhostのみ許可します。
 
-作成後のconnect、space-view可視化、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、該当pointerだけをunlinkします。remove時も他のsettingsとmodule pointerを保持します。update/remove/statusはactive workspaceとregistry recordのspace/viewが一致する場合だけ実行します。
+`update_mcp_connection`はlocal registryの有無に依存せず、current Personal Agentにlinkedされたlive MCP moduleをNotionから読み直します。name-only更新は再接続せず、`connectionPointer`、tools、icon、run policy、未知fieldを含む既存`data`全体を保持します。serverUrlまたはtransportを変更する場合は`{type:"none"}`を含む明示的authが必須で、先にvalidationし、non-emptyなvalidated toolsだけを反映して`initiationContext:"reconnect"`で再接続します。
 
-Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験ではadd/list/status/remove、3 toolsのvalidation、remove後の`alive:false`・`linked:false`を確認しました。全回帰は64/64です。
+作成後のconnect、space-view可視化、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、該当pointerだけをunlinkします。remove時も他のsettingsとmodule pointerを保持します。update/remove/statusはcurrent linkageとlive recordを検証し、local recordが存在する場合はactive workspace/viewとの不一致も拒否します。
+
+Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験では、別processでNotion-onlyとして再発見した一時moduleのname-only update、full-data保持、明示的no-auth reconnect、3 tools、cleanup後の`alive:false`・`linked:false`、既存module不変を確認しました。全回帰は67/67です。
 
 ## 添付ファイル
 

@@ -26,7 +26,7 @@ export interface McpConnectionRecord {
   spaceId: string;
   /** Optional so registries written by older releases continue to load. */
   spaceViewId?: string;
-  authType: McpAuth["type"];
+  authType: McpAuth["type"] | "unknown";
   transport: string;
   toolNames: string[];
   createdAt: string;
@@ -407,14 +407,56 @@ export class McpConnectionManager {
   }
 
   async update(id: string, changes: { name?: string; serverUrl?: string; auth?: McpAuth; transport?: string; approvalIntent?: McpApprovalIntent }): Promise<McpConnectionRecord> {
+    if (changes.name === undefined && changes.serverUrl === undefined && changes.auth === undefined && changes.transport === undefined) {
+      throw new Error("At least one MCP connection update is required");
+    }
     const existing = this.registry.get(id);
-    if (!existing) throw new Error(`MCP connection ${id} is not in the local registry`);
     const context = await this.context();
     this.assertActiveWorkspace(existing, context);
-    const serverUrl = changes.serverUrl ? normalizeServerUrl(changes.serverUrl) : existing.serverUrl;
-    const name = changes.name?.trim() || existing.name;
-    const transport = normalizeTransport(changes.transport || existing.transport);
-    const data: JsonObject = { id, name, serverUrl, preferredTransport: transport };
+    const settings = await this.loadSpaceViewSettings(context);
+    const linked = linkedModules(settings).some((entry) => {
+      const pointer = object(object(entry).pointer);
+      return asString(pointer.table) === "workflow_module"
+        && asString(pointer.id) === id
+        && asString(pointer.spaceId) === context.spaceId;
+    });
+    if (!linked) throw new Error(`MCP connection ${id} is not linked to the current Personal Agent`);
+
+    const moduleRecord = await this.loadSpaceRecord(context, "workflow_module", id);
+    if (asString(moduleRecord.id) !== id
+      || asString(moduleRecord.module_type) !== "mcpServer"
+      || moduleRecord.alive !== true
+      || asString(moduleRecord.space_id) !== context.spaceId) {
+      throw new Error(`${id} is not a live MCP module in the active workspace`);
+    }
+    const currentData = object(moduleRecord.data);
+    const currentName = asString(currentData.name, asString(currentData.officialName, existing?.name ?? id));
+    const currentServerUrl = asString(currentData.serverUrl, existing?.serverUrl ?? "");
+    if (!currentServerUrl) throw new Error(`MCP connection ${id} has no server URL`);
+    const currentTransport = normalizeTransport(asString(currentData.preferredTransport, existing?.transport ?? "streamableHttp"));
+    const name = changes.name === undefined ? currentName : changes.name.trim();
+    if (!name) throw new Error("name is required");
+    const serverUrl = changes.serverUrl === undefined ? currentServerUrl : normalizeServerUrl(changes.serverUrl);
+    const transport = changes.transport === undefined ? currentTransport : normalizeTransport(changes.transport);
+    const serverSettingsChanged = serverUrl !== currentServerUrl || transport !== currentTransport;
+    if (serverSettingsChanged && changes.auth === undefined) {
+      throw new Error("Changing serverUrl or transport requires auth to validate and reconnect the MCP server");
+    }
+
+    const reconnect = changes.auth !== undefined || serverSettingsChanged;
+    let validatedTools: unknown[] = [];
+    if (reconnect) {
+      const validation = await this.validateInContext(context, serverUrl, changes.auth, changes.approvalIntent ?? "approve_on_connect");
+      validatedTools = Array.isArray(validation.tools) ? validation.tools : [];
+    }
+    const data: JsonObject = {
+      ...currentData,
+      id,
+      name,
+      serverUrl,
+      preferredTransport: transport,
+      ...(validatedTools.length > 0 ? { tools: validatedTools } : {})
+    };
     await this.api.post("saveTransactionsFanout", {
       requestId: randomUUID(),
       transactions: [{
@@ -428,7 +470,7 @@ export class McpConnectionManager {
         }]
       }]
     });
-    if (changes.auth) {
+    if (reconnect) {
       await this.api.post("postWorkflowsMcpServerConnect", {
         integrationId: id,
         spaceId: context.spaceId,
@@ -437,13 +479,17 @@ export class McpConnectionManager {
         approvalIntent: changes.approvalIntent ?? "approve_on_connect"
       });
     }
+    const remoteToolNames = toolNamesFrom(data.tools);
     const record: McpConnectionRecord = {
-      ...existing,
+      id,
       name,
       serverUrl,
+      spaceId: context.spaceId,
+      spaceViewId: context.spaceViewId,
+      authType: changes.auth?.type ?? existing?.authType ?? "unknown",
       transport,
-      spaceViewId: existing.spaceViewId ?? context.spaceViewId,
-      ...(changes.auth ? { authType: changes.auth.type } : {})
+      toolNames: remoteToolNames.length > 0 ? remoteToolNames : [...(existing?.toolNames ?? [])],
+      createdAt: existing?.createdAt ?? asIsoTimestamp(moduleRecord.created_time) ?? new Date().toISOString()
     };
     this.registry.upsert(record);
     return record;

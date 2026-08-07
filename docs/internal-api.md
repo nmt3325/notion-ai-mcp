@@ -349,9 +349,11 @@ Personal/global MCP接続は2 recordを協調更新する。
 
 一覧取得もこのspace-view listをsource of truthにし、linked pointerをdeduplicateして1回の`syncRecordValues`でbatch readする。liveかつdeadなlinked moduleを安全なsummaryへ変換し、current workspace/viewのlocal registry metadataだけをmergeする。registry-only stale recordは`linked:false`、Notion-only recordのauth typeは`unknown`とし、raw `connectionPointer`やexternal-connection recordは返さない。
 
-connectはこの2 commitの間で実行する。connect、visibility commit、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、そのmodule IDに一致するpointerだけを削除する。removeもdead + unlinkを1 transactionで行い、他のsettings/module pointerは変更しない。registry recordのworkspace/viewがactive contextと異なるupdate/remove/statusは拒否する。
+updateもregistryをsource of truthにしない。current `space_view`へのlink、pointerのspace、live `workflow_module`のtype/space/idを検証してから、既存`data`全体をshallow mergeする。name-only更新はvalidation/connectを行わない。server URLまたはtransport変更は明示的authを必須とし、先に`validateMcpConnection`を実行する。validated toolsがnon-emptyの場合だけtoolsを置換し、commit後に`postWorkflowsMcpServerConnect`へ`initiationContext:"reconnect"`を送る。authだけを明示した再認証も同じvalidate/reconnect経路を使う。
 
-Personal Agent moduleには`workflowId`がないため、`getMcpOAuthStatus`は使用できない。statusは`syncRecordValues`で`workflow_module`と参照先`external_connection`を読み、space-view linkageと合わせて判定する。pointerなしは`needs_setup`、external connectionの`authenticated:false`は`needs_reauth`、liveかつlinkedでそれ以外は`connected`、deadまたはunlinkedは`disconnected`となる。2026-08-07のcompiled-stdio live lifecycleと64/64 testsで検証した。
+connectはこの2 commitの間で実行する。connect、visibility commit、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、そのmodule IDに一致するpointerだけを削除する。removeもdead + unlinkを1 transactionで行い、他のsettings/module pointerは変更しない。update/remove/statusはcurrent Notion linkageとrecordを検証し、registry recordがある場合はactive workspace/viewとの不一致を拒否する。
+
+Personal Agent moduleには`workflowId`がないため、`getMcpOAuthStatus`は使用できない。statusは`syncRecordValues`で`workflow_module`と参照先`external_connection`を読み、space-view linkageと合わせて判定する。pointerなしは`needs_setup`、external connectionの`authenticated:false`は`needs_reauth`、liveかつlinkedでそれ以外は`connected`、deadまたはunlinkedは`disconnected`となる。2026-08-07のcompiled-stdio live lifecycleではNotion-only update/reconnectとcleanupを含めて検証し、67/67 testsが成功した。
 
 ## モデルレジストリ
 
