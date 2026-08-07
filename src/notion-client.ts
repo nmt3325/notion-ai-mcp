@@ -180,10 +180,20 @@ export class NotionClient {
 
   constructor(private readonly config: NotionConfig, private readonly fetchImpl: typeof fetch = fetch) {
     if (config.account.tokenV2) {
-      this.workspaceManager = new WorkspaceManager(
-        { tokenV2: config.account.tokenV2, userId: config.account.userId || "", userName: config.account.userName || "", userEmail: config.account.userEmail || "", spaceId: config.account.spaceId || "", spaceName: config.account.spaceName || "", spaceViewId: config.account.spaceViewId || "", timezone: config.account.timezone || "UTC", clientVersion: config.account.clientVersion || "23.13.20260313.1423", browserId: config.account.browserId || randomUUID(), deviceId: config.account.deviceId || randomUUID(), ...(config.account.fullCookie ? { fullCookie: config.account.fullCookie } : {}) },
-        config.apiBase, fetchImpl, config.accountFilePath
-      );
+      const sharedAccount = config.account as AccountContext;
+      Object.assign(sharedAccount, {
+        userId: sharedAccount.userId || "",
+        userName: sharedAccount.userName || "",
+        userEmail: sharedAccount.userEmail || "",
+        spaceId: sharedAccount.spaceId || "",
+        spaceName: sharedAccount.spaceName || "",
+        spaceViewId: sharedAccount.spaceViewId || "",
+        timezone: sharedAccount.timezone || "UTC",
+        clientVersion: sharedAccount.clientVersion || "23.13.20260313.1423",
+        browserId: sharedAccount.browserId || randomUUID(),
+        deviceId: sharedAccount.deviceId || randomUUID()
+      });
+      this.workspaceManager = new WorkspaceManager(sharedAccount, config.apiBase, fetchImpl, config.accountFilePath);
     }
   }
 
@@ -195,7 +205,9 @@ export class NotionClient {
     const user = unwrapRecord(users[userId]); const userRoot = unwrapRecord(object(recordMap.user_root)[userId]); const pointers = Array.isArray(userRoot.space_view_pointers) ? userRoot.space_view_pointers : []; if (pointers.length === 0) throw new Error("loadUserContent did not return a workspace");
     const spaces = object(recordMap.space); const pointer = pointers.map((p) => object(p)).sort((a, b) => { const sc = (c: JsonObject): number => { const cs = unwrapRecord(spaces[asString(c.spaceId)]); const csS = object(cs.settings); return (csS.disable_ai_feature !== true ? 2 : 0) + (asString(cs.plan_type) !== "free" ? 1 : 0); }; return sc(b) - sc(a); })[0] ?? {};
     const spaceId = asString(pointer.spaceId); const space = unwrapRecord(spaces[spaceId]); const settings = unwrapRecord(object(recordMap.user_settings)[userId]); const userSettings = object(settings.settings);
-    return { tokenV2: configured.tokenV2, userId, userName: configured.userName || asString(user.name), userEmail: configured.userEmail || asString(user.email), spaceId, spaceName: configured.spaceName || asString(space.name), spaceViewId: configured.spaceViewId || asString(pointer.id), timezone: configured.timezone || asString(userSettings.time_zone, "UTC"), clientVersion: configured.clientVersion || "23.13.20260313.1423", browserId: configured.browserId || randomUUID(), deviceId: configured.deviceId || randomUUID(), ...(configured.fullCookie ? { fullCookie: configured.fullCookie } : {}) };
+    const resolved: AccountContext = { tokenV2: configured.tokenV2, userId, userName: configured.userName || asString(user.name), userEmail: configured.userEmail || asString(user.email), spaceId, spaceName: configured.spaceName || asString(space.name), spaceViewId: configured.spaceViewId || asString(pointer.id), timezone: configured.timezone || asString(userSettings.time_zone, "UTC"), clientVersion: configured.clientVersion || "23.13.20260313.1423", browserId: configured.browserId || randomUUID(), deviceId: configured.deviceId || randomUUID(), ...(configured.fullCookie ? { fullCookie: configured.fullCookie } : {}), ...(configured.pinnedSpaceId ? { pinnedSpaceId: configured.pinnedSpaceId } : {}) };
+    Object.assign(configured, resolved);
+    return configured as AccountContext;
   }
 
   private headers(account: AccountContext, stream: boolean): HeadersInit { return { accept: stream ? "application/x-ndjson" : "application/json", "accept-language": "en-US,en;q=0.9", "content-type": "application/json", "notion-audit-log-platform": "web", "notion-client-version": account.clientVersion, origin: "https://www.notion.so", referer: `{{https://www.notion.so/${account.spaceId}}}`, "sec-ch-ua": SEC_CH_UA, "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": '"Windows"', "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin", "user-agent": USER_AGENT, "x-notion-active-user-header": account.userId, "x-notion-space-id": account.spaceId, cookie: buildCookie(account) }; }
@@ -535,6 +547,7 @@ export class NotionClient {
   }
 
   async switchWorkspace(selector: string, pin = false): Promise<JsonObject> {
+    await this.account();
     const workspace = await this.workspaces().switchWorkspace(selector);
     if (pin) this.workspaces().pin(workspace.spaceId);
     this.accountPromise = null;
@@ -543,6 +556,7 @@ export class NotionClient {
   }
 
   async createWorkspace(name?: string, options: { pin?: boolean; switchTo?: boolean } = {}): Promise<JsonObject> {
+    await this.account();
     const manager = this.workspaces();
     const shouldSwitch = options.switchTo !== false;
     const workspace = shouldSwitch

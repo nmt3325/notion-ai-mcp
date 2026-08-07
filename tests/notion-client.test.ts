@@ -244,3 +244,68 @@ test("chat creates a workflow thread and continues it with a partial transcript"
   const secondTranscript = inferenceBodies[1]?.transcript as Array<Record<string, unknown>>;
   assert.equal(secondTranscript.filter((entry) => entry.type === "updated-config").length, 1);
 });
+
+
+test("workspace switching and creation stay active in the same client process", async () => {
+  const spaceA = "81000000-0000-4000-8000-000000000001";
+  const spaceB = "81000000-0000-4000-8000-000000000002";
+  const spaceC = "81000000-0000-4000-8000-000000000003";
+  const viewA = "82000000-0000-4000-8000-000000000001";
+  const viewB = "82000000-0000-4000-8000-000000000002";
+  let viewC = "";
+  const localAccount = { ...account, spaceId: spaceA, spaceViewId: viewA, spaceName: "Alpha" };
+  const localConfig: NotionConfig = { ...config, account: localAccount };
+  const requests: Array<{ endpoint: string; body: Record<string, unknown> }> = [];
+  const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const endpoint = String(input).split("/").at(-1) ?? "";
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    requests.push({ endpoint, body });
+    if (endpoint === "loadUserContent") {
+      const pointers = [
+        { id: viewA, table: "space_view", spaceId: spaceA },
+        { id: viewB, table: "space_view", spaceId: spaceB },
+        ...(viewC ? [{ id: viewC, table: "space_view", spaceId: spaceC }] : [])
+      ];
+      return jsonResponse({ recordMap: {
+        user_root: { [account.userId]: { value: {
+          space_views: [viewA, viewB, ...(viewC ? [viewC] : [])],
+          space_view_pointers: pointers
+        } } },
+        space: {
+          [spaceA]: { value: { name: "Alpha", plan_type: "personal" } },
+          [spaceB]: { value: { name: "Beta", plan_type: "personal" } },
+          [spaceC]: { value: { name: "Gamma", plan_type: "personal" } }
+        }
+      } });
+    }
+    if (endpoint === "getInferenceTranscriptsForUser") return jsonResponse({});
+    if (endpoint === "createSpace") return jsonResponse({ spaceId: spaceC });
+    if (endpoint === "saveTransactionsFanout") {
+      const transaction = (body.transactions as Array<Record<string, unknown>>)[0];
+      const operations = transaction.operations as Array<Record<string, unknown>>;
+      const operation = operations.find((candidate) => (candidate.pointer as Record<string, unknown>)?.table === "space_view");
+      viewC = String((operation?.pointer as Record<string, unknown>)?.id ?? "");
+      return jsonResponse({});
+    }
+    if (endpoint === "syncRecordValuesMain") {
+      return jsonResponse({ recordMap: { space_view: {
+        [viewC]: { value: { id: viewC, version: 1, space_id: spaceC, parent_id: account.userId, parent_table: "user_root", alive: true, joined: true } }
+      } } });
+    }
+    return new Response("unexpected", { status: 500 });
+  };
+
+  const client = new NotionClient(localConfig, fakeFetch as typeof fetch);
+  await client.switchWorkspace("Beta");
+  assert.equal((await client.getCurrentWorkspace()).spaceId, spaceB);
+
+  const created = await client.createWorkspace("Gamma", { pin: true });
+  assert.equal(created.spaceId, spaceC);
+  assert.equal(created.spaceViewId, viewC);
+  const current = await client.getCurrentWorkspace();
+  assert.equal(current.spaceId, spaceC);
+  assert.equal(current.spaceViewId, viewC);
+  assert.equal(current.pinnedSpaceId, spaceC);
+  assert.equal(localConfig.account.spaceId, spaceC);
+  assert.equal((requests.find((request) => request.endpoint === "createSpace")?.body).planSelection, "personal");
+});
