@@ -217,7 +217,7 @@ export function createServer(client: NotionClient): McpServer {
 
   server.registerTool("update_mcp_connection", {
     title: "Update an MCP connection",
-    description: "Rename, re-point, or re-authenticate a registered MCP connection.",
+    description: "Rename a linked Personal Agent MCP module, or validate and reconnect it with explicit auth when changing server settings.",
     inputSchema: {
       id: z.string().min(1),
       name: z.string().min(1).optional(),

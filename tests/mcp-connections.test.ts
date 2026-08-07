@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -202,6 +202,72 @@ test("add() deactivates and unlinks a module when connect fails", async () => {
   assert.deepEqual(cleanup[0]?.args, { alive: false });
   const remaining = ((cleanup[1]?.args as Record<string, unknown>).agent_chat_modules as Array<Record<string, unknown>>);
   assert.deepEqual(remaining, [existingModule]);
+});
+
+test("update() renames a linked Notion-only module while preserving its full data", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mcp-update-name-"));
+  try {
+    const registryPath = join(dir, "registry.json");
+    const { api, calls } = fakeApi();
+    const manager = new McpConnectionManager(api, registryPath);
+    const record = await manager.update("existing-module", { name: "Renamed MCP" });
+    assert.deepEqual(calls.map((call) => call.endpoint), ["syncRecordValuesMain", "syncRecordValues", "saveTransactionsFanout"]);
+    const args = operations(calls[2])[0]?.args as Record<string, unknown>;
+    assert.equal(args.name, "Renamed MCP");
+    assert.equal(args.serverUrl, record.serverUrl);
+    assert.deepEqual(args.connectionPointer, { table: "external_connection", id: "connection-1", spaceId: context.spaceId });
+    assert.deepEqual(args.tools, [{ name: "ask_question" }]);
+    assert.equal(record.authType, "unknown");
+    assert.equal(new McpRegistry(registryPath).get("existing-module")?.name, "Renamed MCP");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("update() validates and reconnects when changing server settings", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mcp-update-connect-"));
+  try {
+    const registryPath = join(dir, "registry.json");
+    const { api, calls } = fakeApi({ validateMcpConnection: { success: true, tools: [{ name: "new_tool" }] } });
+    const manager = new McpConnectionManager(api, registryPath);
+    const record = await manager.update("existing-module", {
+      serverUrl: "https://new.example.com/mcp",
+      transport: "sse",
+      auth: { type: "bearer", token: "replacement-secret" }
+    });
+    assert.deepEqual(calls.map((call) => call.endpoint), [
+      "syncRecordValuesMain", "syncRecordValues", "validateMcpConnection", "saveTransactionsFanout", "postWorkflowsMcpServerConnect"
+    ]);
+    assert.deepEqual(calls[2]?.body.authHeaders, [{ name: "Authorization", value: "Bearer replacement-secret" }]);
+    const args = operations(calls[3])[0]?.args as Record<string, unknown>;
+    assert.equal(args.serverUrl, "https://new.example.com/mcp");
+    assert.equal(args.preferredTransport, "sse");
+    assert.deepEqual(args.tools, [{ name: "new_tool" }]);
+    assert.deepEqual(args.connectionPointer, { table: "external_connection", id: "connection-1", spaceId: context.spaceId });
+    assert.equal(calls[4]?.body.initiationContext, "reconnect");
+    assert.equal(record.authType, "bearer");
+    assert.deepEqual(record.toolNames, ["new_tool"]);
+    assert.equal(readFileSync(registryPath, "utf8").includes("replacement-secret"), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("update() rejects unlinked, cross-workspace, and unauthenticated server changes", async () => {
+  const unlinked = fakeApi({ syncRecordValuesMain: spaceViewResponse([]) });
+  await assert.rejects(() => new McpConnectionManager(unlinked.api).update("missing", { name: "Nope" }), /not linked/);
+  assert.deepEqual(unlinked.calls.map((call) => call.endpoint), ["syncRecordValuesMain"]);
+
+  const wrongWorkspaceRecord = { recordMap: { workflow_module: { "existing-module": { value: {
+    id: "existing-module", alive: true, module_type: "mcpServer", space_id: "space-2",
+    data: { name: "Wrong", serverUrl: "https://wrong.example.com/mcp", preferredTransport: "streamableHttp" }
+  } } } } };
+  const wrongWorkspace = fakeApi({ syncRecordValues: wrongWorkspaceRecord });
+  await assert.rejects(() => new McpConnectionManager(wrongWorkspace.api).update("existing-module", { name: "Nope" }), /active workspace/);
+  assert.deepEqual(wrongWorkspace.calls.map((call) => call.endpoint), ["syncRecordValuesMain", "syncRecordValues"]);
+
+  const missingAuth = fakeApi();
+  await assert.rejects(
+    () => new McpConnectionManager(missingAuth.api).update("existing-module", { serverUrl: "https://new.example.com/mcp" }),
+    /requires auth/
+  );
+  assert.deepEqual(missingAuth.calls.map((call) => call.endpoint), ["syncRecordValuesMain", "syncRecordValues"]);
 });
 
 test("remove() marks the module dead and preserves unrelated space-view settings", async () => {
