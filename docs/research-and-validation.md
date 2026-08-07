@@ -138,7 +138,7 @@ owner module `265981` と実callerから次を復元した。
 - `getThreadTranscript` の `put/patch/remove/rewind/session/session_status/committed` protocol
 
 v0.8.0では `upload_attachment` と `download_attachment` を追加し、compiled stdio serverは18 toolsを列挙した。
-ローカル回帰は62 testsで、single-part、multipart byte境界、ETag必須、checksum、path traversal、symlink、
+ローカル回帰は63 testsで、single-part、multipart byte境界、ETag必須、checksum、path traversal、symlink、
 byte上限、Agent Service 2-turn file chatに加え、workspace partial commit・delayed visibility・429/502・
 no-retryを含めて全件成功した。追加hardeningでは、unknown/duplicate/out-of-range/missing multipart descriptorを
 転送前に拒否し、signed request timeout、invalid create/complete response、upload/download size・SHA-256不整合、
@@ -176,3 +176,22 @@ response bodyを保持して終了し、再試行しなかった。前後のdisc
 
 commit `2d3eace`に対するself-reporting CIはNode 24でTypeScript check、54/54 tests、build、
 18-tool compiled stdio smoke、diff checkの全項目に成功した。
+
+## 2026-08-07 Personal Agent MCP persistence live検証
+
+認証済みapp runtimeをread-onlyで調査し、current `workflow_module` factory outputと`space_view.settings.agent_chat_modules` operationを復元した。実装はcreator/editor audit field、`notion_user` parent、1つのshared timestampを含むfactory互換recordを作り、既存settings/module pointerを保持して新pointerを1回だけ追加する。
+
+別processのcompiled stdio serverでDeepWikiを一時追加した結果:
+
+| 対象 | 結果 |
+|---|---|
+| MCP discovery | 18 tools |
+| DeepWiki validation | 成功、3 tools |
+| add / list | 成功、local registryに一時recordを確認 |
+| status | live module + space-view + external connectionから`connected`を確認 |
+| remove | 成功、registryは0件へ復元 |
+| remote cleanup | 同じmodule IDが`alive:false`, `linked:false`, `status:disconnected` |
+| pre-existing module | 1件を変更せず保持 |
+| automated regression | 63/63 tests、TypeScript check/build、compiled stdio smoke成功 |
+
+旧status実装はglobal moduleへworkflow専用`getMcpOAuthStatus`を`workflowId`なしで送り400になった。公式UIも`workflowId && moduleId`の場合だけこのrouteを呼ぶため、global module statusはrecord-derivedへ修正した。live harness/resultと認証・bundle調査artifactはrepository外またはignored pathにmode 0600で保持した。

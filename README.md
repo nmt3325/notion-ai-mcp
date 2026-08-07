@@ -289,11 +289,14 @@ join transactionが失敗した場合も、自動で再作成せずpartial failu
 
 ## MCP 接続管理
 
-`add_mcp_connection` は次の 3 段階を順に実行します。
+`add_mcp_connection` は次の 5 段階を順に実行します。
 
-1. `validateMcpConnection`（serverUrl と authHeaders で tool 一覧を取得）
-2. `saveTransactionsFanout`（`workflow_module` レコードを `module_type: mcp_server` で作成）
-3. `postWorkflowsMcpServerConnect`（`initiationContext: connect` で接続を確定）
+1. `validateMcpConnection`（serverUrl、配列形式のauthHeaders、approval intentでtool一覧を取得）
+2. `saveTransactionsFanout`（現行factoryと同じaudit/parent fieldを持つ`workflow_module`を作成）
+3. `postWorkflowsMcpServerConnect`（`initiationContext: connect`で接続を確定）
+4. `syncRecordValuesMain`（現在の`space_view.settings`と既存Personal Agent moduleを取得）
+5. `saveTransactionsFanout`（既存settingsを保持し、`agent_chat_modules`へ新pointerを1回だけ追加）
+
 
 認証方式は `auth.type` で指定します。
 
@@ -308,6 +311,10 @@ join transactionが失敗した場合も、自動で再作成せずpartial failu
 
 登録済み接続は `NOTION_MCP_REGISTRY_FILE`（既定はメモリ内のみ）に mode 0600 で保存され、
 `list_mcp_connections` / `get_mcp_connection_status` から参照できます。serverUrl は https または localhost のみ許可します。
+
+作成後のconnect、space-view可視化、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、該当pointerだけをunlinkします。remove時も他のsettingsとmodule pointerを保持します。update/remove/statusはactive workspaceとregistry recordのspace/viewが一致する場合だけ実行します。
+
+Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験ではadd/list/status/remove、3 toolsのvalidation、remove後の`alive:false`・`linked:false`を確認しました。全回帰は63/63です。
 
 ## 添付ファイル
 

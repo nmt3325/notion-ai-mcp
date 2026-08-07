@@ -619,7 +619,13 @@ export class NotionClient {
 
   mcp(): McpConnectionManager {
     this.mcpManager ??= new McpConnectionManager(
-      { post: (endpoint, requestBody) => this.fetchJson(endpoint, requestBody), spaceId: async () => (await this.account()).spaceId },
+      {
+        post: (endpoint, requestBody) => this.fetchJson(endpoint, requestBody),
+        context: async () => {
+          const account = await this.account();
+          return { spaceId: account.spaceId, userId: account.userId, spaceViewId: account.spaceViewId };
+        }
+      },
       this.config.mcpRegistryPath
     );
     return this.mcpManager;
