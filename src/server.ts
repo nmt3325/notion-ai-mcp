@@ -174,7 +174,7 @@ export function createServer(client: NotionClient): McpServer {
 
   server.registerTool("create_workspace", {
     title: "Create a workspace",
-    description: "Create a new personal workspace, which also resets the free AI credit allowance, and switch to it.",
+    description: "Create a personal workspace with the verified Web transaction flow, then optionally switch to and pin it.",
     inputSchema: {
       name: z.string().min(1).optional().describe("Workspace name; defaults to an auto-generated one"),
       switchTo: z.boolean().default(true).describe("Switch the client to the new workspace"),

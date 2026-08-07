@@ -222,3 +222,195 @@ test("file-ID chat uses current Agent Service create and send event content", as
     assert.equal(sendBody?.clientEventId === undefined, false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("NotionClient validates every multipart descriptor before uploading", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-client-invalid-multipart-"));
+  const validParts = [1, 2].map((partNumber) => ({ part_number: partNumber, url: `https://upload.example/part/${partNumber}`, method: "PUT", headers: {} }));
+  const scenarios: Array<{ name: string; upload: Record<string, unknown>; pattern: RegExp }> = [
+    { name: "unknown type", upload: { type: "unknown", part_size_bytes: 4, parts: validParts }, pattern: /unsupported upload descriptor type/ },
+    { name: "duplicate", upload: { type: "multipart", part_size_bytes: 4, parts: [validParts[0], validParts[0]] }, pattern: /invalid multipart upload part/ },
+    { name: "out of range", upload: { type: "multipart", part_size_bytes: 4, parts: [validParts[0], { ...validParts[1], part_number: 3 }] }, pattern: /outside the file bounds/ },
+    { name: "missing", upload: { type: "multipart", part_size_bytes: 4, parts: [validParts[0]] }, pattern: /contained 1 parts; expected 2/ }
+  ];
+  try {
+    for (const scenario of scenarios) {
+      let signedCalls = 0;
+      let completeCalls = 0;
+      const fakeFetch = async (input: string | URL | Request): Promise<Response> => {
+        const url = urlOf(input);
+        if (url.hostname === "upload.example") { signedCalls += 1; return new Response(null, { status: 200, headers: { etag: "etag" } }); }
+        if (url.pathname.endsWith("createAgentServiceFileUploadURL")) return json({ upload: scenario.upload, file: { id: "file-invalid" } });
+        if (url.pathname.endsWith("completeAgentServiceFileUpload")) { completeCalls += 1; return json({ id: "file-invalid", filename: "data.bin", media_type: "application/octet-stream", size_bytes: 8 }); }
+        return new Response("unexpected", { status: 500 });
+      };
+      const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+      await assert.rejects(() => client.uploadAttachment({ base64: Buffer.from("abcdefgh").toString("base64"), fileName: "data.bin" }), scenario.pattern, scenario.name);
+      assert.equal(signedCalls, 0, `${scenario.name} must fail before any signed upload`);
+      assert.equal(completeCalls, 0, `${scenario.name} must not complete the upload`);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("NotionClient rejects invalid upload creation and completion responses", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-client-invalid-complete-"));
+  const bytes = Buffer.from("data");
+  try {
+    let signedCalls = 0;
+    const missingFileFetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "upload.example") { signedCalls += 1; return new Response(null, { status: 200 }); }
+      if (url.pathname.endsWith("createAgentServiceFileUploadURL")) return json({ upload: { type: "single_part", url: "https://upload.example/file", method: "PUT" }, file: {} });
+      return json({});
+    };
+    await assert.rejects(
+      () => new NotionClient(config(root), missingFileFetch as typeof fetch).uploadAttachment({ base64: bytes.toString("base64"), fileName: "data.bin" }),
+      /did not return file\.id/
+    );
+    assert.equal(signedCalls, 0);
+
+    const completions: Array<{ value: unknown; pattern: RegExp }> = [
+      { value: {}, pattern: /invalid uploaded-file object/ },
+      { value: { id: "other", filename: "data.bin", media_type: "application/octet-stream", size_bytes: 4 }, pattern: /different file ID/ },
+      { value: { id: "file-complete", filename: "data.bin", media_type: "application/octet-stream", size_bytes: 5 }, pattern: /different file size/ },
+      { value: { id: "file-complete", filename: "data.bin", media_type: "application/octet-stream", size_bytes: 4, sha256: "invalid" }, pattern: /invalid uploaded-file object/ },
+      { value: { id: "file-complete", filename: "data.bin", media_type: "application/octet-stream", size_bytes: 4, sha256: "0".repeat(64) }, pattern: /checksum did not match local data/ }
+    ];
+    for (const completion of completions) {
+      const fakeFetch = async (input: string | URL | Request): Promise<Response> => {
+        const url = urlOf(input);
+        if (url.hostname === "upload.example") return new Response(null, { status: 200 });
+        if (url.pathname.endsWith("createAgentServiceFileUploadURL")) return json({ upload: { type: "single_part", url: "https://upload.example/file", method: "PUT" }, file: { id: "file-complete" } });
+        if (url.pathname.endsWith("completeAgentServiceFileUpload")) return json(completion.value);
+        return new Response("unexpected", { status: 500 });
+      };
+      const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+      await assert.rejects(() => client.uploadAttachment({ base64: bytes.toString("base64"), fileName: "data.bin" }), completion.pattern);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("NotionClient rejects inconsistent download metadata", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-client-invalid-download-"));
+  const data = Buffer.from("data");
+  const scenarios: Array<{ metadata: Record<string, unknown>; pattern: RegExp }> = [
+    { metadata: { size_bytes: 5 }, pattern: /size did not match Notion metadata/ },
+    { metadata: { size_bytes: 4, sha256: "0".repeat(64) }, pattern: /checksum did not match Notion metadata/ },
+    { metadata: { size_bytes: -1 }, pattern: /invalid size/ },
+    { metadata: { size_bytes: 4, sha256: "invalid" }, pattern: /invalid checksum/ }
+  ];
+  try {
+    for (const scenario of scenarios) {
+      const fakeFetch = async (input: string | URL | Request): Promise<Response> => {
+        const url = urlOf(input);
+        if (url.hostname === "download.example") return new Response(data, { status: 200 });
+        if (url.pathname.endsWith("getFileContentURLForAgentThread")) return json({
+          url: "https://download.example/file",
+          file: { id: "file-download", filename: "data.bin", media_type: "application/octet-stream", ...scenario.metadata }
+        });
+        return new Response("unexpected", { status: 500 });
+      };
+      const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+      await assert.rejects(() => client.downloadAttachment({ conversationId: "11111111-1111-4111-8111-111111111111", fileId: "file-download", returnBase64: true }), scenario.pattern);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("NotionClient aborts a stalled signed upload at the request timeout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-client-timeout-"));
+  let sawSignal = false;
+  let sawAbort = false;
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.pathname.endsWith("createAgentServiceFileUploadURL")) return json({
+        upload: { type: "single_part", url: "https://upload.example/stalled", method: "PUT" },
+        file: { id: "file-timeout" }
+      });
+      if (url.hostname === "upload.example") {
+        const signal = init?.signal;
+        sawSignal = signal instanceof AbortSignal;
+        return new Promise<Response>((_resolve, reject) => {
+          if (!signal) { reject(new Error("missing abort signal")); return; }
+          const aborted = () => { sawAbort = true; reject(new Error("signed request aborted")); };
+          if (signal.aborted) aborted(); else signal.addEventListener("abort", aborted, { once: true });
+        });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const timedConfig = config(root);
+    timedConfig.requestTimeoutMs = 20;
+    const client = new NotionClient(timedConfig, fakeFetch as typeof fetch);
+    const keepEventLoopAlive = setTimeout(() => undefined, 1_000);
+    try {
+      await assert.rejects(() => client.uploadAttachment({ base64: "ZGF0YQ==", fileName: "data.bin" }), /signed request aborted/);
+    } finally {
+      clearTimeout(keepEventLoopAlive);
+    }
+    assert.equal(sawSignal, true);
+    assert.equal(sawAbort, true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("NotionClient permits 19 unique file IDs and deduplicates before Agent Service", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-client-file-ids-"));
+  let createBody: Record<string, unknown> | undefined;
+  let createCalls = 0;
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const endpoint = urlOf(input).pathname.split("/").at(-1);
+      if (endpoint === "createAgentThread") { createCalls += 1; createBody = requestBody(init); return json({ thread: { id: createBody.threadId } }); }
+      if (endpoint === "getThreadTranscript") return json({
+        patches: [
+          { op: "put", entity: { id: "assistant", kind: "assistant_message", source: "provisional", sequence: 1, content: [{ type: "text", text: "ok" }] } },
+          { op: "put", entity: { id: "done", kind: "turn_completed", source: "committed", sequence: 2, stop_reason: "completed" } }
+        ],
+        forward_cursor: "done",
+        has_more_forward: false
+      });
+      return new Response("unexpected", { status: 500 });
+    };
+    const ids = Array.from({ length: 19 }, (_, index) => `file-${index}`);
+    const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+    const result = await client.chat({ prompt: "Read all files", fileIds: [` ${ids[0]} `, ...ids.slice(1), ids[0]] });
+    assert.equal(result.text, "ok");
+    const content = createBody?.content as Array<Record<string, unknown>>;
+    assert.equal(content.length, 20);
+    assert.deepEqual(content.slice(1).map((entry) => entry.file_id), ids);
+    await assert.rejects(() => client.chat({ prompt: "Too many", fileIds: Array.from({ length: 20 }, (_, index) => `unique-${index}`) }), /at most 19 files/);
+    assert.equal(createCalls, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("legacy inline attachments become prompt context and reject real-file mixing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-client-legacy-attachments-"));
+  let inferenceBody: Record<string, unknown> | undefined;
+  let inferenceCalls = 0;
+  let uploadCreateCalls = 0;
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const endpoint = urlOf(input).pathname.split("/").at(-1);
+      if (endpoint === "runInferenceTranscript") {
+        inferenceCalls += 1;
+        inferenceBody = requestBody(init);
+        return new Response(`${JSON.stringify({ type: "agent-inference", value: [{ type: "text", content: "Legacy answer" }] })}\n`, { status: 200 });
+      }
+      if (endpoint === "createAgentServiceFileUploadURL") { uploadCreateCalls += 1; return json({}); }
+      return new Response("unexpected", { status: 500 });
+    };
+    const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+    const first = await client.chat({
+      prompt: "Summarize",
+      attachments: [
+        { name: "notes.txt", text: "hello" },
+        { name: "source", url: "https://example.com/source" }
+      ]
+    });
+    const expectedPrompt = "Summarize\n\n--- Attachment context: notes.txt ---\nhello\n\n--- Attachment context: source ---\nhttps://example.com/source";
+    const transcript = (inferenceBody?.transcript ?? []) as Array<Record<string, unknown>>;
+    assert.deepEqual(transcript.find((entry) => entry.type === "user")?.value, [[expectedPrompt]]);
+    await assert.rejects(() => client.chat({ prompt: "Add a file", conversationId: first.conversationId, fileIds: ["file-1"] }), /cannot be added to a legacy chat/);
+    await assert.rejects(() => client.uploadAttachment({ base64: "ZGF0YQ==", fileName: "data.bin", conversationId: first.conversationId }), /only target an Agent Service conversation/);
+    assert.equal(inferenceCalls, 1);
+    assert.equal(uploadCreateCalls, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

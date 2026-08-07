@@ -138,9 +138,11 @@ owner module `265981` と実callerから次を復元した。
 - `getThreadTranscript` の `put/patch/remove/rewind/session/session_status/committed` protocol
 
 v0.8.0では `upload_attachment` と `download_attachment` を追加し、compiled stdio serverは18 toolsを列挙した。
-ローカル回帰は54 testsで、single-part、multipart byte境界、ETag必須、checksum、path traversal、symlink、
+ローカル回帰は60 testsで、single-part、multipart byte境界、ETag必須、checksum、path traversal、symlink、
 byte上限、Agent Service 2-turn file chatに加え、workspace partial commit・delayed visibility・429/502・
-no-retryを含めて全件成功した。
+no-retryを含めて全件成功した。追加hardeningでは、unknown/duplicate/out-of-range/missing multipart descriptorを
+転送前に拒否し、signed request timeout、invalid create/complete response、upload/download size・SHA-256不整合、
+19-file上限とdedupe、legacy inline contextとreal-file transport混在拒否を自動検証する。
 
 認証復旧後、既存workspaceでAgent Service upload URL作成がHTTP 500、direct thread作成がHTTP 400に
 なることを確認した。利用可能quotaを持つ新規workspaceでのupload → file chat → download checksum
