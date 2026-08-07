@@ -8,7 +8,7 @@ stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion 
 - `notion_ai_chat`: Notion AI にプロンプトを送信し、NDJSON/SSE ストリームを集約して返す（モデル指定・添付対応）
 - `list_conversations`: Notion AI の workflow/chat thread をページング取得する
 - `get_conversation`: 指定 thread の user-visible な user/assistant メッセージを取得する
-- `upload_attachment` / `download_attachment`: Agent Service のファイルを安全に upload/download する
+- `upload_attachment` / `download_attachment`: Agent Serviceまたはassistant-transcript transportでファイルを安全にupload/downloadする
 
 **ワークスペース**
 
@@ -205,11 +205,12 @@ notion-ai-mcp.example.com {
 - `attachments` (任意、旧互換のinline text/link context。実ファイルには `fileIds` を使用)
 
 添付なしの新しい chat は実績のある `runInferenceTranscript` workflow thread を使用します。
-`fileIds` 付きの新しい chat は現行 Agent Service の `createAgentThread` と
-`content: [{type:"text"}, {type:"file",file_id}]` を使用し、継続ターンは `sendEventToAgentThread` へ送ります。
-1つの conversation 内で transport は混在させないため、legacy text chat に後から file ID を追加する場合は
-`conversationId` を省略して新しい file chat を開始してください。file chatは安全のため
-`policies.approval_mode="ask"`を明示し、変更・送信・共有などのaction前に確認を要求します。
+Agent Serviceでuploadされた`fileIds`は`createAgentThread`の
+`content: [{type:"text"}, {type:"file",file_id}]`へ送り、継続ターンは`sendEventToAgentThread`を使います。
+Agent Service upload APIが既知のunsupported responseを返した場合、`upload_attachment`の既定`auto` modeは
+assistant-transcript uploadへfallbackし、不透明handleを`runInferenceTranscript`の`computer-file` stepへ変換します。
+handleは作成されたthreadに固定され、Agent Service ID・別thread・別workspaceとの混在を拒否します。
+Agent Service file chatは安全のため`policies.approval_mode="ask"`を明示します。
 
 継続 chat の session は現在メモリ内にだけ保持するため、サーバー再起動後は以前の `conversationId` を
 送信継続には使えません。過去 thread の閲覧は `get_conversation` で可能です。
@@ -315,7 +316,7 @@ join transactionが失敗した場合も、自動で再作成せずpartial failu
 
 作成後のconnect、space-view可視化、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、該当pointerだけをunlinkします。remove時も他のsettingsとmodule pointerを保持します。update/remove/statusはcurrent linkageとlive recordを検証し、local recordが存在する場合はactive workspace/viewとの不一致も拒否します。
 
-Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験では、別processでNotion-onlyとして再発見した一時moduleのname-only update、full-data保持、明示的no-auth reconnect、3 tools、cleanup後の`alive:false`・`linked:false`、既存module不変を確認しました。全回帰は67/67です。
+Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験では、別processでNotion-onlyとして再発見した一時moduleのname-only update、full-data保持、明示的no-auth reconnect、3 tools、cleanup後の`alive:false`・`linked:false`、既存module不変を確認しました。全回帰は70/70です。
 
 ## 添付ファイル
 
@@ -325,12 +326,17 @@ Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_sta
 2. 戻り値の `fileId` を `notion_ai_chat.fileIds` に渡す。
 3. chat 後は `download_attachment` に `conversationId` と `fileId` を渡して再取得できる。
 
+`upload_attachment.transport`は`auto`（省略時）、`agent_service`、`inference_transcript`を選べます。
+`auto`はAgent Serviceを優先し、既知の400/404/500/501 generation failureだけをassistant-transcriptへfallbackします。
+戻り値の`transport`で実際の経路を確認でき、fallback時は同時に返る`conversationId`をchat/downloadへ使用します。
+
 upload例:
 
 ```json
 {
   "path": "inputs/report.pdf",
-  "mimeType": "application/pdf"
+  "mimeType": "application/pdf",
+  "transport": "auto"
 }
 ```
 
@@ -383,13 +389,18 @@ multipartはpart数・一意な連番・file境界・method・URLを**転送開�
 `NOTION_REQUEST_TIMEOUT_MS`でabortします。
 
 upload完了metadataのfile ID・size・任意のSHA-256をローカルbytesと照合します。downloadは
-`getFileContentURLForAgentThread` の署名URLを使い、metadataのsizeとSHA-256を実download bytesに対して
-検証します。ローカルpathは `NOTION_ATTACHMENT_ROOT` の実パス配下だけ許可し、path traversalと
-symlink parentを拒否します。download先を省略した場合は `downloads/<filename>`、同名ファイルは
-`overwrite:true` のときだけ置換します。転送前後の両方で `NOTION_MAX_ATTACHMENT_BYTES` を強制します。
+Agent Serviceでは`getFileContentURLForAgentThread`、assistant-transcriptでは`getSignedFileUrls`を使い、
+sizeとSHA-256を実download bytesに対して検証します。ローカルpathは`NOTION_ATTACHMENT_ROOT`の
+実パス配下だけ許可し、path traversalとsymlink parentを拒否します。download先を省略した場合は
+`downloads/<filename>`、同名ファイルは`overwrite:true`のときだけ置換します。転送前後の両方で
+`NOTION_MAX_ATTACHMENT_BYTES`を強制します。
+
+assistant-transcript descriptorはURL、header、form field、chat pointer、count/length、private-network hostを
+storage転送前に検証します。署名URL・S3 policy・一時credential・form fieldは保存も返却もせず、
+workspace/thread/file URL/metadata/SHA-256だけを不透明handleに紐づけてメモリ内に保持します。
 
 `fileIds`は空白を除去して重複を排除し、text blockと合わせて最大20 blocksになるよう一意なfileを
-19件まで許可します。legacy text chatとAgent Service file chatは同一conversation内で混在できません。
+19件まで許可します。Agent Service IDとassistant-transcript handleは同一conversation内で混在できません。
 旧 `attachments` 入力は互換性のため残していますが、text/URLをprompt contextへ展開するだけです。
 Notionへ実ファイルとして送る場合は必ず `upload_attachment` と `fileIds` を使用してください。
 
@@ -397,8 +408,8 @@ Notionへ実ファイルとして送る場合は必ず `upload_attachment` と `
 
 - 非公式 API のため schema、header、model ID、client version は変更される。
 - Node `fetch` は `notion_manager` の Chrome uTLS fingerprint を再現しない。現時点の履歴 API は実環境で成功。
-- 起動中に作成した thread だけが multi-turn 送信 session として継続可能。
-- file chat のtoken usageはAgent Service transcript APIから返らないため、`usage`は現在0を返す。
+- 起動中に作成した thread だけが multi-turn 送信 session として継続可能。assistant-transcript upload handleも再起動後は失効する。
+- Agent Service file chatのtoken usageはtranscript APIから返らないため、`usage`は現在0を返す。assistant-transcript fallbackは通常の推論usageを返す。
 - file chatでは `workspaceSearch` の無効化を明示できず、Agent Serviceのworkspace access既定値を使用する。
 - Notion quota がない場合、`premium-feature-unavailable` を tool error として返す。
 - browser DOM fallback は持たない。履歴 API が変更された場合は実装更新が必要。

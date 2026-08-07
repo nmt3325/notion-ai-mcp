@@ -101,8 +101,9 @@ export async function prepareAttachmentInput(input: AttachmentInput, root: strin
   if (data.byteLength === 0) throw new Error("Attachment must not be empty");
   if (data.byteLength > maxBytes) throw new Error(`Attachment exceeds the ${maxBytes}-byte limit`);
   const fileName = safeFileName(input.fileName ?? defaultName);
+  if (Buffer.byteLength(fileName, "utf8") > 255) throw new Error("fileName must be at most 255 UTF-8 bytes");
   const mediaType = input.mimeType?.trim() || inferMimeType(fileName);
-  if (/[\0\r\n]/.test(mediaType)) throw new Error("mimeType must not contain nulls or line breaks");
+  if (!mediaType || mediaType.length > 255 || /[\0\r\n]/.test(mediaType)) throw new Error("mimeType must be 1-255 characters without nulls or line breaks");
   return { data, fileName, mediaType, sizeBytes: data.byteLength };
 }
 

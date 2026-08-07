@@ -98,20 +98,22 @@ export function createServer(client: NotionClient): McpServer {
 
   server.registerTool("upload_attachment", {
     title: "Upload an attachment",
-    description: "Upload a local or base64 file to Notion Agent Service. Paths are restricted to NOTION_ATTACHMENT_ROOT and size is limited by NOTION_MAX_ATTACHMENT_BYTES.",
+    description: "Upload a local or base64 file for Notion AI. Auto mode prefers Agent Service and safely falls back to the assistant-transcript transport. Paths and sizes remain restricted.",
     inputSchema: {
       path: z.string().min(1).optional().describe("File path, absolute or relative to NOTION_ATTACHMENT_ROOT"),
       base64: z.string().min(1).optional().describe("Standard base64 file data"),
       fileName: z.string().min(1).optional().describe("Required for a meaningful base64 upload name; optional path override"),
       mimeType: z.string().min(1).optional(),
-      conversationId: z.string().uuid().optional().describe("Existing Agent Service conversation target; omit for a new chat upload")
+      conversationId: z.string().uuid().optional().describe("Existing conversation target; omit for a new file chat"),
+      transport: z.enum(["auto", "agent_service", "inference_transcript"]).optional().describe("Upload transport. Auto falls back when Agent Service is unavailable.")
     }
   }, async (input) => result(await client.uploadAttachment({
     ...(input.path ? { path: input.path } : {}),
     ...(input.base64 ? { base64: input.base64 } : {}),
     ...(input.fileName ? { fileName: input.fileName } : {}),
     ...(input.mimeType ? { mimeType: input.mimeType } : {}),
-    ...(input.conversationId ? { conversationId: input.conversationId } : {})
+    ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+    ...(input.transport ? { transport: input.transport } : {})
   })));
 
   server.registerTool("download_attachment", {
@@ -119,7 +121,7 @@ export function createServer(client: NotionClient): McpServer {
     description: "Download either an Agent Service thread file (conversationId + fileId) or a legacy Notion artifact (legacy URL + permissionRecord) to a safe local path and/or return base64.",
     inputSchema: {
       conversationId: z.string().uuid().optional().describe("Agent Service conversation ID; provide together with fileId"),
-      fileId: z.string().min(1).optional().describe("Agent Service file ID; provide together with conversationId"),
+      fileId: z.string().min(1).optional().describe("File ID or opaque upload handle; provide together with conversationId"),
       legacy: z.object({
         url: z.string().min(1).max(8192).describe("Original HTTPS or root-relative Notion file URL"),
         fileName: z.string().min(1).max(255).describe("Plain output/download file name"),

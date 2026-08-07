@@ -21,6 +21,8 @@
 | upload URL作成 | POST | `/api/v3/createAgentServiceFileUploadURL` | 同上 | target, filename, mediaType, sizeBytes | file ID + transfer descriptor |
 | upload完了 | POST | `/api/v3/completeAgentServiceFileUpload` | 同上 | target, fileId, multipart parts? | uploaded-file object |
 | thread file URL | POST | `/api/v3/getFileContentURLForAgentThread` | 同上 | threadId, fileId, metadata flag | signed URL + metadata |
+| assistant-transcript upload URL | POST | `/api/v3/getUploadFileUrlForAssistantChatTranscriptUpload` | 同上 | thread pointer, name, MIME, length, createThread | S3 POST descriptor + relative file URL + chatId |
+| file URL署名 | POST | `/api/v3/getSignedFileUrls` | 同上 | original URL, download flag/name, permissionRecord | ordered signed URL array |
 
 ベース URL は `https://www.notion.so/api/v3` を既定値にしている。ブラウザの
 `app.notion.com` サーフェスでは同一パスが `https://app.notion.com/api/v3` として観測された。
@@ -137,10 +139,12 @@ account JSONの更新を行う。account JSON更新ではcredentialと未知フ�
 }
 ```
 
-## Agent Service chat と添付
+## File chat と添付transport
 
-現行Web clientのfile chatは `runInferenceTranscript` のattachment stepではなくAgent Serviceを使用する。
-contentは最大20 block、textは先頭に最大1件、fileはupload済みIDで表す。
+Personal Agentの現行file chatは主にAgent Serviceを使う。一方、assistant chat surfaceには
+`runInferenceTranscript`へattachment/computer-file stepをstageする別のupload経路があり、
+Agent Service upload generationが利用できないworkspaceのfallbackとして使用できる。
+Agent Service contentは最大20 block、textは先頭に最大1件、fileはupload済みIDで表す。
 
 ```json
 [
@@ -257,6 +261,50 @@ legacy artifactは、元URLとpermission pointerが取得済みの場合に次�
 `getSignedFileUrls`のresponseは入力順の `signedUrls` array。legacy downloadはexactly one URLを要求し、
 permissionRecordのspaceIdがactive workspaceと異なる場合は署名request前に拒否する。署名後のGETは
 Agent Service downloadと同じtimeout・redirect・byte-limit・safe-output制約を使い、SHA-256を計算して返す。
+
+### Assistant-transcript upload fallback
+
+URL作成body:
+
+```json
+{
+  "name": "<uuid>.<safe-extension>",
+  "contentType": "text/csv",
+  "assistantChatTranscriptSessionPointer": {
+    "spaceId": "<space-id>",
+    "table": "thread",
+    "id": "<thread-id>"
+  },
+  "contentLength": 12345,
+  "createThread": true
+}
+```
+
+responseは`url`, `signedGetUrl`, `signedUploadPostUrl`, `postHeaders`, `fields`, `chatId`を返す。
+`postHeaders`は`[{name,value}]` array。S3 POSTはresponse順に`fields`を`FormData`へ追加し、
+最後に`file`を追加する。成功statusは200または204だけを許可する。
+
+processingを使えない場合の公式fallback step:
+
+```json
+{
+  "id": "<uuid>",
+  "type": "computer-file",
+  "fileUrl": "<relative-upload-url>",
+  "fileName": "report.csv",
+  "contentType": "text/csv",
+  "metadata": {
+    "fileSize": 12345,
+    "attachmentSource": "user_upload"
+  }
+}
+```
+
+MCP実装は署名URL、S3 policy、security token、form fieldを永続化・出力しない。代わりにworkspace、
+thread、relative file URL、plain filename、MIME、size、SHA-256をin-memory opaque handleへ紐づける。
+handleのdownloadは`getSignedFileUrls`へ`download:true`と
+`permissionRecord:{table:"thread",id:threadId,spaceId}`を送り、size/SHA-256を再検証する。
+workspace/thread/transport混在と再利用済みstepを拒否し、workspace switchまたはprocess restartでhandleを破棄する。
 
 ## `getInferenceTranscriptsForUser`
 

@@ -409,7 +409,7 @@ test("legacy inline attachments become prompt context and reject real-file mixin
     const transcript = (inferenceBody?.transcript ?? []) as Array<Record<string, unknown>>;
     assert.deepEqual(transcript.find((entry) => entry.type === "user")?.value, [[expectedPrompt]]);
     await assert.rejects(() => client.chat({ prompt: "Add a file", conversationId: first.conversationId, fileIds: ["file-1"] }), /cannot be added to a legacy chat/);
-    await assert.rejects(() => client.uploadAttachment({ base64: "ZGF0YQ==", fileName: "data.bin", conversationId: first.conversationId }), /only target an Agent Service conversation/);
+    await assert.rejects(() => client.uploadAttachment({ base64: "ZGF0YQ==", fileName: "data.bin", conversationId: first.conversationId, transport: "agent_service" }), /cannot target an inference-transcript conversation/);
     assert.equal(inferenceCalls, 1);
     assert.equal(uploadCreateCalls, 0);
   } finally { await rm(root, { recursive: true, force: true }); }
