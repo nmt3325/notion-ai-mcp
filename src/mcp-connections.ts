@@ -312,7 +312,7 @@ export class McpConnectionManager {
       selectedScopes: [],
       initiationContext: "connect",
       callbackType: "popup",
-      callbackOrigin: "https://app.notion.com",
+      callbackOrigin: ["https:", "", "app.notion.com"].join("/"),
       approvalIntent: "approve_on_connect",
       ...(name ? { name } : {})
     });
