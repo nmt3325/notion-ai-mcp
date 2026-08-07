@@ -1,0 +1,23 @@
+{
+  "started": true,
+  "transport": "stdio",
+  "toolCount": 16,
+  "tools": [
+    "add_mcp_connection",
+    "check_mcp_oauth_support",
+    "connect_preconfigured_mcp_server",
+    "create_workspace",
+    "get_conversation",
+    "get_current_workspace",
+    "get_mcp_connection_status",
+    "list_conversations",
+    "list_mcp_connections",
+    "list_preconfigured_mcp_servers",
+    "list_workspaces",
+    "notion_ai_chat",
+    "remove_mcp_connection",
+    "start_mcp_oauth",
+    "switch_workspace",
+    "update_mcp_connection"
+  ]
+}
