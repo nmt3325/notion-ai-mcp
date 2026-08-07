@@ -63,6 +63,7 @@ function parseUploadedFile(value: unknown): AgentUploadedFile {
     throw new Error("Notion returned an invalid uploaded-file object");
   }
   const sha256 = asString(file.sha256).trim();
+  if (sha256 && !/^[a-f0-9]{64}$/i.test(sha256)) throw new Error("Notion returned an invalid uploaded-file object");
   return { id, filename, media_type: mediaType, size_bytes: sizeBytes, ...(sha256 ? { sha256 } : {}) };
 }
 
@@ -337,37 +338,45 @@ export class NotionClient {
       const method = asString(upload.method).toUpperCase();
       if (!url || !["POST", "PUT"].includes(method)) throw new Error("Notion returned an invalid single-part upload descriptor");
       await this.signedRequest(url, { method, headers: signedHeaders(upload.headers), body: new Uint8Array(prepared.data) }, "Attachment upload");
-    } else {
+    } else if (upload.type === "multipart") {
       const partSize = upload.part_size_bytes;
       const descriptors = Array.isArray(upload.parts) ? upload.parts.map(object) : [];
       if (typeof partSize !== "number" || !Number.isSafeInteger(partSize) || partSize <= 0 || descriptors.length === 0) {
         throw new Error("Notion returned an invalid multipart upload descriptor");
       }
-      completedParts = [];
+      const expectedParts = Math.ceil(prepared.sizeBytes / partSize);
+      if (descriptors.length !== expectedParts) {
+        throw new Error(`Multipart descriptor contained ${descriptors.length} parts; expected ${expectedParts}`);
+      }
       const seen = new Set<number>();
-      for (const descriptor of descriptors) {
+      const validatedParts = descriptors.map((descriptor) => {
         const partNumber = descriptor.part_number;
         const url = asString(descriptor.url);
         const method = asString(descriptor.method).toUpperCase();
         if (typeof partNumber !== "number" || !Number.isSafeInteger(partNumber) || partNumber <= 0 || seen.has(partNumber) || !url || !["POST", "PUT"].includes(method)) {
           throw new Error("Notion returned an invalid multipart upload part");
         }
+        if (partNumber > expectedParts) throw new Error(`Multipart part ${partNumber} is outside the file bounds`);
         seen.add(partNumber);
         const start = (partNumber - 1) * partSize;
         const end = Math.min(start + partSize, prepared.sizeBytes);
-        if (start >= prepared.sizeBytes || end <= start) throw new Error(`Multipart part ${partNumber} is outside the file bounds`);
-        const response = await this.signedRequest(url, {
-          method,
-          headers: signedHeaders(descriptor.headers),
-          body: new Uint8Array(prepared.data.subarray(start, end))
-        }, `Attachment upload part ${partNumber}`);
+        if (end <= start) throw new Error(`Multipart part ${partNumber} is outside the file bounds`);
+        return { partNumber, url, method, headers: signedHeaders(descriptor.headers), start, end };
+      });
+      completedParts = [];
+      for (const descriptor of validatedParts) {
+        const response = await this.signedRequest(descriptor.url, {
+          method: descriptor.method,
+          headers: descriptor.headers,
+          body: new Uint8Array(prepared.data.subarray(descriptor.start, descriptor.end))
+        }, `Attachment upload part ${descriptor.partNumber}`);
         const etag = response.headers.get("etag")?.trim();
-        if (!etag) throw new Error(`Attachment upload part ${partNumber} did not return an ETag`);
-        completedParts.push({ partNumber, etag });
+        if (!etag) throw new Error(`Attachment upload part ${descriptor.partNumber} did not return an ETag`);
+        completedParts.push({ partNumber: descriptor.partNumber, etag });
       }
-      const expectedParts = Math.ceil(prepared.sizeBytes / partSize);
-      if (completedParts.length !== expectedParts) throw new Error(`Multipart descriptor contained ${completedParts.length} parts; expected ${expectedParts}`);
       completedParts.sort((left, right) => left.partNumber - right.partNumber);
+    } else {
+      throw new Error("Notion returned an unsupported upload descriptor type");
     }
 
     const completed = await this.fetchJson("completeAgentServiceFileUpload", {
@@ -379,6 +388,10 @@ export class NotionClient {
     const file = parseUploadedFile(completed);
     if (file.id !== fileId) throw new Error("Completed upload returned a different file ID");
     if (file.size_bytes !== prepared.sizeBytes) throw new Error("Completed upload returned a different file size");
+    if (file.sha256) {
+      const actual = createHash("sha256").update(prepared.data).digest("hex");
+      if (actual.toLowerCase() !== file.sha256.toLowerCase()) throw new Error("Completed upload checksum did not match local data");
+    }
     return {
       fileId: file.id,
       fileName: file.filename,
@@ -411,6 +424,9 @@ export class NotionClient {
     const metadataId = asString(metadata.id).trim();
     if (metadataId && metadataId !== options.fileId) throw new Error("Downloaded attachment metadata returned a different file ID");
     const declaredSize = metadata.size_bytes;
+    if (declaredSize !== undefined && (typeof declaredSize !== "number" || !Number.isSafeInteger(declaredSize) || declaredSize < 0)) {
+      throw new Error("Downloaded attachment metadata returned an invalid size");
+    }
     if (typeof declaredSize === "number" && declaredSize > maxBytes) throw new Error(`Download exceeds the ${maxBytes}-byte limit`);
     const response = await this.signedRequest(url, { method: "GET" }, "Attachment download");
     const data = await readResponseBuffer(response, maxBytes);
@@ -419,6 +435,7 @@ export class NotionClient {
     }
     const sha256 = asString(metadata.sha256).trim();
     if (sha256) {
+      if (!/^[a-f0-9]{64}$/i.test(sha256)) throw new Error("Downloaded attachment metadata returned an invalid checksum");
       const actual = createHash("sha256").update(data).digest("hex");
       if (actual.toLowerCase() !== sha256.toLowerCase()) throw new Error("Downloaded attachment checksum did not match Notion metadata");
     }

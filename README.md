@@ -347,14 +347,19 @@ download例:
 }
 ```
 
-upload は `createAgentServiceFileUploadURL` の `single_part` / multipart descriptorに従い、multipartでは
-各partの `ETag` を `completeAgentServiceFileUpload` に渡します。download は
-`getFileContentURLForAgentThread` の署名URLを使い、metadataにSHA-256があれば照合します。
+upload は `createAgentServiceFileUploadURL` の `single_part` / `multipart` descriptorだけを許可します。
+multipartはpart数・一意な連番・file境界・method・URLを**転送開始前に全件検証**し、各partの `ETag` を
+`completeAgentServiceFileUpload` に渡します。signed URL requestはredirectを拒否し、
+`NOTION_REQUEST_TIMEOUT_MS`でabortします。
 
-ローカルpathは `NOTION_ATTACHMENT_ROOT` の実パス配下だけ許可し、path traversalとsymlink parentを拒否します。
-download先を省略した場合は `downloads/<filename>`、同名ファイルは `overwrite:true` のときだけ置換します。
-転送前後の両方で `NOTION_MAX_ATTACHMENT_BYTES` を強制します。
+upload完了metadataのfile ID・size・任意のSHA-256をローカルbytesと照合します。downloadは
+`getFileContentURLForAgentThread` の署名URLを使い、metadataのsizeとSHA-256を実download bytesに対して
+検証します。ローカルpathは `NOTION_ATTACHMENT_ROOT` の実パス配下だけ許可し、path traversalと
+symlink parentを拒否します。download先を省略した場合は `downloads/<filename>`、同名ファイルは
+`overwrite:true` のときだけ置換します。転送前後の両方で `NOTION_MAX_ATTACHMENT_BYTES` を強制します。
 
+`fileIds`は空白を除去して重複を排除し、text blockと合わせて最大20 blocksになるよう一意なfileを
+19件まで許可します。legacy text chatとAgent Service file chatは同一conversation内で混在できません。
 旧 `attachments` 入力は互換性のため残していますが、text/URLをprompt contextへ展開するだけです。
 Notionへ実ファイルとして送る場合は必ず `upload_attachment` と `fileIds` を使用してください。
 

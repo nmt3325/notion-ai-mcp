@@ -213,12 +213,14 @@ multipart descriptor:
 
 ```json
 {
+  "type": "multipart",
   "parts": [{ "part_number": 1, "url": "<signed-url>", "method": "PUT", "headers": {} }],
   "part_size_bytes": 20971520
 }
 ```
 
-multipartの各HTTP responseから `ETag` を取得し、完了bodyへ次の形で渡す。
+multipartは期待part数、part numberの一意性と範囲、URL、methodを全件検証してから転送する。
+各HTTP responseから `ETag` を取得し、完了bodyへ次の形で渡す。
 
 ```json
 {
@@ -230,8 +232,10 @@ multipartの各HTTP responseから `ETag` を取得し、完了bodyへ次の形�
 ```
 
 完了レスポンスのfile objectは `id`, `filename`, `media_type`, `size_bytes`, optional `sha256`。
+file IDとsizeはrequest/local bytesに一致しなければならず、SHA-256があればlocal bytesと照合する。
 thread fileのdownloadは `getFileContentURLForAgentThread({spaceId,threadId,fileId,includeFileMetadata:true})`
-が返す `{url,file}` を使用する。
+が返す `{url,file}` を使用する。signed URLはHTTPS（localhostだけHTTP可）、redirect禁止、request timeout付きで
+取得し、metadataのsizeとSHA-256をdownload bytesに対して検証する。
 
 ## `getInferenceTranscriptsForUser`
 
