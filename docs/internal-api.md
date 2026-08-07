@@ -1,6 +1,6 @@
 # Notion AI 内部 API 仕様
 
-調査日: 2026-07-23
+調査日: 2026-08-07
 
 > **非公式 API です。** Notion の公開 API ではなく、予告なく変更・停止されます。
 > 個人検証用途に限定し、アカウント停止、データ損失、仕様変更のリスクを受け入れた上で使用してください。
@@ -13,6 +13,12 @@
 | Notion AI 送信 | POST | `/api/v3/runInferenceTranscript` | `token_v2` Cookie + user/space headers | workflow transcript | `application/x-ndjson`。環境差に備えて SSE `data:` 形式も許容 |
 | 会話一覧 | POST | `/api/v3/getInferenceTranscriptsForUser` | 同上 | space pointer、種別、cursor | JSON `transcripts`, `recordMap.thread`, `nextCursor`, `hasMore` |
 | メッセージ本体 | POST | `/api/v3/syncRecordValuesMain` | 同上 | `thread_message` pointer 配列 | JSON `recordMap.thread_message` |
+| Agent Service thread作成 | POST | `/api/v3/createAgentThread` | 同上 | `type`, `threadId`, `content`, model等 | JSON `thread` |
+| Agent Service継続送信 | POST | `/api/v3/sendEventToAgentThread` | 同上 | `event:{type:"user.message",content}` | JSON |
+| Agent Service transcript | POST | `/api/v3/getThreadTranscript` | 同上 | `threadId`, direction, cursor, limit | patch page |
+| upload URL作成 | POST | `/api/v3/createAgentServiceFileUploadURL` | 同上 | target, filename, mediaType, sizeBytes | file ID + transfer descriptor |
+| upload完了 | POST | `/api/v3/completeAgentServiceFileUpload` | 同上 | target, fileId, multipart parts? | uploaded-file object |
+| thread file URL | POST | `/api/v3/getFileContentURLForAgentThread` | 同上 | threadId, fileId, metadata flag | signed URL + metadata |
 
 ベース URL は `https://www.notion.so/api/v3` を既定値にしている。ブラウザの
 `app.notion.com` サーフェスでは同一パスが `https://app.notion.com/api/v3` として観測された。
@@ -75,6 +81,102 @@ tool use は回答本文へ混ぜない。`inputTokens` / `outputTokens` は完�
 
 互換性のため、同じ JSON が `data: {...}` で包まれた SSE と `data: [DONE]` もパーサーが
 受理する。
+
+## Agent Service chat と添付
+
+現行Web clientのfile chatは `runInferenceTranscript` のattachment stepではなくAgent Serviceを使用する。
+contentは最大20 block、textは先頭に最大1件、fileはupload済みIDで表す。
+
+```json
+[
+  { "type": "text", "text": "このファイルを要約して" },
+  { "type": "file", "file_id": "<file-id>" }
+]
+```
+
+初回:
+
+```json
+{
+  "type": "personal_agent",
+  "spaceId": "<space-id>",
+  "threadId": "<uuid>",
+  "content": [{ "type": "text", "text": "..." }, { "type": "file", "file_id": "..." }],
+  "model": "<internal-model-id>",
+  "policies": { "approval_mode": "ask" },
+  "browserEnabled": false,
+  "clientMessageId": "<uuid>"
+}
+```
+
+継続:
+
+```json
+{
+  "spaceId": "<space-id>",
+  "threadId": "<thread-id>",
+  "event": { "type": "user.message", "content": [{ "type": "text", "text": "..." }] },
+  "model": "<internal-model-id>",
+  "policies": { "approval_mode": "ask" },
+  "clientEventId": "<uuid>"
+}
+```
+
+回答は `getThreadTranscript` をforward cursorで読み、次のpatch protocolを適用する。
+
+- `put`: entity snapshotを保存
+- `patch`: `append`, `add`, `replace` をentityへ適用。assistant textのstream pathは `/content/0/text`
+- `remove`, `rewind`: entityを除去
+- `session`, `session_status`, `committed`: session/commit stateを更新
+- `kind:"turn_completed"`: turn完了
+- `kind:"error"`: tool error
+
+### Agent Service file upload
+
+URL作成body:
+
+```json
+{
+  "spaceId": "<space-id>",
+  "target": { "type": "user" },
+  "filename": "report.pdf",
+  "mediaType": "application/pdf",
+  "sizeBytes": 12345
+}
+```
+
+既存thread向けは `target:{"type":"thread","threadId":"..."}`。新規thread作成前のuploadは
+`target:{"type":"user"}` を使う。
+
+single-part descriptor:
+
+```json
+{ "type": "single_part", "url": "<signed-url>", "method": "PUT", "headers": {} }
+```
+
+multipart descriptor:
+
+```json
+{
+  "parts": [{ "part_number": 1, "url": "<signed-url>", "method": "PUT", "headers": {} }],
+  "part_size_bytes": 20971520
+}
+```
+
+multipartの各HTTP responseから `ETag` を取得し、完了bodyへ次の形で渡す。
+
+```json
+{
+  "spaceId": "<space-id>",
+  "target": { "type": "user" },
+  "fileId": "<file-id>",
+  "parts": [{ "partNumber": 1, "etag": "<etag>" }]
+}
+```
+
+完了レスポンスのfile objectは `id`, `filename`, `media_type`, `size_bytes`, optional `sha256`。
+thread fileのdownloadは `getFileContentURLForAgentThread({spaceId,threadId,fileId,includeFileMetadata:true})`
+が返す `{url,file}` を使用する。
 
 ## `getInferenceTranscriptsForUser`
 

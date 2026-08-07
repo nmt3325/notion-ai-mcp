@@ -88,24 +88,27 @@ for label,text in sources:
         match=headers[-1]; owner=(label,text,pos,match.group(1),match.start(1)); break
 if owner is None: print("owner_module_found=false"); raise SystemExit
 label,text,pos,module_id,module_start=owner
-print(f"owner_module_found=true owner_source={label} owner_module_id={module_id}")
-print("\nOWNER_MODULE_HEAD")
-print(text[module_start:min(len(text),module_start+9000)].replace("\n"," "))
-head=text[module_start:min(len(text),module_start+12000)]
-exports={local:exported for exported,local in re.findall(r'([A-Za-z0-9_$]+):\(\)=>\s*([A-Za-z0-9_$]+)',head)}
+next_header=re.search(r'},[0-9]{1,9}\([A-Za-z_$][\w$]*,[A-Za-z_$][\w$]*,[A-Za-z_$][\w$]*\)\{',text[module_start+1:])
+module_end=(module_start+1+next_header.start()+1) if next_header else len(text)
+module_text=text[module_start:module_end]
+print(f"owner_module_found=true owner_source={label} owner_module_id={module_id} owner_module_bytes={len(module_text)}")
+exports={local:exported for exported,local in re.findall(r'([A-Za-z0-9_$]+):\(\)=>\s*([A-Za-z0-9_$]+)',module_text)}
 locals_by_event={}
 for event in ["createAgentServiceFileUploadURL","completeAgentServiceFileUpload","getFileContentURLForAgentThread"]:
-    ep=text.find(event,module_start)
-    prior=text[max(module_start,ep-300):ep]
+    ep=module_text.find(event)
+    prior=module_text[:ep]
     matches=list(re.finditer(r'async function\s+([A-Za-z0-9_$]+)\s*\(',prior))
     if matches: locals_by_event[event]=matches[-1].group(1)
+    print(f"\nOWNER_EVENT_CONTEXT={event}")
+    print(module_text[max(0,ep-700):min(len(module_text),ep+1100)].replace("\n"," "))
 export_by_event={event:exports.get(local) for event,local in locals_by_event.items()}
 print("LOCAL_BY_EVENT="+json.dumps(locals_by_event,sort_keys=True))
 print("EXPORT_BY_EVENT="+json.dumps(export_by_event,sort_keys=True))
 
 callsite_count=0
+shown_by_event={event:0 for event in export_by_event}
+reference_sources={event:[] for event in export_by_event}
 for source_label,source_text in sources:
-    if source_label==label: continue
     if module_id not in source_text: continue
     aliases=set()
     for m in re.finditer(r'([A-Za-z_$][\w$]*)\s*=\s*\(\)\s*=>\s*[A-Za-z_$][\w$]*\(\s*'+re.escape(module_id)+r'\s*\)',source_text): aliases.add((m.group(1),True))
@@ -113,39 +116,28 @@ for source_label,source_text in sources:
     patterns=[]
     for event,exported in export_by_event.items():
         if not exported: continue
-        patterns.append((event,re.compile(r'[A-Za-z_$][\w$]*\(\s*'+re.escape(module_id)+r'\s*\)\.'+re.escape(exported)+r'\s*\(')))
+        patterns.append((event,re.compile(r'[A-Za-z_$][\w$]*\(\s*'+re.escape(module_id)+r'\s*\)\.'+re.escape(exported)+r'\b')))
         for alias,is_fn in aliases:
             prefix=re.escape(alias)+(r'\(\)' if is_fn else '')
-            patterns.append((event,re.compile(prefix+r'\.'+re.escape(exported)+r'\s*\(')))
+            patterns.append((event,re.compile(prefix+r'\.'+re.escape(exported)+r'\b')))
     seen=set()
     for event,pattern in patterns:
         for match in pattern.finditer(source_text):
             key=(event,match.start())
             if key in seen: continue
             seen.add(key); callsite_count+=1
-            lo=max(0,match.start()-9000); hi=min(len(source_text),match.end()+13000)
+            if source_label not in reference_sources[event]: reference_sources[event].append(source_label)
+            if shown_by_event[event] >= 2: continue
+            shown_by_event[event]+=1
+            lo=max(0,match.start()-1800); hi=min(len(source_text),match.end()+3200)
             print(f"\nCALLSITE_SOURCE={source_label} EVENT={event} INDEX={callsite_count}")
             print(source_text[lo:hi].replace("\n"," "))
-            if callsite_count>=40: break
-        if callsite_count>=40: break
-    if callsite_count>=40: break
 print(f"CALLSITE_COUNT={callsite_count}")
-
-for event in ["createAgentServiceFileUploadURL","completeAgentServiceFileUpload"]:
-    exported=export_by_event.get(event)
-    print(f"EVENT_EXPORT {event}={exported}")
-print("OWNER_IMPORT_REFERENCES")
-shown=0
-for source_label,source_text in sources:
-    if source_label==label: continue
-    for match in re.finditer(r'\(\s*'+re.escape(module_id)+r'\s*\)',source_text):
-        shown+=1
-        lo=max(0,match.start()-2500); hi=min(len(source_text),match.end()+5000)
-        print(f"\nIMPORT_SOURCE={source_label} INDEX={shown}")
-        print(source_text[lo:hi].replace("\n"," "))
-        if shown>=30: break
-    if shown>=30: break
-print(f"IMPORT_REFERENCE_COUNT_SHOWN={shown}")
+print("CALLSITE_SHOWN_BY_EVENT="+json.dumps(shown_by_event,sort_keys=True))
+for event,source_labels in reference_sources.items():
+    print(f"REFERENCE_SOURCES event={event} count={len(source_labels)} labels="+json.dumps(source_labels[:20]))
+for event in ["createAgentServiceFileUploadURL","completeAgentServiceFileUpload","getFileContentURLForAgentThread"]:
+    print(f"EVENT_EXPORT {event}={export_by_event.get(event)}")
 PY
 } > "$out" 2>&1
 wc -c "$out"

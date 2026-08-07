@@ -10,6 +10,8 @@ export interface NotionConfig {
   accountFilePath?: string|undefined;
   maxWorkspaceRetries?: number;
   mcpRegistryPath?: string | undefined;
+  attachmentRoot?: string | undefined;
+  maxAttachmentBytes?: number | undefined;
 }
 
 function optional(name: string, fallback = ""): string {
@@ -36,12 +38,16 @@ export function loadConfig(): NotionConfig {
   if (!tokenV2) throw new Error("NOTION_TOKEN_V2 or NOTION_ACCOUNT_FILE with token_v2 is required");
   const fullCookie = optional("NOTION_FULL_COOKIE", fileString(file, "full_cookie"));
   const maxRetries = Number(optional("NOTION_MAX_WORKSPACE_RETRIES", "5"));
+  const maxAttachmentBytes = Number(optional("NOTION_MAX_ATTACHMENT_BYTES", String(20 * 1024 * 1024)));
+  if (!Number.isSafeInteger(maxAttachmentBytes) || maxAttachmentBytes <= 0) throw new Error("NOTION_MAX_ATTACHMENT_BYTES must be a positive safe integer");
   return {
     apiBase: optional("NOTION_API_BASE", "https://www.notion.so/api/v3").replace(/\/$/, ""),
     defaultModel: optional("NOTION_DEFAULT_MODEL", "almond-croissant-low"),
     requestTimeoutMs: timeout,
     accountFilePath: accountPath || undefined,
     mcpRegistryPath: optional("NOTION_MCP_REGISTRY_FILE") || undefined,
+    attachmentRoot: optional("NOTION_ATTACHMENT_ROOT", process.cwd()),
+    maxAttachmentBytes,
     maxWorkspaceRetries: Number.isFinite(maxRetries) && maxRetries > 0 ? maxRetries : 5,
     account: {
       tokenV2,

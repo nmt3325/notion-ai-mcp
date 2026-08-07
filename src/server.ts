@@ -6,7 +6,7 @@ import { NotionClient } from "./notion-client.js";
 import type { McpAuth } from "./mcp-connections.js";
 import { listModels } from "./models.js";
 
-export const SERVER_VERSION = "0.7.5";
+export const SERVER_VERSION = "0.8.0";
 
 const authShape = z.object({
   type: z.enum(["none", "bearer", "token", "apiKey", "basic", "header", "oauth"]).describe("Authentication style expected by the MCP server"),
@@ -79,7 +79,8 @@ export function createServer(client: NotionClient): McpServer {
         url: z.string().min(1).optional(),
         text: z.string().optional(),
         mimeType: z.string().optional()
-      })).optional().describe("Files or inline text to attach to the prompt")
+      })).optional().describe("Legacy inline text/link context. Use upload_attachment plus fileIds for real files."),
+      fileIds: z.array(z.string().min(1)).max(19).optional().describe("File IDs returned by upload_attachment. A new file chat uses the current Agent Service content-block format.")
     }
   }, async (input) => {
     const chat = await client.chat({
@@ -89,10 +90,47 @@ export function createServer(client: NotionClient): McpServer {
       readOnly: input.readOnly,
       ...(input.model ? { model: input.model } : {}),
       ...(input.conversationId ? { conversationId: input.conversationId } : {}),
-      ...(input.attachments ? { attachments: input.attachments } : {})
+      ...(input.attachments ? { attachments: input.attachments } : {}),
+      ...(input.fileIds ? { fileIds: input.fileIds } : {})
     });
     return result(chat, chat.text);
   });
+
+  server.registerTool("upload_attachment", {
+    title: "Upload an attachment",
+    description: "Upload a local or base64 file to Notion Agent Service. Paths are restricted to NOTION_ATTACHMENT_ROOT and size is limited by NOTION_MAX_ATTACHMENT_BYTES.",
+    inputSchema: {
+      path: z.string().min(1).optional().describe("File path, absolute or relative to NOTION_ATTACHMENT_ROOT"),
+      base64: z.string().min(1).optional().describe("Standard base64 file data"),
+      fileName: z.string().min(1).optional().describe("Required for a meaningful base64 upload name; optional path override"),
+      mimeType: z.string().min(1).optional(),
+      conversationId: z.string().uuid().optional().describe("Existing Agent Service conversation target; omit for a new chat upload")
+    }
+  }, async (input) => result(await client.uploadAttachment({
+    ...(input.path ? { path: input.path } : {}),
+    ...(input.base64 ? { base64: input.base64 } : {}),
+    ...(input.fileName ? { fileName: input.fileName } : {}),
+    ...(input.mimeType ? { mimeType: input.mimeType } : {}),
+    ...(input.conversationId ? { conversationId: input.conversationId } : {})
+  })));
+
+  server.registerTool("download_attachment", {
+    title: "Download an attachment",
+    description: "Download an Agent Service thread file to a safe local path and/or return base64, enforcing the configured byte limit and checksum.",
+    inputSchema: {
+      conversationId: z.string().uuid(),
+      fileId: z.string().min(1),
+      outputPath: z.string().min(1).optional().describe("Destination path under NOTION_ATTACHMENT_ROOT; defaults to downloads/<filename>"),
+      returnBase64: z.boolean().default(false),
+      overwrite: z.boolean().default(false)
+    }
+  }, async (input) => result(await client.downloadAttachment({
+    conversationId: input.conversationId,
+    fileId: input.fileId,
+    returnBase64: input.returnBase64,
+    overwrite: input.overwrite,
+    ...(input.outputPath ? { outputPath: input.outputPath } : {})
+  })));
 
   server.registerTool("list_conversations", {
     title: "List Notion AI conversations",

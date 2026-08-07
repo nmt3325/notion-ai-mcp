@@ -1,13 +1,14 @@
 # Notion AI MCP Server
 
 Notion AI の非公式な内部 API を MCP サーバーとしてラップする、個人検証用の TypeScript 実装です。
-stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次の 16 ツールを利用できます。
+stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次の 18 ツールを利用できます。
 
 **チャット / 履歴**
 
 - `notion_ai_chat`: Notion AI にプロンプトを送信し、NDJSON/SSE ストリームを集約して返す（モデル指定・添付対応）
 - `list_conversations`: Notion AI の workflow/chat thread をページング取得する
 - `get_conversation`: 指定 thread の user-visible な user/assistant メッセージを取得する
+- `upload_attachment` / `download_attachment`: Agent Service のファイルを安全に upload/download する
 
 **ワークスペース**
 
@@ -78,6 +79,8 @@ node dist/src/index.js
 | `NOTION_FULL_COOKIE` | 任意 | 必要な場合だけ完全な Cookie header を指定 |
 | `NOTION_MODEL_ALIASES` | 任意 | モデル別名を追加/上書きする JSON。例 `{"my-fast":"oatmeal-cookie"}` |
 | `NOTION_MCP_REGISTRY_FILE` | 任意 | 登録済み MCP 接続の保存先（mode 0600） |
+| `NOTION_ATTACHMENT_ROOT` | 任意 | upload元/download先として許可するroot。既定は起動時のworking directory |
+| `NOTION_MAX_ATTACHMENT_BYTES` | 任意 | upload/download 1ファイルの上限。既定 `20971520` (20 MiB) |
 
 ## Remote Streamable HTTP
 
@@ -190,11 +193,19 @@ notion-ai-mcp.example.com {
 - `model` (任意、Notion 内部 model ID)
 - `conversationId` (任意、このサーバープロセスが直前に返した ID)
 - `webSearch` / `workspaceSearch` (既定 `false`)
-- `readOnly` (既定 `true`、Notion Ask mode)
+- `readOnly` (既定 `true`、legacy text chat の Notion Ask mode)
+- `fileIds` (任意、`upload_attachment` が返したID。最大19件)
+- `attachments` (任意、旧互換のinline text/link context。実ファイルには `fileIds` を使用)
 
-新しい chat は Notion 上に workflow thread を作成します。継続 chat の session は現在メモリ内にだけ
-保持するため、サーバー再起動後は以前の `conversationId` を送信継続には使えません。過去 thread の
-閲覧は `get_conversation` で可能です。
+添付なしの新しい chat は実績のある `runInferenceTranscript` workflow thread を使用します。
+`fileIds` 付きの新しい chat は現行 Agent Service の `createAgentThread` と
+`content: [{type:"text"}, {type:"file",file_id}]` を使用し、継続ターンは `sendEventToAgentThread` へ送ります。
+1つの conversation 内で transport は混在させないため、legacy text chat に後から file ID を追加する場合は
+`conversationId` を省略して新しい file chat を開始してください。file chatは安全のため
+`policies.approval_mode="ask"`を明示し、変更・送信・共有などのaction前に確認を要求します。
+
+継続 chat の session は現在メモリ内にだけ保持するため、サーバー再起動後は以前の `conversationId` を
+送信継続には使えません。過去 thread の閲覧は `get_conversation` で可能です。
 
 ### `list_conversations`
 
@@ -276,21 +287,59 @@ NOTION_ACCOUNT_FILE=/absolute/path/account.json NOTION_SMOKE_CHAT=1 npm run smok
 
 ## 添付ファイル
 
-`notion_ai_chat` に `attachments` を渡すと、transcript の user step に添付として付与します。
+実ファイルは次の順で扱います。
+
+1. `upload_attachment` に許可root内の `path`、または `base64` と `fileName` を渡す。
+2. 戻り値の `fileId` を `notion_ai_chat.fileIds` に渡す。
+3. chat 後は `download_attachment` に `conversationId` と `fileId` を渡して再取得できる。
+
+upload例:
 
 ```json
 {
-  "prompt": "このメモを要約して",
-  "attachments": [{ "name": "notes.md", "text": "..." }]
+  "path": "inputs/report.pdf",
+  "mimeType": "application/pdf"
 }
 ```
 
-添付がある場合は context step の `surface` を `workflows` に切り替えます（UI と同じ振る舞い）。
+chat例:
+
+```json
+{
+  "prompt": "このPDFを要約して",
+  "fileIds": ["<upload_attachment が返した fileId>"]
+}
+```
+
+download例:
+
+```json
+{
+  "conversationId": "<file chat の conversationId>",
+  "fileId": "<fileId>",
+  "outputPath": "downloads/report.pdf",
+  "returnBase64": false,
+  "overwrite": false
+}
+```
+
+upload は `createAgentServiceFileUploadURL` の `single_part` / multipart descriptorに従い、multipartでは
+各partの `ETag` を `completeAgentServiceFileUpload` に渡します。download は
+`getFileContentURLForAgentThread` の署名URLを使い、metadataにSHA-256があれば照合します。
+
+ローカルpathは `NOTION_ATTACHMENT_ROOT` の実パス配下だけ許可し、path traversalとsymlink parentを拒否します。
+download先を省略した場合は `downloads/<filename>`、同名ファイルは `overwrite:true` のときだけ置換します。
+転送前後の両方で `NOTION_MAX_ATTACHMENT_BYTES` を強制します。
+
+旧 `attachments` 入力は互換性のため残していますが、text/URLをprompt contextへ展開するだけです。
+Notionへ実ファイルとして送る場合は必ず `upload_attachment` と `fileIds` を使用してください。
 
 ## 既知の制限
 
 - 非公式 API のため schema、header、model ID、client version は変更される。
 - Node `fetch` は `notion_manager` の Chrome uTLS fingerprint を再現しない。現時点の履歴 API は実環境で成功。
 - 起動中に作成した thread だけが multi-turn 送信 session として継続可能。
+- file chat のtoken usageはAgent Service transcript APIから返らないため、`usage`は現在0を返す。
+- file chatでは `workspaceSearch` の無効化を明示できず、Agent Serviceのworkspace access既定値を使用する。
 - Notion quota がない場合、`premium-feature-unavailable` を tool error として返す。
 - browser DOM fallback は持たない。履歴 API が変更された場合は実装更新が必要。
