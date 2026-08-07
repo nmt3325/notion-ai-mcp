@@ -23,7 +23,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - name: Run validation and capture result
+      - name: Run validation and command smoke
         id: validation
         shell: bash
         run: |
@@ -32,11 +32,16 @@ jobs:
           check_status=$?
           npm test > /tmp/test.log 2>&1
           test_status=$?
+          npm run build > /tmp/build.log 2>&1
+          build_status=$?
+          node scripts/stdio-command-smoke.mjs > /tmp/stdio.json 2> /tmp/stdio.err
+          stdio_status=$?
+          mkdir -p .ci
+          if [ -s /tmp/stdio.json ]; then cp /tmp/stdio.json .ci/stdio-smoke.json; else printf '{"started":false,"status":%s}\n' "$stdio_status" > .ci/stdio-smoke.json; fi
           git diff --check > /tmp/diff.log 2>&1
           diff_status=$?
           overall=0
-          if [ "$check_status" -ne 0 ] || [ "$test_status" -ne 0 ] || [ "$diff_status" -ne 0 ]; then overall=1; fi
-          mkdir -p .ci
+          if [ "$check_status" -ne 0 ] || [ "$test_status" -ne 0 ] || [ "$build_status" -ne 0 ] || [ "$stdio_status" -ne 0 ] || [ "$diff_status" -ne 0 ]; then overall=1; fi
           {
             echo "commit=$GITHUB_SHA"
             echo "checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -44,16 +49,19 @@ jobs:
             echo "npm=$(npm -v)"
             echo "check_status=$check_status"
             echo "test_status=$test_status"
+            echo "build_status=$build_status"
+            echo "stdio_status=$stdio_status"
             echo "diff_status=$diff_status"
             echo
-            echo "== npm run check =="
-            tail -200 /tmp/check.log
+            echo "== npm run check =="; tail -200 /tmp/check.log
             echo
-            echo "== npm test =="
-            tail -300 /tmp/test.log
+            echo "== npm test =="; tail -300 /tmp/test.log
             echo
-            echo "== git diff --check =="
-            tail -100 /tmp/diff.log
+            echo "== npm run build =="; tail -200 /tmp/build.log
+            echo
+            echo "== stdio command smoke stderr =="; tail -200 /tmp/stdio.err
+            echo
+            echo "== git diff --check =="; tail -100 /tmp/diff.log
           } > .ci/last-result.txt
           echo "overall=$overall" >> "$GITHUB_OUTPUT"
       - name: Research current attachment APIs with wget
@@ -70,7 +78,7 @@ jobs:
           git config user.name github-actions
           git config user.email github-actions@github.com
           git add .ci/last-result.txt
-          if [ -f .ci/attachment-research.txt ]; then git add .ci/attachment-research.txt; fi
+          for file in .ci/stdio-smoke.json .ci/attachment-research.txt; do if [ -f "$file" ]; then git add "$file"; fi; done
           git commit -m "ci: record validation for ${GITHUB_SHA::7} [skip ci]" || true
           git push
       - name: Propagate validation failure
