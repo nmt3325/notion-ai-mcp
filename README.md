@@ -14,7 +14,7 @@ stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion 
 
 - `list_workspaces` / `get_current_workspace`: アカウント内の workspace 一覧と現在の workspace
 - `switch_workspace`: space ID または名前（部分一致可）で切り替え、`pin` で固定
-- `create_workspace`: 新規 workspace を作成して切り替え（無料枠の AI クレジットをリセットする目的）
+- `create_workspace`: 公式 Web transaction 形状で新規 workspace を作成し、完全検証後に切り替え・固定
 
 **MCP 接続管理（Notion 側の Settings > Connections > MCP を API から操作）**
 
@@ -63,19 +63,26 @@ node dist/src/index.js
 ```
 
 環境変数は account JSON より優先されます。完全な一覧は [.env.example](.env.example) を参照。
-1アカウントに複数 workspace がある場合、account JSON に保存された既定値とは別の workspace を使うには
-`NOTION_SPACE_ID` と `NOTION_SPACE_VIEW_ID` を明示してください。
+`switch_workspace` / `create_workspace` に `pin:true` を指定すると、`space_id`, `space_view_id`,
+`space_name`, `pinned_space_id` を account JSON へ mode `0600` で保存します。既存の `token_v2`,
+`full_cookie` と未知のフィールドは保持します。
+
+1アカウントに複数 workspace があり、永続設定とは別の workspace を一時的に使う場合は
+`NOTION_SPACE_ID` と `NOTION_SPACE_VIEW_ID` を明示してください。起動時から固定する場合は
+`NOTION_PINNED_SPACE_ID` も指定できます。
 
 | 変数 | 必須 | 説明 |
 |---|---:|---|
 | `NOTION_TOKEN_V2` | 条件付き | `NOTION_ACCOUNT_FILE` に `token_v2` がなければ必須 |
 | `NOTION_ACCOUNT_FILE` | 条件付き | `notion_manager` 互換 JSON。token をリポジトリ外に置くことを推奨 |
 | `NOTION_SPACE_ID` | 任意 | workspace UUID。未指定時は自動検出 |
+| `NOTION_SPACE_VIEW_ID` | 任意 | workspace の `space_view` UUID |
+| `NOTION_PINNED_SPACE_ID` | 任意 | 起動時に復元する固定 workspace UUID |
 | `NOTION_USER_ID` | 任意 | user UUID。未指定時は自動検出 |
 | `NOTION_CLIENT_VERSION` | 任意 | 既定 `23.13.20260313.1423` |
 | `NOTION_DEFAULT_MODEL` | 任意 | Notion 内部 model ID。既定 `almond-croissant-low` |
 | `NOTION_API_BASE` | 任意 | 既定 `https://www.notion.so/api/v3` |
-| `NOTION_REQUEST_TIMEOUT_MS` | 任意 | 履歴取得/ストリーム全体の timeout。既定 300000 ms |
+| `NOTION_REQUEST_TIMEOUT_MS` | 任意 | 内部 API request timeout（workspace操作にも適用）。既定 300000 ms |
 | `NOTION_FULL_COOKIE` | 任意 | 必要な場合だけ完全な Cookie header を指定 |
 | `NOTION_MODEL_ALIASES` | 任意 | モデル別名を追加/上書きする JSON。例 `{"my-fast":"oatmeal-cookie"}` |
 | `NOTION_MCP_REGISTRY_FILE` | 任意 | 登録済み MCP 接続の保存先（mode 0600） |
@@ -217,6 +224,20 @@ notion-ai-mcp.example.com {
 `conversationId` と任意の `maxPages` を受け取ります。hidden thinking、tool call、config/context などの
 運用レコードは返しません。
 
+### Workspace tools
+
+- `list_workspaces`: `loadUserContent` の `space_views` と `space_view_pointers` が整合し、対応する
+  `space` record が存在する workspace だけを返します。
+- `switch_workspace`: IDまたは名前で選択し、AI probe成功後にだけ切り替えます。`pin:true` なら
+  account JSONにも永続化します。
+- `create_workspace`: `/createSpace` を1回だけ呼び、公式の3-operation transactionをcommitします。
+  `user_root.space_views` と `space_view_pointers` に生成IDがそれぞれちょうど1件あり、さらに
+  `syncRecordValuesMain` で完全な `space_view` recordを確認できた場合だけ成功とします。
+
+`/createSpace` 成功後のtransaction・検証失敗はpartial creationです。重複workspaceを防ぐため、
+サーバーは `/createSpace` もtransactionも自動再試行せず、切り替え・pin・account JSON更新を行いません。
+HTTP errorにはbounded response bodyを含め、`Retry-After` があれば併記します。
+
 ## 検証
 
 ```bash
@@ -258,6 +279,9 @@ NOTION_ACCOUNT_FILE=/absolute/path/account.json NOTION_SMOKE_CHAT=1 npm run smok
 本実装はこのイベントの `featureAvailability.limit` を読み、`AI credit limit reached: 78/75` のように
 実数値を含めたエラーを返します。同時に workspace を自動ローテーションして再試行します（`NOTION_MAX_WORKSPACE_RETRIES`）。
 手動で回避する場合は `create_workspace` で新規 workspace を作成し、`pin` で固定します。
+ただし `/createSpace` は server-side rate limit の対象です。HTTP 429 時は連続実行せず、Notion が返す
+`Retry-After`（存在する場合）または十分なcooldownを尊重してください。workspace作成だけ成功して
+join transactionが失敗した場合も、自動で再作成せずpartial failureとして調査してください。
 
 注意: 新規 workspace では Custom MCP サーバーが既定で無効のことがあり、`add_mcp_connection` が
 `ForbiddenError: Custom MCP servers are disabled for this workspace` で失敗します。その場合は Notion の
