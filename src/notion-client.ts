@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import type {
-  AccountContext, AgentUploadedFile, AttachmentDownloadResult, AttachmentUploadResult, ChatAttachment,
+  AccountContext, AgentUploadedFile, AttachmentDownloadResult, AttachmentUploadResult, ChatAttachment, LegacyAttachmentDownloadInput,
   ChatResult, ChatSession, Conversation, ConversationMessage, ConversationSummary, ListConversationsResult,
   ParsedInferenceStream
 } from "./types.js";
@@ -404,25 +404,96 @@ export class NotionClient {
   }
 
   async downloadAttachment(options: {
-    conversationId: string;
-    fileId: string;
+    conversationId?: string | undefined;
+    fileId?: string | undefined;
+    legacy?: LegacyAttachmentDownloadInput | undefined;
     outputPath?: string | undefined;
     returnBase64?: boolean | undefined;
     overwrite?: boolean | undefined;
   }): Promise<AttachmentDownloadResult> {
+    const conversationId = options.conversationId?.trim() ?? "";
+    const fileId = options.fileId?.trim() ?? "";
+    const agentServiceMode = Boolean(conversationId || fileId);
+    const legacyMode = options.legacy !== undefined;
+    if (agentServiceMode === legacyMode) {
+      throw new Error("Choose exactly one download mode: conversationId + fileId, or legacy");
+    }
+    if (agentServiceMode && (!conversationId || !fileId)) {
+      throw new Error("Agent Service download requires both conversationId and fileId");
+    }
+
     const account = await this.account();
     const maxBytes = this.config.maxAttachmentBytes ?? 20 * 1024 * 1024;
+    if (legacyMode) {
+      const legacy = options.legacy;
+      if (!legacy) throw new Error("Legacy download input was missing");
+      const sourceUrl = legacy.url.trim();
+      let sourceUrlAllowed = sourceUrl.length <= 8_192 && !/[\r\n]/.test(sourceUrl) && sourceUrl.startsWith("/") && !sourceUrl.startsWith("//");
+      if (!sourceUrlAllowed && sourceUrl.length <= 8_192 && !/[\r\n]/.test(sourceUrl)) {
+        try { sourceUrlAllowed = new URL(sourceUrl).protocol === "https:"; } catch { sourceUrlAllowed = false; }
+      }
+      if (!sourceUrlAllowed) throw new Error("Legacy attachment URL must be HTTPS or a root-relative Notion URL");
+
+      const fileName = legacy.fileName.trim();
+      if (!fileName || Buffer.byteLength(fileName, "utf8") > 255 || fileName === "." || fileName === ".." || fileName.includes("/") || fileName.includes("\\") || /[\0\r\n]/.test(fileName)) {
+        throw new Error("Legacy attachment fileName must be a plain file name of at most 255 UTF-8 bytes");
+      }
+      const table = legacy.permissionRecord.table.trim();
+      const permissionId = legacy.permissionRecord.id.trim();
+      const permissionSpaceId = legacy.permissionRecord.spaceId.trim();
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      if (table.length > 64 || !/^[a-z][a-z0-9_]*$/.test(table) || !uuidPattern.test(permissionId) || !uuidPattern.test(permissionSpaceId)) {
+        throw new Error("Legacy attachment permissionRecord is invalid");
+      }
+      if (permissionSpaceId !== account.spaceId) {
+        throw new Error("Legacy attachment permissionRecord must belong to the active workspace; switch workspaces first");
+      }
+      const requestedMimeType = legacy.mimeType?.trim() ?? "";
+      if (requestedMimeType.length > 255 || /[\r\n]/.test(requestedMimeType)) throw new Error("Legacy attachment mimeType is invalid");
+
+      const descriptor = await this.fetchJson("getSignedFileUrls", {
+        urls: [{
+          url: sourceUrl,
+          download: true,
+          downloadName: fileName,
+          permissionRecord: { table, id: permissionId, spaceId: permissionSpaceId }
+        }]
+      });
+      const signedUrls = descriptor.signedUrls;
+      if (!Array.isArray(signedUrls) || signedUrls.length !== 1) {
+        throw new Error("getSignedFileUrls did not return exactly one signed URL");
+      }
+      const signedUrl = asString(signedUrls[0]).trim();
+      if (!signedUrl) throw new Error("getSignedFileUrls returned an invalid signed URL");
+      const response = await this.signedRequest(signedUrl, { method: "GET" }, "Legacy attachment download");
+      const data = await readResponseBuffer(response, maxBytes);
+      const sha256 = createHash("sha256").update(data).digest("hex");
+      const mediaType = requestedMimeType || response.headers.get("content-type")?.split(";", 1)[0]?.trim() || "application/octet-stream";
+      let outputPath: string | undefined;
+      const requestedOutput = options.outputPath ?? (options.returnBase64 ? undefined : `downloads/${fileName}`);
+      if (requestedOutput) outputPath = await writeAttachmentOutput(data, requestedOutput, this.config.attachmentRoot ?? process.cwd(), options.overwrite ?? false);
+      return {
+        source: "legacy_signed_url",
+        fileName,
+        mediaType,
+        sizeBytes: data.byteLength,
+        sha256,
+        ...(outputPath ? { path: outputPath } : {}),
+        ...(options.returnBase64 ? { base64: data.toString("base64") } : {})
+      };
+    }
+
     const descriptor = await this.fetchJson("getFileContentURLForAgentThread", {
       spaceId: account.spaceId,
-      threadId: options.conversationId,
-      fileId: options.fileId,
+      threadId: conversationId,
+      fileId,
       includeFileMetadata: true
     });
     const url = asString(descriptor.url);
     if (!url) throw new Error("getFileContentURLForAgentThread did not return a URL");
     const metadata = object(descriptor.file);
     const metadataId = asString(metadata.id).trim();
-    if (metadataId && metadataId !== options.fileId) throw new Error("Downloaded attachment metadata returned a different file ID");
+    if (metadataId && metadataId !== fileId) throw new Error("Downloaded attachment metadata returned a different file ID");
     const declaredSize = metadata.size_bytes;
     if (declaredSize !== undefined && (typeof declaredSize !== "number" || !Number.isSafeInteger(declaredSize) || declaredSize < 0)) {
       throw new Error("Downloaded attachment metadata returned an invalid size");
@@ -440,14 +511,15 @@ export class NotionClient {
       if (actual.toLowerCase() !== sha256.toLowerCase()) throw new Error("Downloaded attachment checksum did not match Notion metadata");
     }
     const rawName = asString(metadata.filename).replaceAll("\0", "").trim();
-    const fileName = basename(rawName || `${options.fileId}.bin`) || `${options.fileId}.bin`;
+    const downloadedFileName = basename(rawName || `${fileId}.bin`) || `${fileId}.bin`;
     const mediaType = asString(metadata.media_type).trim() || response.headers.get("content-type")?.split(";", 1)[0]?.trim() || "application/octet-stream";
     let outputPath: string | undefined;
-    const requestedOutput = options.outputPath ?? (options.returnBase64 ? undefined : `downloads/${fileName}`);
+    const requestedOutput = options.outputPath ?? (options.returnBase64 ? undefined : `downloads/${downloadedFileName}`);
     if (requestedOutput) outputPath = await writeAttachmentOutput(data, requestedOutput, this.config.attachmentRoot ?? process.cwd(), options.overwrite ?? false);
     return {
-      fileId: options.fileId,
-      fileName,
+      source: "agent_service",
+      fileId,
+      fileName: downloadedFileName,
       mediaType,
       sizeBytes: data.byteLength,
       ...(outputPath ? { path: outputPath } : {}),

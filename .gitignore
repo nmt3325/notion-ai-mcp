@@ -13,3 +13,6 @@ node_modules/
 dist/
 .env
 *.log
+
+# Local authenticated smoke harnesses
+scripts/.live-*.tmp.mjs

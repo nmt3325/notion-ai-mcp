@@ -105,6 +105,18 @@ test("attachment tools forward upload and download options", async () => {
     const download = await mcpClient.callTool({ name: "download_attachment", arguments: { conversationId, fileId: "file-1", returnBase64: true } });
     assert.equal((download.structuredContent as { base64: string }).base64, "aGVsbG8=");
     assert.deepEqual(downloaded[0], { conversationId, fileId: "file-1", returnBase64: true, overwrite: false });
+    const legacy = {
+      url: "https://secure.example/artifact",
+      fileName: "artifact.md",
+      mimeType: "text/markdown",
+      permissionRecord: {
+        table: "thread",
+        id: conversationId,
+        spaceId: "22222222-2222-4222-8222-222222222222"
+      }
+    };
+    await mcpClient.callTool({ name: "download_attachment", arguments: { legacy } });
+    assert.deepEqual(downloaded[1], { legacy, returnBase64: false, overwrite: false });
   } finally { await close(); }
 });
 

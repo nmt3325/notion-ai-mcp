@@ -414,3 +414,83 @@ test("legacy inline attachments become prompt context and reject real-file mixin
     assert.equal(uploadCreateCalls, 0);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("NotionClient downloads legacy artifacts through getSignedFileUrls", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-client-legacy-download-"));
+  const data = Buffer.from("legacy artifact");
+  let signerBody: Record<string, unknown> | undefined;
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "download.example") {
+        assert.equal(init?.method, "GET");
+        assert.equal(init?.redirect, "error");
+        assert.equal(init?.signal instanceof AbortSignal, true);
+        return new Response(data, { status: 200, headers: { "content-type": "text/markdown; charset=utf-8" } });
+      }
+      if (url.pathname.endsWith("getSignedFileUrls")) {
+        signerBody = requestBody(init);
+        return json({ signedUrls: ["https://download.example/legacy"] });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+    const permissionRecord = { table: "thread", id: "11111111-1111-4111-8111-111111111111", spaceId: SPACE_ID };
+    const downloaded = await client.downloadAttachment({
+      legacy: { url: "https://secure.example/original", fileName: "artifact.md", permissionRecord },
+      returnBase64: true
+    });
+    assert.deepEqual(signerBody, {
+      urls: [{
+        url: "https://secure.example/original",
+        download: true,
+        downloadName: "artifact.md",
+        permissionRecord
+      }]
+    });
+    assert.equal(downloaded.source, "legacy_signed_url");
+    assert.equal(downloaded.fileId, undefined);
+    assert.equal(downloaded.fileName, "artifact.md");
+    assert.equal(downloaded.mediaType, "text/markdown");
+    assert.equal(downloaded.sizeBytes, data.byteLength);
+    assert.equal(downloaded.base64, data.toString("base64"));
+    assert.equal(downloaded.sha256, createHash("sha256").update(data).digest("hex"));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("NotionClient rejects ambiguous or unsafe legacy download inputs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-client-legacy-download-invalid-"));
+  let fetchCalls = 0;
+  try {
+    const fakeFetch = async (): Promise<Response> => { fetchCalls += 1; return json({ signedUrls: [] }); };
+    const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+    const permissionRecord = { table: "thread", id: "11111111-1111-4111-8111-111111111111", spaceId: SPACE_ID };
+    await assert.rejects(() => client.downloadAttachment({ returnBase64: true }), /exactly one download mode/);
+    await assert.rejects(() => client.downloadAttachment({ conversationId: permissionRecord.id, returnBase64: true }), /requires both conversationId and fileId/);
+    await assert.rejects(() => client.downloadAttachment({
+      conversationId: permissionRecord.id,
+      fileId: "file-1",
+      legacy: { url: "https://secure.example/file", fileName: "file.txt", permissionRecord },
+      returnBase64: true
+    }), /exactly one download mode/);
+    await assert.rejects(() => client.downloadAttachment({
+      legacy: { url: "http://insecure.example/file", fileName: "file.txt", permissionRecord },
+      returnBase64: true
+    }), /must be HTTPS/);
+    await assert.rejects(() => client.downloadAttachment({
+      legacy: { url: "https://secure.example/file", fileName: "../file.txt", permissionRecord },
+      returnBase64: true
+    }), /plain file name/);
+    await assert.rejects(() => client.downloadAttachment({
+      legacy: { url: "https://secure.example/file", fileName: "file.txt", permissionRecord: { ...permissionRecord, spaceId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" } },
+      returnBase64: true
+    }), /active workspace/);
+    assert.equal(fetchCalls, 0);
+
+    await assert.rejects(() => client.downloadAttachment({
+      legacy: { url: "https://secure.example/file", fileName: "file.txt", permissionRecord },
+      returnBase64: true
+    }), /exactly one signed URL/);
+    assert.equal(fetchCalls, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
