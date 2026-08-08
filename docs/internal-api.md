@@ -419,3 +419,10 @@ Web バンドルの chunk に、全モデルの定義がインラインで含ま
 ```
 
 179 エントリ中 74 が `isProductionCallable`。`src/models.ts` はこれを取り込んだカタログです。
+
+## Attachment lifecycle invariants
+
+- `conversationId`を指定した`auto` uploadは、Agent Service upload生成が失敗しても新しいassistant-transcript threadへretargetしない。
+- activeなinference-transcript conversationには後続fileをuploadできる。official Web helperと同じくupload URL requestの`createThread`は`true`のまま、次のinference requestは`createThread:false` / `isPartialTranscript:true`になる。
+- opaque transcript handleはthread・workspace・server processに固定され、1回だけchatへ添付できる。cross-thread、Agent Service IDとの混在、restart後、workspace切替後は拒否する。
+- temporary storage completionはHTTP 200または204だけを受理し、201を含む他の2xxを成功扱いしない。

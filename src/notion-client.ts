@@ -591,7 +591,7 @@ export class NotionClient {
         sizeBytes: prepared.sizeBytes
       });
     } catch (error) {
-      if (requestedTransport !== "auto" || known || !canFallbackToTranscriptUpload(error)) throw error;
+      if (requestedTransport !== "auto" || options.conversationId || !canFallbackToTranscriptUpload(error)) throw error;
       return this.uploadInferenceTranscriptAttachment(account, prepared);
     }
     const upload = object(created.upload);

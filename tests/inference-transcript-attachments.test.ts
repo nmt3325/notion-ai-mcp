@@ -302,3 +302,254 @@ test("transcript upload rejects malformed signed descriptors before storage", as
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("auto upload does not retarget an explicit conversation during transcript fallback", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-explicit-target-"));
+  const conversationId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  let transcriptCalls = 0;
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "upload.example") return new Response(null, { status: 204 });
+      const endpoint = url.pathname.split("/").at(-1);
+      if (endpoint === "createAgentServiceFileUploadURL") return json({ message: "unsupported target" }, 500);
+      if (endpoint === "getUploadFileUrlForAssistantChatTranscriptUpload") {
+        transcriptCalls += 1;
+        const pointer = requestBody(init).assistantChatTranscriptSessionPointer as Record<string, unknown>;
+        return json({
+          url: `${SPACE_ID}:unexpected.txt`,
+          signedGetUrl: "https://download.example/preview",
+          signedUploadPostUrl: "https://upload.example/post",
+          postHeaders: [],
+          fields: { key: "safe/unexpected.txt" },
+          chatId: pointer.id
+        });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+    await assert.rejects(
+      () => client.uploadAttachment({
+        base64: Buffer.from("targeted").toString("base64"),
+        fileName: "targeted.txt",
+        conversationId,
+        transport: "auto"
+      }),
+      /createAgentServiceFileUploadURL returned HTTP 500/
+    );
+    assert.equal(transcriptCalls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("active inference conversations accept later one-shot transcript uploads", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-existing-transcript-"));
+  const uploadRequests: Array<Record<string, unknown>> = [];
+  const inferenceRequests: Array<Record<string, unknown>> = [];
+  let agentUploadCalls = 0;
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "upload.example") return new Response(null, { status: 204 });
+      const endpoint = url.pathname.split("/").at(-1);
+      if (endpoint === "createAgentServiceFileUploadURL") {
+        agentUploadCalls += 1;
+        return json({ message: "should not be called" }, 500);
+      }
+      if (endpoint === "getUploadFileUrlForAssistantChatTranscriptUpload") {
+        const body = requestBody(init);
+        uploadRequests.push(body);
+        const pointer = body.assistantChatTranscriptSessionPointer as Record<string, unknown>;
+        const index = uploadRequests.length;
+        return json({
+          url: `${SPACE_ID}:server-${index}.txt`,
+          signedGetUrl: `https://download.example/preview-${index}`,
+          signedUploadPostUrl: `https://upload.example/post-${index}`,
+          postHeaders: [],
+          fields: { key: `safe/server-${index}.txt` },
+          chatId: pointer.id
+        });
+      }
+      if (endpoint === "runInferenceTranscript") {
+        inferenceRequests.push(requestBody(init));
+        return inference(`Turn ${inferenceRequests.length}`);
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+
+    const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+    const firstUpload = await client.uploadAttachment({
+      base64: Buffer.from("first").toString("base64"),
+      fileName: "first.txt",
+      transport: "inference_transcript"
+    });
+    const firstChat = await client.chat({ prompt: "First", fileIds: [firstUpload.fileId] });
+    const secondUpload = await client.uploadAttachment({
+      base64: Buffer.from("second").toString("base64"),
+      fileName: "second.txt",
+      conversationId: firstChat.conversationId,
+      transport: "auto"
+    });
+    const secondChat = await client.chat({
+      prompt: "Second",
+      conversationId: firstChat.conversationId,
+      fileIds: [secondUpload.fileId]
+    });
+
+    assert.equal(secondUpload.conversationId, firstChat.conversationId);
+    assert.equal(secondChat.conversationId, firstChat.conversationId);
+    assert.equal(agentUploadCalls, 0);
+    assert.equal(uploadRequests.length, 2);
+    assert.deepEqual(uploadRequests.map((request) => request.createThread), [true, true]);
+    assert.deepEqual(
+      uploadRequests.map((request) => (request.assistantChatTranscriptSessionPointer as Record<string, unknown>).id),
+      [firstChat.conversationId, firstChat.conversationId]
+    );
+    assert.equal(inferenceRequests[1]?.createThread, false);
+    assert.equal(inferenceRequests[1]?.isPartialTranscript, true);
+    const secondTranscript = inferenceRequests[1]?.transcript as Array<Record<string, unknown>>;
+    assert.deepEqual(secondTranscript.map((step) => step.type), ["config", "context", "updated-config", "computer-file", "user"]);
+    const secondFile = secondTranscript.find((step) => step.type === "computer-file") as Record<string, unknown>;
+    assert.equal(secondFile.fileUrl, `${SPACE_ID}:server-2.txt`);
+    assert.equal(secondFile.fileName, "second.txt");
+    await assert.rejects(
+      () => client.chat({ prompt: "Reuse", conversationId: firstChat.conversationId, fileIds: [secondUpload.fileId] }),
+      /can only be attached once/
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("transcript handles enforce thread, transport, and process isolation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-transcript-isolation-"));
+  let uploadCount = 0;
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "upload.example") return new Response(null, { status: 204 });
+      const endpoint = url.pathname.split("/").at(-1);
+      if (endpoint === "getUploadFileUrlForAssistantChatTranscriptUpload") {
+        uploadCount += 1;
+        const pointer = requestBody(init).assistantChatTranscriptSessionPointer as Record<string, unknown>;
+        return json({
+          url: `${SPACE_ID}:isolation-${uploadCount}.txt`,
+          signedGetUrl: `https://download.example/isolation-${uploadCount}`,
+          signedUploadPostUrl: `https://upload.example/isolation-${uploadCount}`,
+          postHeaders: [],
+          fields: { key: `safe/isolation-${uploadCount}.txt` },
+          chatId: pointer.id
+        });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+    const first = await client.uploadAttachment({ base64: Buffer.from("one").toString("base64"), fileName: "one.txt", transport: "inference_transcript" });
+    const second = await client.uploadAttachment({ base64: Buffer.from("two").toString("base64"), fileName: "two.txt", transport: "inference_transcript" });
+
+    await assert.rejects(() => client.chat({ prompt: "Cross thread", fileIds: [first.fileId, second.fileId] }), /different conversations cannot be mixed/);
+    await assert.rejects(() => client.chat({ prompt: "Mixed", fileIds: [first.fileId, "agent-service-file"] }), /cannot be mixed/);
+    await assert.rejects(
+      () => client.downloadAttachment({ conversationId: second.conversationId, fileId: first.fileId, returnBase64: true }),
+      /another conversation/
+    );
+
+    const restarted = new NotionClient(config(root), fakeFetch as typeof fetch);
+    await assert.rejects(() => restarted.chat({ prompt: "Restart", fileIds: [first.fileId] }), /unknown or expired/);
+    await assert.rejects(
+      () => restarted.downloadAttachment({ conversationId: first.conversationId, fileId: first.fileId, returnBase64: true }),
+      /unknown or expired/
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace switching invalidates transcript sessions and handles", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-transcript-workspace-"));
+  const spaceB = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const viewB = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "upload.example") return new Response(null, { status: 204 });
+      const endpoint = url.pathname.split("/").at(-1);
+      if (endpoint === "getUploadFileUrlForAssistantChatTranscriptUpload") {
+        const pointer = requestBody(init).assistantChatTranscriptSessionPointer as Record<string, unknown>;
+        return json({
+          url: `${SPACE_ID}:workspace.txt`,
+          signedGetUrl: "https://download.example/workspace",
+          signedUploadPostUrl: "https://upload.example/workspace",
+          postHeaders: [],
+          fields: { key: "safe/workspace.txt" },
+          chatId: pointer.id
+        });
+      }
+      if (endpoint === "loadUserContent") {
+        return json({ recordMap: {
+          user_root: { [USER_ID]: { value: { space_view_pointers: [
+            { id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", table: "space_view", spaceId: SPACE_ID },
+            { id: viewB, table: "space_view", spaceId: spaceB }
+          ] } } },
+          space: {
+            [SPACE_ID]: { value: { name: "Alpha", plan_type: "personal" } },
+            [spaceB]: { value: { name: "Beta", plan_type: "personal" } }
+          }
+        } });
+      }
+      if (endpoint === "getInferenceTranscriptsForUser") return json({});
+      return new Response("unexpected", { status: 500 });
+    };
+
+    const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+    const uploaded = await client.uploadAttachment({
+      base64: Buffer.from("workspace").toString("base64"),
+      fileName: "workspace.txt",
+      transport: "inference_transcript"
+    });
+    await client.switchWorkspace("Beta");
+    assert.equal((await client.getCurrentWorkspace()).spaceId, spaceB);
+    await assert.rejects(() => client.chat({ prompt: "Old handle", fileIds: [uploaded.fileId] }), /unknown or expired/);
+    await assert.rejects(
+      () => client.downloadAttachment({ conversationId: uploaded.conversationId, fileId: uploaded.fileId, returnBase64: true }),
+      /unknown or expired/
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("transcript storage rejects HTTP 201 instead of treating it as completion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-transcript-status-"));
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "upload.example") return new Response(null, { status: 201 });
+      const endpoint = url.pathname.split("/").at(-1);
+      if (endpoint === "getUploadFileUrlForAssistantChatTranscriptUpload") {
+        const pointer = requestBody(init).assistantChatTranscriptSessionPointer as Record<string, unknown>;
+        return json({
+          url: `${SPACE_ID}:status.txt`,
+          signedGetUrl: "https://download.example/status",
+          signedUploadPostUrl: "https://upload.example/status",
+          postHeaders: [],
+          fields: { key: "safe/status.txt" },
+          chatId: pointer.id
+        });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+    await assert.rejects(
+      () => client.uploadAttachment({
+        base64: Buffer.from("status").toString("base64"),
+        fileName: "status.txt",
+        transport: "inference_transcript"
+      }),
+      /unsupported HTTP 201/
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
