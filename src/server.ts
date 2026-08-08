@@ -25,11 +25,15 @@ export function toMcpAuth(input: AuthInput | undefined): McpAuth | undefined {
   switch (input.type) {
     case "none": return { type: "none" };
     case "oauth": return { type: "oauth" };
-    case "bearer":
-    case "token": {
+    case "bearer": {
       const token = input.token?.trim();
       if (!token) throw new Error("auth.token is required for bearer/token authentication");
       return { type: "bearer", token };
+    }
+    case "token": {
+      const token = input.token?.trim();
+      if (!token) throw new Error("auth.token is required for bearer/token authentication");
+      return { type: "token", token };
     }
     case "apiKey": {
       const key = input.key?.trim();
@@ -285,15 +289,47 @@ export function createServer(client: NotionClient): McpServer {
 
   server.registerTool("list_preconfigured_mcp_servers", {
     title: "List preconfigured MCP servers",
-    description: "List the MCP servers Notion offers out of the box.",
+    description: "List Notion's visible MCP catalog using a credential-free allowlisted response.",
     inputSchema: {}
   }, async () => result(await client.mcp().listPreconfigured()));
 
   server.registerTool("connect_preconfigured_mcp_server", {
     title: "Connect a preconfigured MCP server",
-    description: "Connect one of Notion's built-in MCP integrations by its catalog ID.",
-    inputSchema: { preconfiguredServerId: z.string().min(1) }
-  }, async ({ preconfiguredServerId }) => result(await client.mcp().connectPreconfigured(preconfiguredServerId)));
+    description: "Resolve a visible catalog entry and use the same current connect/OAuth flow as custom MCP servers.",
+    inputSchema: {
+      preconfiguredServerId: z.string().min(1),
+      variant: z.string().min(1).max(200).optional().describe("Variant name such as US or EU"),
+      serverUrl: z.string().min(1).max(8_192).optional().describe("URL for pattern-configured entries"),
+      templateValues: z.record(z.string().min(1).max(100), z.string().min(1).max(2_048)).optional(),
+      auth: authShape.optional().describe("Omit for an OAuth catalog entry to start OAuth automatically"),
+      transport: z.string().min(1).optional(),
+      selectedScopes: z.array(z.string().min(1).max(1_024)).max(100).optional(),
+      userProvidedOAuthClientId: z.string().trim().min(1).max(2_048).optional(),
+      userProvidedOAuthClientSecret: z.string().min(1).max(8_192).optional(),
+      enabledToolNames: z.array(z.string().min(1)).max(1_000).optional(),
+      runReadToolsAutomatically: z.boolean().optional(),
+      runWriteToolsAutomatically: z.boolean().optional()
+    }
+  }, async ({
+    preconfiguredServerId, variant, serverUrl, templateValues, auth, transport, selectedScopes,
+    userProvidedOAuthClientId, userProvidedOAuthClientSecret, enabledToolNames,
+    runReadToolsAutomatically, runWriteToolsAutomatically
+  }) => {
+    const resolvedAuth = toMcpAuth(auth);
+    return result(await client.mcp().connectPreconfigured(preconfiguredServerId, {
+      ...(variant ? { variant } : {}),
+      ...(serverUrl ? { serverUrl } : {}),
+      ...(templateValues ? { templateValues } : {}),
+      ...(resolvedAuth ? { auth: resolvedAuth } : {}),
+      ...(transport ? { transport } : {}),
+      ...(selectedScopes !== undefined ? { selectedScopes } : {}),
+      ...(userProvidedOAuthClientId !== undefined ? { userProvidedOAuthClientId } : {}),
+      ...(userProvidedOAuthClientSecret !== undefined ? { userProvidedOAuthClientSecret } : {}),
+      ...(enabledToolNames !== undefined ? { enabledToolNames } : {}),
+      ...(runReadToolsAutomatically !== undefined ? { runReadToolsAutomatically } : {}),
+      ...(runWriteToolsAutomatically !== undefined ? { runWriteToolsAutomatically } : {})
+    }));
+  });
 
   return server;
 }

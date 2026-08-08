@@ -278,3 +278,11 @@ current chunk `11987`の`ConnectMcpServerModal`を再解析した。公式reques
 
 
 認証済みlive probeではpreconfigured catalog 23 URLを取得し、先頭12 endpointのOAuth discoveryがすべて成功した。Attioは`oauth_dcr`と3 scopesを返した。通常flowと、2 scopes・runtime生成BYO client ID/secretのflowはいずれもAttio authorization URL、completion flow ID、OAuth flow IDを返した。authorization requestにはpublic client IDが反映された一方、client secretは4-field outputに含まれなかった。前後でPersonal Agent module集合とaccount hashは不変、registry fileも作成されず、live resultはmode 0600で保存した。
+
+## 2026-08-08 Preconfigured MCP catalog・標準接続フロー調査
+
+認証済み`getPreconfiguredMcpServers({spaceId})`は21 serverを返し、visibilityはenabled 20 / hidden 1だった。URL設定はdirect 16、variant 3、pattern 1、template 1。current bundle module `166147`はfixed URL、variant index、`encodeURIComponent`したtemplate placeholder、catalog regexのpattern URLを解決する。module `186073`はhidden entryをserver URL setから除外する。2,078 chunk中`connectPreconfiguredMcpServer`は0件で、preconfigured UIもcustom MCPと同じ`Ng` connect actionを呼ぶ。
+
+実装はlive catalogをID/name/tagline/visibility/URL config/auth schemes/scope/approval intentへallowlistし、hidden・malformed・unknown fieldを除外する。catalog IDは接続直前に再取得して照合する。OAuth entryは標準`initiateMcpOAuth`を使い、non-OAuth credentialは既存のvalidation・factory-compatible module・connect・space-view link transactionへ渡す。Token authがserver tool layerでBearerへ誤変換されていた経路も修正し、`Authorization: Token`を保持する。
+
+compiled-stdio live試験では表示対象20件、hidden除外、top-level allowlist、Amplitude 2 variantsを確認した。EU variantは`mcp.eu.amplitude.com`へ解決され、OAuth authorization/completion flowを取得した。前後でPersonal Agent module集合とaccount hashは不変、registry fileは作成されなかった。全95 tests、TypeScript check、build、18-tool stdio smoke、diff/EOF/credential scanが成功した。

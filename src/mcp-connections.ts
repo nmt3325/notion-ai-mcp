@@ -143,6 +143,188 @@ export function toolNamesFrom(value: unknown): string[] {
   return tools.map((tool) => asString(object(tool).name)).filter(Boolean);
 }
 
+const MAX_PRECONFIGURED_SERVERS = 200;
+const MAX_PRECONFIGURED_TEXT = 8_192;
+
+function boundedString(value: unknown, maximum = MAX_PRECONFIGURED_TEXT): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed && trimmed.length <= maximum ? trimmed : undefined;
+}
+
+function boundedStringList(value: unknown, maximum = 100): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of value.slice(0, maximum)) {
+    const normalized = boundedString(item, 1_024);
+    if (normalized && !seen.has(normalized)) {
+      seen.add(normalized);
+      result.push(normalized);
+    }
+  }
+  return result;
+}
+
+function catalogUrl(value: unknown): string | undefined {
+  const text = boundedString(value);
+  if (!text) return undefined;
+  try { return normalizeServerUrl(text); } catch { return undefined; }
+}
+
+function validRegex(pattern: string): boolean {
+  if (pattern.length > 2_048) return false;
+  try { new RegExp(pattern); return true; } catch { return false; }
+}
+
+function sanitizeServerUrlConfig(value: unknown): PreconfiguredServerUrlConfig | undefined {
+  const raw = object(value);
+  switch (asString(raw.type)) {
+    case "fixed": {
+      const url = catalogUrl(raw.url);
+      return url ? { type: "fixed", url } : undefined;
+    }
+    case "variant": {
+      const source = Array.isArray(raw.variants) ? raw.variants.slice(0, 100) : [];
+      const variants: Array<{ name: string; url: string }> = [];
+      const names = new Set<string>();
+      for (const item of source) {
+        const candidate = object(item);
+        const name = boundedString(candidate.name, 200);
+        const url = catalogUrl(candidate.url);
+        if (!name || !url || names.has(name.toLowerCase())) continue;
+        names.add(name.toLowerCase());
+        variants.push({ name, url });
+      }
+      if (variants.length === 0) return undefined;
+      const rawDefault = raw.defaultVariantIndex;
+      const defaultVariantIndex = typeof rawDefault === "number" && Number.isInteger(rawDefault)
+        && rawDefault >= 0 && rawDefault < variants.length ? rawDefault : undefined;
+      return { type: "variant", variants, ...(defaultVariantIndex !== undefined ? { defaultVariantIndex } : {}) };
+    }
+    case "template": {
+      const urlTemplate = boundedString(raw.urlTemplate);
+      const source = Array.isArray(raw.placeholders) ? raw.placeholders.slice(0, 100) : [];
+      if (!urlTemplate || !(urlTemplate.startsWith("https://") || urlTemplate.startsWith("http://localhost"))) return undefined;
+      const placeholders: Array<{ key: string; label: string; description?: string; pattern?: string }> = [];
+      const keys = new Set<string>();
+      for (const item of source) {
+        const candidate = object(item);
+        const key = boundedString(candidate.key, 100);
+        const label = boundedString(candidate.label, 300);
+        const description = boundedString(candidate.description, 2_000);
+        const pattern = boundedString(candidate.pattern, 2_048);
+        if (!key || !/^[A-Za-z0-9_-]+$/.test(key) || !label || keys.has(key)) return undefined;
+        if (pattern && !validRegex(pattern)) return undefined;
+        keys.add(key);
+        placeholders.push({ key, label, ...(description ? { description } : {}), ...(pattern ? { pattern } : {}) });
+      }
+      if (placeholders.length === 0 || placeholders.some(({ key }) => !urlTemplate.includes(`{${key}}`))) return undefined;
+      return { type: "template", urlTemplate, placeholders };
+    }
+    case "pattern": {
+      const validationPattern = boundedString(raw.validationPattern, 2_048);
+      if (!validationPattern || !validRegex(validationPattern)) return undefined;
+      const description = boundedString(raw.description, 2_000);
+      const label = boundedString(raw.label, 300);
+      const placeholder = boundedString(raw.placeholder, 2_000);
+      return {
+        type: "pattern", validationPattern,
+        ...(description ? { description } : {}),
+        ...(label ? { label } : {}),
+        ...(placeholder ? { placeholder } : {})
+      };
+    }
+    default:
+      return undefined;
+  }
+}
+
+/** Allowlist and normalize the live Notion catalog; hidden entries and unknown fields never escape. */
+export function sanitizePreconfiguredCatalog(value: unknown): PreconfiguredMcpServer[] {
+  const rawServers = Array.isArray(object(value).servers) ? object(value).servers as unknown[] : [];
+  const result: PreconfiguredMcpServer[] = [];
+  const ids = new Set<string>();
+  for (const item of rawServers.slice(0, MAX_PRECONFIGURED_SERVERS)) {
+    const raw = object(item);
+    if (asString(raw.visibility) === "hidden") continue;
+    const id = boundedString(raw.id, 512);
+    const name = boundedString(raw.name, 512);
+    if (!id || !name || ids.has(id)) continue;
+    const serverUrl = catalogUrl(raw.serverUrl);
+    const serverUrlConfig = sanitizeServerUrlConfig(raw.serverUrlConfig);
+    if (!serverUrl && !serverUrlConfig) continue;
+    ids.add(id);
+    const tagline = boundedString(raw.tagline, 2_000);
+    result.push({
+      id,
+      name,
+      ...(tagline ? { tagline } : {}),
+      visibility: asString(raw.visibility) === "enabled" ? "enabled" : "disabled",
+      ...(serverUrl ? { serverUrl } : {}),
+      ...(serverUrlConfig ? { serverUrlConfig } : {}),
+      supportedAuthSchemes: boundedStringList(raw.supportedAuthSchemes),
+      supportedOAuthScopes: boundedStringList(raw.supportedOAuthScopes),
+      ...(raw.mcpApprovalIntent === "approve_on_connect" ? { mcpApprovalIntent: "approve_on_connect" as const } : {})
+    });
+  }
+  return result;
+}
+
+/** Match the current Web client resolver for fixed, variant, template, and pattern URL configs. */
+export function resolvePreconfiguredServerUrl(
+  server: PreconfiguredMcpServer,
+  selection: PreconfiguredMcpSelection = {}
+): string {
+  const config = server.serverUrlConfig;
+  if (!config) {
+    if (!server.serverUrl) throw new Error(`${server.name} does not define a server URL`);
+    return normalizeServerUrl(server.serverUrl);
+  }
+  switch (config.type) {
+    case "fixed":
+      return normalizeServerUrl(config.url);
+    case "variant": {
+      let index: number | undefined;
+      const requested = selection.variant?.trim();
+      if (requested) index = config.variants.findIndex(({ name }) => name.toLowerCase() === requested.toLowerCase());
+      else if (config.defaultVariantIndex !== undefined) index = config.defaultVariantIndex;
+      else if (server.serverUrl) index = config.variants.findIndex(({ url }) => normalizeServerUrl(url) === normalizeServerUrl(server.serverUrl as string));
+      if (index === undefined || index < 0) index = 0;
+      const selected = config.variants[index];
+      if (!selected || (requested && selected.name.toLowerCase() !== requested.toLowerCase())) {
+        throw new Error(`Unknown ${server.name} variant; choose one of: ${config.variants.map(({ name }) => name).join(", ")}`);
+      }
+      return normalizeServerUrl(selected.url);
+    }
+    case "template": {
+      let resolved = config.urlTemplate;
+      const values = selection.templateValues ?? {};
+      for (const placeholder of config.placeholders) {
+        const raw = values[placeholder.key];
+        const normalized = raw?.trim();
+        if (!normalized) throw new Error(`templateValues.${placeholder.key} is required for ${server.name}`);
+        if (placeholder.pattern && !new RegExp(placeholder.pattern).test(normalized)) {
+          throw new Error(`templateValues.${placeholder.key} does not match the catalog pattern`);
+        }
+        resolved = resolved.replaceAll(`{${placeholder.key}}`, encodeURIComponent(normalized));
+      }
+      if (/\{[A-Za-z0-9_-]+\}/.test(resolved)) throw new Error(`${server.name} URL template has unresolved placeholders`);
+      return normalizeServerUrl(resolved);
+    }
+    case "pattern": {
+      const raw = selection.serverUrl?.trim();
+      if (!raw) throw new Error(`serverUrl is required for ${server.name}`);
+      if (!new RegExp(config.validationPattern).test(raw)) throw new Error(`serverUrl does not match the ${server.name} catalog pattern`);
+      return normalizeServerUrl(raw);
+    }
+    default: {
+      const exhaustive: never = config;
+      throw new Error(`Unsupported preconfigured URL config: ${JSON.stringify(exhaustive)}`);
+    }
+  }
+}
+
 const MCP_NO_TOOLS_SENTINEL = "__NONE__";
 
 /** Notion persists disable-all with a sentinel because an empty array is normalized away. */
@@ -205,10 +387,13 @@ const SAFE_OAUTH_RESPONSE_FIELDS = ["authorizationUrl", "completionFlowId", "oau
 /** Keep transient credentials request-only, even if a future API response accidentally echoes them. */
 function safeOAuthResponse(response: JsonObject, integrationId: string, clientSecret?: string): JsonObject {
   const safe: JsonObject = { integrationId };
+  const secretVariants = clientSecret
+    ? new Set([clientSecret, encodeURIComponent(clientSecret), JSON.stringify(clientSecret).slice(1, -1)])
+    : new Set<string>();
   for (const key of SAFE_OAUTH_RESPONSE_FIELDS) {
     const value = response[key];
     if (typeof value !== "string" || !value) continue;
-    if (clientSecret && value.includes(clientSecret)) {
+    if ([...secretVariants].some((variant) => variant.length > 0 && value.includes(variant))) {
       throw new Error("Notion returned an unsafe OAuth response containing supplied credentials");
     }
     safe[key] = value;
@@ -279,6 +464,41 @@ export interface StartOAuthOptions {
   /** Supplying a verified current-workspace module enables reconnect context. */
   existingModuleId?: string;
   /** BYO OAuth credentials are transient and are never persisted or returned. */
+  userProvidedOAuthClientId?: string;
+  userProvidedOAuthClientSecret?: string;
+}
+
+export type PreconfiguredServerUrlConfig =
+  | { type: "fixed"; url: string }
+  | { type: "variant"; variants: Array<{ name: string; url: string }>; defaultVariantIndex?: number }
+  | { type: "template"; urlTemplate: string; placeholders: Array<{ key: string; label: string; description?: string; pattern?: string }> }
+  | { type: "pattern"; validationPattern: string; description?: string; label?: string; placeholder?: string };
+
+export interface PreconfiguredMcpServer {
+  id: string;
+  name: string;
+  tagline?: string;
+  visibility: "enabled" | "disabled";
+  serverUrl?: string;
+  serverUrlConfig?: PreconfiguredServerUrlConfig;
+  supportedAuthSchemes: string[];
+  supportedOAuthScopes: string[];
+  mcpApprovalIntent?: McpApprovalIntent;
+}
+
+export interface PreconfiguredMcpSelection {
+  /** Case-insensitive variant name such as US or EU. */
+  variant?: string;
+  /** Required only for pattern-configured catalog entries. */
+  serverUrl?: string;
+  /** Required only for template-configured catalog entries. */
+  templateValues?: Record<string, string>;
+}
+
+export interface ConnectPreconfiguredOptions extends PreconfiguredMcpSelection, McpToolSettings {
+  auth?: McpAuth;
+  transport?: string;
+  selectedScopes?: string[];
   userProvidedOAuthClientId?: string;
   userProvidedOAuthClientSecret?: string;
 }
@@ -815,13 +1035,57 @@ export class McpConnectionManager {
     return safeOAuthResponse(response, integrationId, rawClientSecret);
   }
 
-  async listPreconfigured(): Promise<JsonObject> {
+  private async loadPreconfiguredCatalog(): Promise<PreconfiguredMcpServer[]> {
     const { spaceId } = await this.context();
-    return this.api.post("getPreconfiguredMcpServers", { spaceId });
+    const response = await this.api.post("getPreconfiguredMcpServers", { spaceId });
+    return sanitizePreconfiguredCatalog(response);
   }
 
-  async connectPreconfigured(preconfiguredServerId: string): Promise<JsonObject> {
-    const { spaceId } = await this.context();
-    return this.api.post("connectPreconfiguredMcpServer", { preconfiguredServerId, spaceId });
+  async listPreconfigured(): Promise<JsonObject> {
+    return { servers: await this.loadPreconfiguredCatalog() };
+  }
+
+  async connectPreconfigured(
+    preconfiguredServerId: string,
+    options: ConnectPreconfiguredOptions = {}
+  ): Promise<JsonObject> {
+    const requestedId = preconfiguredServerId.trim();
+    if (!requestedId) throw new Error("preconfiguredServerId is required");
+    const server = (await this.loadPreconfiguredCatalog()).find(({ id }) => id === requestedId);
+    if (!server) throw new Error(`Preconfigured MCP server not found or hidden: ${requestedId}`);
+    if (server.visibility !== "enabled") throw new Error(`${server.name} is disabled in the current workspace`);
+    const serverUrl = resolvePreconfiguredServerUrl(server, options);
+    const oauthSchemes = server.supportedAuthSchemes.filter((scheme) => scheme.startsWith("oauth_"));
+    const wantsOAuth = options.auth?.type === "oauth" || (options.auth === undefined && oauthSchemes.length > 0);
+    if (wantsOAuth) {
+      if (oauthSchemes.length === 0) {
+        throw new Error(`${server.name} does not advertise OAuth; supported methods: ${server.supportedAuthSchemes.join(", ") || "none"}`);
+      }
+      const selectedScopes = options.selectedScopes ?? (server.supportedOAuthScopes.length > 0 ? server.supportedOAuthScopes : undefined);
+      const flow = await this.startOAuth(serverUrl, {
+        ...(selectedScopes !== undefined ? { selectedScopes } : {}),
+        ...(options.userProvidedOAuthClientId !== undefined ? { userProvidedOAuthClientId: options.userProvidedOAuthClientId } : {}),
+        ...(options.userProvidedOAuthClientSecret !== undefined ? { userProvidedOAuthClientSecret: options.userProvidedOAuthClientSecret } : {})
+      });
+      return {
+        status: "oauth_authorization_required",
+        preconfiguredServer: { id: server.id, name: server.name, serverUrl, supportedAuthSchemes: server.supportedAuthSchemes },
+        ...flow
+      };
+    }
+    if (!options.auth) {
+      throw new Error(`${server.name} requires an explicit auth choice; supported methods: ${server.supportedAuthSchemes.join(", ") || "none"}`);
+    }
+    const connected = await this.add({
+      name: server.name,
+      serverUrl,
+      auth: options.auth,
+      ...(options.transport !== undefined ? { transport: options.transport } : {}),
+      ...(options.enabledToolNames !== undefined ? { enabledToolNames: options.enabledToolNames } : {}),
+      ...(options.runReadToolsAutomatically !== undefined ? { runReadToolsAutomatically: options.runReadToolsAutomatically } : {}),
+      ...(options.runWriteToolsAutomatically !== undefined ? { runWriteToolsAutomatically: options.runWriteToolsAutomatically } : {}),
+      ...(server.mcpApprovalIntent ? { approvalIntent: server.mcpApprovalIntent } : {})
+    });
+    return { status: "connected", preconfiguredServerId: server.id, ...connected };
   }
 }

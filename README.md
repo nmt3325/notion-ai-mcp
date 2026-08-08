@@ -324,6 +324,14 @@ join transactionが失敗した場合も、自動で再作成せずpartial failu
 
 認証済みcompiled-stdio live試験ではAttioのOAuth discoveryから3 scopesを取得し、2 scopesと実行時生成したBYO client credentialでOAuth開始に成功しました。authorization URLにはpublic client IDが反映され、client secretは戻り値に含まれません。module集合、account file hash、local registryはいずれも不変でした。
 
+### Preconfigured MCP catalog
+
+`list_preconfigured_mcp_servers`は`getPreconfiguredMcpServers({spaceId})`のraw responseを返さず、ID、表示名、tagline、URL設定、対応認証方式だけをallowlistします。`visibility:"hidden"`は除外し、未知fieldやcredential-like dataは返しません。2026-08-08のlive catalogは21件中20件が表示対象でした。
+
+`connect_preconfigured_mcp_server`はcatalog IDを毎回live catalogで照合し、現行Web clientと同じURL resolverを使います。direct/fixed URL、case-insensitiveなvariant名、`encodeURIComponent`を使うtemplate values、catalog regexで検証するpattern URLに対応します。OAuth catalogでは通常の`initiateMcpOAuth` flowを返し、Bearer/Token/API key等を明示した場合はcustom MCPと同じvalidation → module作成 → connect → Personal Agent link transactionを使います。現行bundleに存在しない`connectPreconfiguredMcpServer` endpointは呼びません。
+
+認証済みcompiled-stdio live試験では20件を列挙し、hidden entry除外とtop-level allowlistを確認しました。AmplitudeのEU variantを解決してOAuth開始に成功し、Personal Agent module集合、account file hash、local registryは不変でした。
+
 ### Tool選択と実行確認
 
 `add_mcp_connection.enabledToolNames`にはvalidationで返ったtool名を指定できます。省略時は全tool有効、`[]`は全tool無効です（Notion内部では現行UIと同じ`["__NONE__"]`へ変換します）。`update_mcp_connection`では同じ配列で選択を置換し、`null`でfilterを削除して全tool有効へ戻します。空白はtrim、重複は除去し、未知名はNotionへ書き込む前に拒否します。
@@ -336,7 +344,7 @@ join transactionが失敗した場合も、自動で再作成せずpartial failu
 
 作成後のconnect、space-view可視化、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、該当pointerだけをunlinkします。remove時も他のsettingsとmodule pointerを保持します。update/remove/statusはcurrent linkageとlive recordを検証し、local recordが存在する場合はactive workspace/viewとの不一致も拒否します。
 
-Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験では、別processでNotion-onlyとして再発見した一時moduleのname-only update、full-data保持、明示的no-auth reconnect、3 tools、cleanup後の`alive:false`・`linked:false`、既存module不変を確認しました。現在の全回帰は90/90です。
+Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験では、別processでNotion-onlyとして再発見した一時moduleのname-only update、full-data保持、明示的no-auth reconnect、3 tools、cleanup後の`alive:false`・`linked:false`、既存module不変を確認しました。現在の全回帰は95/95です。
 2026-08-08の追加live試験では一時DeepWiki moduleに対し、既定policy、1 tool選択、全tool無効、filter削除による全tool復元を順に検証しました。3 toolsとconnected状態を維持し、終了時は一時moduleとregistryを削除、account file hashも不変でした。
 
 ## 添付ファイル
