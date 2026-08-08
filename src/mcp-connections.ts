@@ -16,6 +16,14 @@ export type McpAuth =
 
 export type McpApprovalIntent = "approve_on_connect";
 export type McpTransport = "streamableHttp" | "sse";
+export interface McpToolSettings {
+  /** Undefined means every discovered tool is enabled. */
+  enabledToolNames?: string[];
+  /** Undefined follows Notion's default: read tools run automatically. */
+  runReadToolsAutomatically?: boolean;
+  /** Undefined follows Notion's default: write tools require confirmation. */
+  runWriteToolsAutomatically?: boolean;
+}
 export interface McpHeader { name: string; value: string }
 export interface McpContext { spaceId: string; userId: string; spaceViewId: string }
 
@@ -29,6 +37,9 @@ export interface McpConnectionRecord {
   authType: McpAuth["type"] | "unknown";
   transport: string;
   toolNames: string[];
+  enabledToolNames?: string[];
+  runReadToolsAutomatically?: boolean;
+  runWriteToolsAutomatically?: boolean;
   createdAt: string;
 }
 
@@ -41,6 +52,10 @@ export interface McpConnectionSummary {
   authType: McpAuth["type"] | "unknown";
   transport: string;
   toolNames: string[];
+  /** null means every discovered tool is enabled. */
+  enabledToolNames: string[] | null;
+  runReadToolsAutomatically: boolean;
+  runWriteToolsAutomatically: boolean;
   createdAt: string | null;
   source: "notion" | "notion_and_registry" | "registry_only";
   alive: boolean | null;
@@ -82,8 +97,9 @@ export function buildAuthHeaders(auth: McpAuth | undefined): Record<string, stri
     case "oauth":
       return {};
     case "bearer":
-    case "token":
       return { Authorization: `Bearer ${auth.token}` };
+    case "token":
+      return { Authorization: `Token ${auth.token}` };
     case "apiKey":
       return { [auth.headerName?.trim() || "X-API-Key"]: auth.key };
     case "basic":
@@ -127,6 +143,45 @@ export function toolNamesFrom(value: unknown): string[] {
   return tools.map((tool) => asString(object(tool).name)).filter(Boolean);
 }
 
+const MCP_NO_TOOLS_SENTINEL = "__NONE__";
+
+/** Notion persists disable-all with a sentinel because an empty array is normalized away. */
+function persistedToolNames(value: string[]): string[] {
+  return value.length === 0 ? [MCP_NO_TOOLS_SENTINEL] : [...value];
+}
+
+/** Decode Notion's sentinel while keeping the public API free of internal marker values. */
+function storedToolNames(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const name = item.trim();
+    if (!name || name === MCP_NO_TOOLS_SENTINEL || seen.has(name)) continue;
+    seen.add(name);
+    names.push(name);
+  }
+  return names;
+}
+
+/** Normalize a selection and reject names that were not returned by validation. */
+export function normalizeEnabledToolNames(value: string[], availableToolNames: string[]): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const name = item.trim();
+    if (!name) throw new Error("enabledToolNames cannot contain empty names");
+    if (seen.has(name)) continue;
+    seen.add(name);
+    names.push(name);
+  }
+  const available = new Set(availableToolNames);
+  const unknown = names.filter((name) => name === MCP_NO_TOOLS_SENTINEL || !available.has(name));
+  if (unknown.length > 0) throw new Error(`Unknown MCP tool name(s): ${unknown.join(", ")}`);
+  return names;
+}
+
 /** Local mirror of the modules we created, so the tools keep working across restarts. */
 export class McpRegistry {
   private records: McpConnectionRecord[] = [];
@@ -164,12 +219,24 @@ export class McpRegistry {
   }
 }
 
-export interface AddConnectionInput {
+export interface AddConnectionInput extends McpToolSettings {
   name: string;
   serverUrl: string;
   auth?: McpAuth;
   transport?: string;
   approvalIntent?: McpApprovalIntent;
+}
+
+export interface UpdateConnectionInput {
+  name?: string;
+  serverUrl?: string;
+  auth?: McpAuth;
+  transport?: string;
+  approvalIntent?: McpApprovalIntent;
+  /** null removes the filter so all discovered tools are enabled. */
+  enabledToolNames?: string[] | null;
+  runReadToolsAutomatically?: boolean;
+  runWriteToolsAutomatically?: boolean;
 }
 
 export class McpConnectionManager {
@@ -212,6 +279,9 @@ export class McpConnectionManager {
 
   /** Exact workflow_module record shape emitted by Notion's current model factory. */
   buildCreateTransaction(moduleId: string, context: McpContext, input: AddConnectionInput, toolList: unknown[], now = Date.now()): JsonObject {
+    const enabledToolNames = input.enabledToolNames === undefined
+      ? undefined
+      : normalizeEnabledToolNames(input.enabledToolNames, toolNamesFrom(toolList));
     const data: JsonObject = {
       id: moduleId,
       name: input.name,
@@ -219,8 +289,9 @@ export class McpConnectionManager {
       serverUrl: normalizeServerUrl(input.serverUrl),
       preferredTransport: normalizeTransport(input.transport),
       ...(toolList.length ? { tools: toolList } : {}),
-      runReadToolsAutomatically: true,
-      runWriteToolsAutomatically: true
+      ...(enabledToolNames !== undefined ? { enabledToolNames: persistedToolNames(enabledToolNames) } : {}),
+      runReadToolsAutomatically: input.runReadToolsAutomatically ?? true,
+      runWriteToolsAutomatically: input.runWriteToolsAutomatically ?? false
     };
     return {
       requestId: randomUUID(),
@@ -368,9 +439,22 @@ export class McpConnectionManager {
     const serverUrl = normalizeServerUrl(input.serverUrl);
     const approvalIntent = input.approvalIntent ?? "approve_on_connect";
     const transport = normalizeTransport(input.transport);
-    const normalizedInput: AddConnectionInput = { ...input, name, serverUrl, transport };
     const validation = await this.validateInContext(context, serverUrl, input.auth, approvalIntent);
     const toolList = Array.isArray(validation.tools) ? (validation.tools as unknown[]) : [];
+    const enabledToolNames = input.enabledToolNames === undefined
+      ? undefined
+      : normalizeEnabledToolNames(input.enabledToolNames, toolNamesFrom(toolList));
+    const runReadToolsAutomatically = input.runReadToolsAutomatically ?? true;
+    const runWriteToolsAutomatically = input.runWriteToolsAutomatically ?? false;
+    const normalizedInput: AddConnectionInput = {
+      ...input,
+      name,
+      serverUrl,
+      transport,
+      ...(enabledToolNames !== undefined ? { enabledToolNames } : {}),
+      runReadToolsAutomatically,
+      runWriteToolsAutomatically
+    };
     const moduleId = randomUUID();
     await this.api.post("saveTransactionsFanout", this.buildCreateTransaction(moduleId, context, normalizedInput, toolList));
     try {
@@ -396,6 +480,9 @@ export class McpConnectionManager {
       authType: input.auth?.type ?? "none",
       transport,
       toolNames: toolNamesFrom(toolList),
+      ...(enabledToolNames !== undefined ? { enabledToolNames: [...enabledToolNames] } : {}),
+      runReadToolsAutomatically,
+      runWriteToolsAutomatically,
       createdAt: new Date().toISOString()
     };
     try { this.registry.upsert(record); }
@@ -406,8 +493,14 @@ export class McpConnectionManager {
     return { ...record, validation };
   }
 
-  async update(id: string, changes: { name?: string; serverUrl?: string; auth?: McpAuth; transport?: string; approvalIntent?: McpApprovalIntent }): Promise<McpConnectionRecord> {
-    if (changes.name === undefined && changes.serverUrl === undefined && changes.auth === undefined && changes.transport === undefined) {
+  async update(id: string, changes: UpdateConnectionInput): Promise<McpConnectionRecord> {
+    if (changes.name === undefined
+      && changes.serverUrl === undefined
+      && changes.auth === undefined
+      && changes.transport === undefined
+      && changes.enabledToolNames === undefined
+      && changes.runReadToolsAutomatically === undefined
+      && changes.runWriteToolsAutomatically === undefined) {
       throw new Error("At least one MCP connection update is required");
     }
     const existing = this.registry.get(id);
@@ -444,19 +537,26 @@ export class McpConnectionManager {
     }
 
     const reconnect = changes.auth !== undefined || serverSettingsChanged;
-    let validatedTools: unknown[] = [];
+    let validatedTools: unknown[] | undefined;
     if (reconnect) {
       const validation = await this.validateInContext(context, serverUrl, changes.auth, changes.approvalIntent ?? "approve_on_connect");
       validatedTools = Array.isArray(validation.tools) ? validation.tools : [];
     }
+    const enabledToolNames = Array.isArray(changes.enabledToolNames)
+      ? normalizeEnabledToolNames(changes.enabledToolNames, toolNamesFrom(validatedTools ?? currentData.tools))
+      : undefined;
     const data: JsonObject = {
       ...currentData,
       id,
       name,
       serverUrl,
       preferredTransport: transport,
-      ...(validatedTools.length > 0 ? { tools: validatedTools } : {})
+      ...(validatedTools && validatedTools.length > 0 ? { tools: validatedTools } : {}),
+      ...(enabledToolNames !== undefined ? { enabledToolNames: persistedToolNames(enabledToolNames) } : {}),
+      ...(changes.runReadToolsAutomatically !== undefined ? { runReadToolsAutomatically: changes.runReadToolsAutomatically } : {}),
+      ...(changes.runWriteToolsAutomatically !== undefined ? { runWriteToolsAutomatically: changes.runWriteToolsAutomatically } : {})
     };
+    if (changes.enabledToolNames === null) delete data.enabledToolNames;
     await this.api.post("saveTransactionsFanout", {
       requestId: randomUUID(),
       transactions: [{
@@ -465,7 +565,7 @@ export class McpConnectionManager {
         operations: [{
           pointer: { table: "workflow_module", id, spaceId: context.spaceId },
           path: ["data"],
-          command: "update",
+          command: changes.enabledToolNames === null ? "set" : "update",
           args: data
         }]
       }]
@@ -480,6 +580,7 @@ export class McpConnectionManager {
       });
     }
     const remoteToolNames = toolNamesFrom(data.tools);
+    const storedEnabled = storedToolNames(data.enabledToolNames);
     const record: McpConnectionRecord = {
       id,
       name,
@@ -489,6 +590,9 @@ export class McpConnectionManager {
       authType: changes.auth?.type ?? existing?.authType ?? "unknown",
       transport,
       toolNames: remoteToolNames.length > 0 ? remoteToolNames : [...(existing?.toolNames ?? [])],
+      ...(storedEnabled !== undefined ? { enabledToolNames: storedEnabled } : {}),
+      runReadToolsAutomatically: data.runReadToolsAutomatically !== false,
+      runWriteToolsAutomatically: data.runWriteToolsAutomatically === true,
       createdAt: existing?.createdAt ?? asIsoTimestamp(moduleRecord.created_time) ?? new Date().toISOString()
     };
     this.registry.upsert(record);
@@ -532,6 +636,7 @@ export class McpConnectionManager {
       const data = object(record.data);
       const local = localById.get(link.id);
       const remoteToolNames = toolNamesFrom(data.tools);
+      const enabledToolNames = storedToolNames(data.enabledToolNames);
       summaries.push({
         id: link.id,
         name: asString(data.name, asString(data.officialName, local?.name ?? link.id)),
@@ -541,6 +646,9 @@ export class McpConnectionManager {
         authType: local?.authType ?? "unknown",
         transport: asString(data.preferredTransport, local?.transport ?? ""),
         toolNames: remoteToolNames.length > 0 ? remoteToolNames : [...(local?.toolNames ?? [])],
+        enabledToolNames: enabledToolNames ?? null,
+        runReadToolsAutomatically: data.runReadToolsAutomatically !== false,
+        runWriteToolsAutomatically: data.runWriteToolsAutomatically === true,
         createdAt: asIsoTimestamp(record.created_time) ?? local?.createdAt ?? null,
         source: local ? "notion_and_registry" : "notion",
         alive: record.alive === true,
@@ -560,6 +668,9 @@ export class McpConnectionManager {
         authType: local.authType,
         transport: local.transport,
         toolNames: [...local.toolNames],
+        enabledToolNames: local.enabledToolNames ? [...local.enabledToolNames] : null,
+        runReadToolsAutomatically: local.runReadToolsAutomatically !== false,
+        runWriteToolsAutomatically: local.runWriteToolsAutomatically === true,
         createdAt: local.createdAt,
         source: "registry_only",
         alive: null,
@@ -599,6 +710,9 @@ export class McpConnectionManager {
       connected: connectionStatus === "connected",
       authType: existing?.authType ?? "unknown",
       transport: asString(moduleData.preferredTransport, existing?.transport ?? ""),
+      enabledToolNames: storedToolNames(moduleData.enabledToolNames) ?? null,
+      runReadToolsAutomatically: moduleData.runReadToolsAutomatically !== false,
+      runWriteToolsAutomatically: moduleData.runWriteToolsAutomatically === true,
       ...(connectionId && connectionTable ? {
         connectionPointer: { table: connectionTable, id: connectionId, spaceId: connectionSpaceId }
       } : {})

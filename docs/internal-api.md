@@ -386,8 +386,9 @@ message ID を100件ずつ取得する。表示対象は次だけである。
 
 `workflow_module` レコードの主要キー: `alive, created_by_id, created_by_table, created_time, data, id,
 last_edited_by_id, last_edited_by_table, last_edited_time, module_type, parent_id, parent_table, space_id, version`。
-`data` の中身: `connectionPointer, icon, id, name, officialName, preferredTransport, runReadToolsAutomatically,
-runWriteToolsAutomatically, serverInstructions, serverUrl, tools`。
+`data` の中身: `connectionPointer, enabledResourceUris, enabledToolNames, icon, id, name, officialName,
+preferredTransport, runReadToolsAutomatically, runWriteToolsAutomatically, serverInstructions, serverUrl, tools`。
+`enabledToolNames`省略は全tool、外部APIの空配列は全tool無効。永続化時は現行UIと同じ`["__NONE__"]` sentinelへ変換し、list/statusでは空配列へ戻す。read自動実行は省略/trueが有効、write自動実行はtrueだけが有効となる。
 
 削除は `saveTransactionsFanout` で `args: { alive: false }`、更新は `path: ["data"]` と `path: []` の
 2 オペレーションを送ります。
@@ -401,7 +402,7 @@ Personal/global MCP接続は2 recordを協調更新する。
 
 一覧取得もこのspace-view listをsource of truthにし、linked pointerをdeduplicateして1回の`syncRecordValues`でbatch readする。liveかつdeadなlinked moduleを安全なsummaryへ変換し、current workspace/viewのlocal registry metadataだけをmergeする。registry-only stale recordは`linked:false`、Notion-only recordのauth typeは`unknown`とし、raw `connectionPointer`やexternal-connection recordは返さない。
 
-updateもregistryをsource of truthにしない。current `space_view`へのlink、pointerのspace、live `workflow_module`のtype/space/idを検証してから、既存`data`全体をshallow mergeする。name-only更新はvalidation/connectを行わない。server URLまたはtransport変更は明示的authを必須とし、先に`validateMcpConnection`を実行する。validated toolsがnon-emptyの場合だけtoolsを置換し、commit後に`postWorkflowsMcpServerConnect`へ`initiationContext:"reconnect"`を送る。authだけを明示した再認証も同じvalidate/reconnect経路を使う。
+updateもregistryをsource of truthにしない。current `space_view`へのlink、pointerのspace、live `workflow_module`のtype/space/idを検証してから、既存`data`全体をshallow mergeする。name-only、`enabledToolNames`、read/write run policy更新はvalidation/connectを行わない。tool名はcached catalogに照合し、空配列は`["__NONE__"]`として全無効、nullはfull `data` setでfieldを削除（全有効）する。server URLまたはtransport変更は明示的authを必須とし、先に`validateMcpConnection`を実行する。明示tool filterは再validation後のcatalogに照合し、validated toolsがnon-emptyの場合だけtoolsを置換する。commit後に`postWorkflowsMcpServerConnect`へ`initiationContext:"reconnect"`を送り、authだけを明示した再認証も同じ経路を使う。
 
 connectはこの2 commitの間で実行する。connect、visibility commit、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、そのmodule IDに一致するpointerだけを削除する。removeもdead + unlinkを1 transactionで行い、他のsettings/module pointerは変更しない。update/remove/statusはcurrent Notion linkageとrecordを検証し、registry recordがある場合はactive workspace/viewとの不一致を拒否する。
 

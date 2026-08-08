@@ -308,20 +308,28 @@ join transactionが失敗した場合も、自動で再作成せずpartial failu
 
 | `auth.type` | 必要フィールド | 送出ヘッダー |
 |---|---|---|
-| `bearer` / `token` | `token` | `Authorization: Bearer <token>` |
+| `bearer` | `token` | `Authorization: Bearer <token>` |
+| `token` | `token` | `Authorization: Token <token>` |
 | `apiKey` | `key`（`headerName` 任意） | `X-API-Key: <key>` または指定ヘッダー |
 | `basic` | `username`, `password` | `Authorization: Basic <base64>` |
 | `header` | `headers`（任意の map） | 指定したヘッダーをそのまま |
 | `oauth` | なし | `start_mcp_oauth` で取得した URL をブラウザで開く |
 | `none` | なし | なし |
 
+### Tool選択と実行確認
+
+`add_mcp_connection.enabledToolNames`にはvalidationで返ったtool名を指定できます。省略時は全tool有効、`[]`は全tool無効です（Notion内部では現行UIと同じ`["__NONE__"]`へ変換します）。`update_mcp_connection`では同じ配列で選択を置換し、`null`でfilterを削除して全tool有効へ戻します。空白はtrim、重複は除去し、未知名はNotionへ書き込む前に拒否します。
+
+`runReadToolsAutomatically`は省略時`true`（read-only toolを確認なしで実行）、`runWriteToolsAutomatically`は省略時`false`（write toolは確認必須）です。write自動実行は明示的に`true`を指定した場合だけ有効になります。`list_mcp_connections`と`get_mcp_connection_status`はeffective policyを返し、`enabledToolNames:null`は全tool有効を意味します。
+
 このserverで作成したcredential-free metadataは `NOTION_MCP_REGISTRY_FILE`（既定はメモリ内のみ）にmode 0600で保存します。`list_mcp_connections`はcurrent `space_view.settings.agent_chat_modules`をsource of truthとしてlinked済み`workflow_module`を1回のbatch requestで取得し、current workspace/viewのlocal metadataだけをmergeします。別clientやUIが作成したmoduleも列挙でき、registryにないauth方式は`unknown`として返します。raw external-connection recordやcredentialは返しません。serverUrlはhttpsまたはlocalhostのみ許可します。
 
-`update_mcp_connection`はlocal registryの有無に依存せず、current Personal Agentにlinkedされたlive MCP moduleをNotionから読み直します。name-only更新は再接続せず、`connectionPointer`、tools、icon、run policy、未知fieldを含む既存`data`全体を保持します。serverUrlまたはtransportを変更する場合は`{type:"none"}`を含む明示的authが必須で、先にvalidationし、non-emptyなvalidated toolsだけを反映して`initiationContext:"reconnect"`で再接続します。
+`update_mcp_connection`はlocal registryの有無に依存せず、current Personal Agentにlinkedされたlive MCP moduleをNotionから読み直します。name-only・tool filter・run policy更新は再接続せず、`connectionPointer`、tools、icon、未知fieldを含む既存`data`全体を保持します。serverUrlまたはtransportを変更する場合は`{type:"none"}`を含む明示的authが必須で、先にvalidationし、non-emptyなvalidated toolsだけを反映して`initiationContext:"reconnect"`で再接続します。明示したtool filterは現在または再validation後のtool一覧に照合します。
 
 作成後のconnect、space-view可視化、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、該当pointerだけをunlinkします。remove時も他のsettingsとmodule pointerを保持します。update/remove/statusはcurrent linkageとlive recordを検証し、local recordが存在する場合はactive workspace/viewとの不一致も拒否します。
 
-Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験では、別processでNotion-onlyとして再発見した一時moduleのname-only update、full-data保持、明示的no-auth reconnect、3 tools、cleanup後の`alive:false`・`linked:false`、既存module不変を確認しました。現在の全回帰は80/80です。
+Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験では、別processでNotion-onlyとして再発見した一時moduleのname-only update、full-data保持、明示的no-auth reconnect、3 tools、cleanup後の`alive:false`・`linked:false`、既存module不変を確認しました。現在の全回帰は86/86です。
+2026-08-08の追加live試験では一時DeepWiki moduleに対し、既定policy、1 tool選択、全tool無効、filter削除による全tool復元を順に検証しました。3 toolsとconnected状態を維持し、終了時は一時moduleとregistryを削除、account file hashも不変でした。
 
 ## 添付ファイル
 

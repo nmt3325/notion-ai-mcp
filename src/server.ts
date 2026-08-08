@@ -203,35 +203,47 @@ export function createServer(client: NotionClient): McpServer {
 
   server.registerTool("add_mcp_connection", {
     title: "Add an MCP connection",
-    description: "Register a custom MCP server in Notion (Settings > Connections > MCP) with bearer, token, API key, basic, raw header, or no authentication.",
+    description: "Register a custom MCP server and optionally restrict its enabled tools and confirmation policy.",
     inputSchema: {
       name: z.string().min(1),
       serverUrl: z.string().min(1).describe("https URL of the MCP endpoint"),
       auth: authShape.optional(),
-      transport: z.string().min(1).optional().describe("Preferred transport, defaults to http")
+      transport: z.string().min(1).optional().describe("Preferred transport, defaults to streamableHttp"),
+      enabledToolNames: z.array(z.string().min(1)).max(1000).optional().describe("Exact discovered tool names to enable; omit to enable all"),
+      runReadToolsAutomatically: z.boolean().optional().describe("Allow read-only tools to run without confirmation; defaults to true"),
+      runWriteToolsAutomatically: z.boolean().optional().describe("Allow write tools to run without confirmation; defaults to false")
     }
-  }, async ({ name, serverUrl, auth, transport }) => result(await client.mcp().add({
+  }, async ({ name, serverUrl, auth, transport, enabledToolNames, runReadToolsAutomatically, runWriteToolsAutomatically }) => result(await client.mcp().add({
     name,
     serverUrl,
     ...(toMcpAuth(auth) ? { auth: toMcpAuth(auth) as McpAuth } : {}),
-    ...(transport ? { transport } : {})
+    ...(transport ? { transport } : {}),
+    ...(enabledToolNames !== undefined ? { enabledToolNames } : {}),
+    ...(runReadToolsAutomatically !== undefined ? { runReadToolsAutomatically } : {}),
+    ...(runWriteToolsAutomatically !== undefined ? { runWriteToolsAutomatically } : {})
   })));
 
   server.registerTool("update_mcp_connection", {
     title: "Update an MCP connection",
-    description: "Rename a linked Personal Agent MCP module, or validate and reconnect it with explicit auth when changing server settings.",
+    description: "Update a linked MCP module, including enabled tools and read/write confirmation policy, or reconnect after server changes.",
     inputSchema: {
       id: z.string().min(1),
       name: z.string().min(1).optional(),
       serverUrl: z.string().min(1).optional(),
       auth: authShape.optional(),
-      transport: z.string().min(1).optional()
+      transport: z.string().min(1).optional(),
+      enabledToolNames: z.array(z.string().min(1)).max(1000).nullable().optional().describe("Exact tool names to enable; [] disables all and null restores all"),
+      runReadToolsAutomatically: z.boolean().optional(),
+      runWriteToolsAutomatically: z.boolean().optional()
     }
-  }, async ({ id, name, serverUrl, auth, transport }) => result(await client.mcp().update(id, {
+  }, async ({ id, name, serverUrl, auth, transport, enabledToolNames, runReadToolsAutomatically, runWriteToolsAutomatically }) => result(await client.mcp().update(id, {
     ...(name ? { name } : {}),
     ...(serverUrl ? { serverUrl } : {}),
     ...(toMcpAuth(auth) ? { auth: toMcpAuth(auth) as McpAuth } : {}),
-    ...(transport ? { transport } : {})
+    ...(transport ? { transport } : {}),
+    ...(enabledToolNames !== undefined ? { enabledToolNames } : {}),
+    ...(runReadToolsAutomatically !== undefined ? { runReadToolsAutomatically } : {}),
+    ...(runWriteToolsAutomatically !== undefined ? { runWriteToolsAutomatically } : {})
   })));
 
   server.registerTool("remove_mcp_connection", {

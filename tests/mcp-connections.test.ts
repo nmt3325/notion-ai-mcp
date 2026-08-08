@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   McpConnectionManager, McpRegistry, buildAuthHeaderList, buildAuthHeaders,
-  normalizeServerUrl, normalizeTransport, toolNamesFrom, type McpApi
+  normalizeEnabledToolNames, normalizeServerUrl, normalizeTransport, toolNamesFrom, type McpApi
 } from "../src/mcp-connections.js";
 
 const context = { spaceId: "space-1", userId: "user-1", spaceViewId: "view-1" };
@@ -42,7 +42,14 @@ function fakeApi(responses: Record<string, FakeResponse> = {}): { api: McpApi; c
               serverUrl: `https://${id}.example.com/mcp`,
               preferredTransport: "streamableHttp",
               tools: [{ name: "ask_question" }],
-              connectionPointer: { table: "external_connection", id: "connection-1", spaceId: context.spaceId }
+              connectionPointer: { table: "external_connection", id: "connection-1", spaceId: context.spaceId },
+              resources: [{ uri: "resource://preserved" }],
+              futureField: { nested: ["preserved"] },
+              ...(id === "remote-only" ? {
+                enabledToolNames: ["__NONE__"],
+                runReadToolsAutomatically: false,
+                runWriteToolsAutomatically: true
+              } : {})
             }
           } };
           if (table === "external_connection") recordMap[table][id] = { value: {
@@ -64,7 +71,7 @@ function operations(call: { body: Record<string, unknown> } | undefined): Array<
 
 test("auth helpers cover every supported auth style and current wire shape", () => {
   assert.deepEqual(buildAuthHeaders({ type: "bearer", token: "abc" }), { Authorization: "Bearer abc" });
-  assert.deepEqual(buildAuthHeaders({ type: "token", token: "abc" }), { Authorization: "Bearer abc" });
+  assert.deepEqual(buildAuthHeaders({ type: "token", token: "abc" }), { Authorization: "Token abc" });
   assert.deepEqual(buildAuthHeaders({ type: "apiKey", key: "k" }), { "X-API-Key": "k" });
   assert.deepEqual(buildAuthHeaders({ type: "apiKey", key: "k", headerName: "X-Custom" }), { "X-Custom": "k" });
   assert.deepEqual(buildAuthHeaders({ type: "basic", username: "u", password: "p" }), { Authorization: `Basic ${Buffer.from("u:p").toString("base64")}` });
@@ -97,6 +104,14 @@ test("toolNamesFrom accepts arrays and wrapped payloads", () => {
   assert.deepEqual(toolNamesFrom(null), []);
 });
 
+test("enabled tool selections trim, deduplicate, and reject unknown names", () => {
+  assert.deepEqual(normalizeEnabledToolNames([" read ", "read"], ["read", "write"]), ["read"]);
+  assert.deepEqual(normalizeEnabledToolNames([], ["read"]), []);
+  assert.throws(() => normalizeEnabledToolNames(["missing"], ["read"]), /Unknown MCP tool name/);
+  assert.throws(() => normalizeEnabledToolNames(["__NONE__"], ["__NONE__"]), /Unknown MCP tool name/);
+  assert.throws(() => normalizeEnabledToolNames(["  "], ["read"]), /empty names/);
+});
+
 test("list() discovers linked modules and merges only current-workspace registry metadata", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mcp-list-"));
   try {
@@ -104,7 +119,10 @@ test("list() discovers linked modules and merges only current-workspace registry
     const registry = new McpRegistry(registryPath);
     const baseRecord = { name: "Local", serverUrl: "https://local.example.com/mcp", spaceId: context.spaceId, spaceViewId: context.spaceViewId, authType: "bearer" as const, transport: "streamableHttp", toolNames: ["local_tool"], createdAt: "2026-08-07T00:00:00.000Z" };
     registry.upsert({ id: "existing-module", ...baseRecord });
-    registry.upsert({ id: "stale-local", ...baseRecord });
+    registry.upsert({
+      id: "stale-local", ...baseRecord,
+      enabledToolNames: [], runReadToolsAutomatically: false, runWriteToolsAutomatically: true
+    });
     registry.upsert({ id: "other-workspace", ...baseRecord, spaceId: "space-2" });
     const remoteOnly = { pointer: { table: "workflow_module", id: "remote-only", spaceId: context.spaceId }, defaultEnabled: true };
     const { api, calls } = fakeApi({ syncRecordValuesMain: spaceViewResponse([existingModule, remoteOnly]) });
@@ -118,14 +136,23 @@ test("list() discovers linked modules and merges only current-workspace registry
     assert.equal(merged?.authType, "bearer");
     assert.equal(merged?.name, "Remote existing-module");
     assert.deepEqual(merged?.toolNames, ["ask_question"]);
+    assert.equal(merged?.enabledToolNames, null);
+    assert.equal(merged?.runReadToolsAutomatically, true);
+    assert.equal(merged?.runWriteToolsAutomatically, false);
     const remote = listed.find((item) => item.id === "remote-only");
     assert.equal(remote?.source, "notion");
     assert.equal(remote?.authType, "unknown");
     assert.equal(remote?.defaultEnabled, true);
+    assert.deepEqual(remote?.enabledToolNames, []);
+    assert.equal(remote?.runReadToolsAutomatically, false);
+    assert.equal(remote?.runWriteToolsAutomatically, true);
     const stale = listed.find((item) => item.id === "stale-local");
     assert.equal(stale?.source, "registry_only");
     assert.equal(stale?.linked, false);
     assert.equal(stale?.alive, null);
+    assert.deepEqual(stale?.enabledToolNames, []);
+    assert.equal(stale?.runReadToolsAutomatically, false);
+    assert.equal(stale?.runWriteToolsAutomatically, true);
     assert.equal(listed.some((item) => item.id === "other-workspace"), false);
     assert.equal(listed.some((item) => "connectionPointer" in item), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -159,6 +186,9 @@ test("add() uses the current factory record and preserves space-view modules", a
   assert.equal(createArgs.created_time, createArgs.last_edited_time);
   const data = createArgs.data as Record<string, unknown>;
   assert.equal(data.preferredTransport, "streamableHttp");
+  assert.equal("enabledToolNames" in data, false);
+  assert.equal(data.runReadToolsAutomatically, true);
+  assert.equal(data.runWriteToolsAutomatically, false);
 
   const connect = calls[2]?.body as { authHeaders: Array<{ name: string; value: string }>; initiationContext: string; approvalIntent: string };
   assert.deepEqual(connect.authHeaders, [{ name: "Authorization", value: "Bearer secret" }]);
@@ -231,7 +261,8 @@ test("update() validates and reconnects when changing server settings", async ()
     const record = await manager.update("existing-module", {
       serverUrl: "https://new.example.com/mcp",
       transport: "sse",
-      auth: { type: "bearer", token: "replacement-secret" }
+      auth: { type: "bearer", token: "replacement-secret" },
+      enabledToolNames: []
     });
     assert.deepEqual(calls.map((call) => call.endpoint), [
       "syncRecordValuesMain", "syncRecordValues", "validateMcpConnection", "saveTransactionsFanout", "postWorkflowsMcpServerConnect"
@@ -241,10 +272,12 @@ test("update() validates and reconnects when changing server settings", async ()
     assert.equal(args.serverUrl, "https://new.example.com/mcp");
     assert.equal(args.preferredTransport, "sse");
     assert.deepEqual(args.tools, [{ name: "new_tool" }]);
+    assert.deepEqual(args.enabledToolNames, ["__NONE__"]);
     assert.deepEqual(args.connectionPointer, { table: "external_connection", id: "connection-1", spaceId: context.spaceId });
     assert.equal(calls[4]?.body.initiationContext, "reconnect");
     assert.equal(record.authType, "bearer");
     assert.deepEqual(record.toolNames, ["new_tool"]);
+    assert.deepEqual(record.enabledToolNames, []);
     assert.equal(readFileSync(registryPath, "utf8").includes("replacement-secret"), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -270,6 +303,90 @@ test("update() rejects unlinked, cross-workspace, and unauthenticated server cha
   assert.deepEqual(missingAuth.calls.map((call) => call.endpoint), ["syncRecordValuesMain", "syncRecordValues"]);
 });
 
+
+test("add() persists an explicit tool selection and approval policy", async () => {
+  const { api, calls } = fakeApi({ validateMcpConnection: { success: true, tools: [{ name: "read" }, { name: "write" }] } });
+  const record = await new McpConnectionManager(api).add({
+    name: "Scoped",
+    serverUrl: ["https:", "", "mcp.example.com", "mcp"].join("/"),
+    enabledToolNames: [" write ", "write"],
+    runReadToolsAutomatically: false,
+    runWriteToolsAutomatically: true
+  });
+  const data = (operations(calls[1])[0]?.args as Record<string, unknown>).data as Record<string, unknown>;
+  assert.deepEqual(data.enabledToolNames, ["write"]);
+  assert.equal(data.runReadToolsAutomatically, false);
+  assert.equal(data.runWriteToolsAutomatically, true);
+  assert.deepEqual(record.enabledToolNames, ["write"]);
+  assert.equal(record.runReadToolsAutomatically, false);
+  assert.equal(record.runWriteToolsAutomatically, true);
+});
+
+test("add() encodes an explicit disable-all selection without exposing the sentinel", async () => {
+  const { api, calls } = fakeApi({ validateMcpConnection: { success: true, tools: [{ name: "read" }] } });
+  const record = await new McpConnectionManager(api).add({
+    name: "Disabled",
+    serverUrl: ["https:", "", "mcp.example.com", "mcp"].join("/"),
+    enabledToolNames: []
+  });
+  const data = (operations(calls[1])[0]?.args as Record<string, unknown>).data as Record<string, unknown>;
+  assert.deepEqual(data.enabledToolNames, ["__NONE__"]);
+  assert.deepEqual(record.enabledToolNames, []);
+});
+
+test("tool filters reject unknown names before any persistence", async () => {
+  const add = fakeApi({ validateMcpConnection: { success: true, tools: [{ name: "read" }] } });
+  await assert.rejects(() => new McpConnectionManager(add.api).add({
+    name: "Scoped",
+    serverUrl: ["https:", "", "mcp.example.com", "mcp"].join("/"),
+    enabledToolNames: ["missing"]
+  }), /Unknown MCP tool name/);
+  assert.deepEqual(add.calls.map((call) => call.endpoint), ["validateMcpConnection"]);
+
+  const update = fakeApi();
+  await assert.rejects(
+    () => new McpConnectionManager(update.api).update("existing-module", { enabledToolNames: ["missing"] }),
+    /Unknown MCP tool name/
+  );
+  assert.deepEqual(update.calls.map((call) => call.endpoint), ["syncRecordValuesMain", "syncRecordValues"]);
+});
+
+test("update() changes and clears tool policy without reconnecting", async () => {
+  const changed = fakeApi();
+  const changedRecord = await new McpConnectionManager(changed.api).update("existing-module", {
+    enabledToolNames: [],
+    runReadToolsAutomatically: false,
+    runWriteToolsAutomatically: true
+  });
+  assert.deepEqual(changed.calls.map((call) => call.endpoint), ["syncRecordValuesMain", "syncRecordValues", "saveTransactionsFanout"]);
+  const changedData = operations(changed.calls[2])[0]?.args as Record<string, unknown>;
+  assert.deepEqual(changedData.enabledToolNames, ["__NONE__"]);
+  assert.equal(changedData.runReadToolsAutomatically, false);
+  assert.equal(changedData.runWriteToolsAutomatically, true);
+  assert.deepEqual(changedData.connectionPointer, { table: "external_connection", id: "connection-1", spaceId: context.spaceId });
+  assert.deepEqual(changedData.resources, [{ uri: "resource://preserved" }]);
+  assert.deepEqual(changedData.futureField, { nested: ["preserved"] });
+  assert.deepEqual(changedRecord.enabledToolNames, []);
+
+  const filteredRecord = { recordMap: { workflow_module: { "existing-module": { value: {
+    id: "existing-module", alive: true, module_type: "mcpServer", space_id: context.spaceId,
+    data: {
+      name: "Filtered",
+      serverUrl: ["https:", "", "mcp.example.com", "mcp"].join("/"),
+      preferredTransport: "streamableHttp",
+      tools: [{ name: "read" }],
+      enabledToolNames: ["read"]
+    }
+  } } } } };
+  const cleared = fakeApi({ syncRecordValues: filteredRecord });
+  const clearedRecord = await new McpConnectionManager(cleared.api).update("existing-module", { enabledToolNames: null });
+  const clearedOperation = operations(cleared.calls[2])[0];
+  const clearedData = clearedOperation?.args as Record<string, unknown>;
+  assert.equal(clearedOperation?.command, "set");
+  assert.equal("enabledToolNames" in clearedData, false);
+  assert.equal(clearedRecord.enabledToolNames, undefined);
+});
+
 test("remove() marks the module dead and preserves unrelated space-view settings", async () => {
   const { api, calls } = fakeApi();
   const manager = new McpConnectionManager(api);
@@ -293,6 +410,32 @@ test("status derives global-module health without the workflow-only OAuth endpoi
   assert.equal(status.linked, true);
   assert.equal(status.transport, "streamableHttp");
   assert.equal((status.connectionPointer as Record<string, unknown>).table, "external_connection");
+});
+
+test("status decodes Notion's disable-all sentinel and effective run policy", async () => {
+  const linked = { pointer: { table: "workflow_module", id: "module-1", spaceId: context.spaceId }, defaultEnabled: false };
+  const records = { recordMap: {
+    workflow_module: { "module-1": { value: {
+      id: "module-1", alive: true, module_type: "mcpServer", space_id: context.spaceId,
+      data: {
+        name: "Disabled", serverUrl: "https://mcp.example.com/mcp", preferredTransport: "streamableHttp",
+        tools: [{ name: "read" }], enabledToolNames: ["__NONE__"],
+        runReadToolsAutomatically: false, runWriteToolsAutomatically: true,
+        connectionPointer: { table: "external_connection", id: "connection-1", spaceId: context.spaceId }
+      }
+    } } },
+    external_connection: { "connection-1": { value: {
+      id: "connection-1", alive: true, space_id: context.spaceId, data: { authenticated: true }
+    } } }
+  } };
+  const { api } = fakeApi({
+    syncRecordValuesMain: spaceViewResponse([existingModule, linked]),
+    syncRecordValues: records
+  });
+  const status = await new McpConnectionManager(api).status("module-1");
+  assert.deepEqual(status.enabledToolNames, []);
+  assert.equal(status.runReadToolsAutomatically, false);
+  assert.equal(status.runWriteToolsAutomatically, true);
 });
 
 test("registry persists connections to disk", () => {
