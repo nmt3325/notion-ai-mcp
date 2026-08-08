@@ -264,8 +264,17 @@ compiled stdioのlive試験でも、1つ目のfile upload/chat後、同じ`conve
 
 ## 2026-08-08 MCP tool filter・run policy bundle調査
 
-Notionの純正web fetchを使わず、`scripts/research-mcp-connections.sh`でlogin HTML、current Rspack runtime、2,079 chunkを`wget`取得した。2,078 chunk（約89.6 MB）を解析し、MCP候補24 sourceを抽出した。current persisted-state schemaは`enabledToolNames?: string[]`を正式に持ち、undefinedは後方互換として全tool有効である。`runReadToolsAutomatically`はundefined/trueで自動実行、`runWriteToolsAutomatically`はtrueだけで自動実行となる。
+Notionの純正web fetchを使わず、`scripts/research-mcp-connections.sh`でlogin HTML、current Rspack runtime、2,079 chunkを`wget`取得した。2,078 chunk（約89.6 MB）を解析し、MCP候補15 sourceを抽出した。current persisted-state schemaは`enabledToolNames?: string[]`を正式に持ち、undefinedは後方互換として全tool有効である。`runReadToolsAutomatically`はundefined/trueで自動実行、`runWriteToolsAutomatically`はtrueだけで自動実行となる。
 
 実装はadd/update schemaにtool filterとread/write policyを追加した。addの安全な既定値はread=true、write=false。current UIは全tool無効を空配列ではなく`["__NONE__"]`で保存する。外部APIの`[]`をこのsentinelへ変換し、`null`はfull `data` setでfieldを削除し全tool有効へ戻す。選択名はtrim・deduplicateし、validation済み/cached catalogにない名前をwrite前に拒否する。name/filter/policyだけの変更はreconnectせず、live `data`全体を保持する。86/86 tests、TypeScript check、build、18-tool compiled stdio smokeが成功した。raw credentialや認証sessionはresearch artifactへ保存していない。
 
 compiled stdioの一時DeepWiki module試験では、既定の全tool、1 tool選択、`["__NONE__"]`による全無効、field削除による全tool復元をlive recordから確認した。最初のprobeで空配列がremoteから消えること、次のprobeでshallow mergeからkeyを省くだけでは既存sentinelが残ることを検出したため、現行UI sentinelへの変換とclear時のfull-data `set`へ修正した。3 tools、connected状態、read/write policyを維持し、一時moduleとmode 0600 registryをcleanupした。account file hashは前後で不変だった。
+
+## 2026-08-08 MCP OAuth BYO app bundle調査
+
+current chunk `11987`の`ConnectMcpServerModal`を再解析した。公式requestは`serverUrl`、`spaceId`、new `integrationId`、optional `workflowId`、resolved `selectedScopes`、`initiationContext`、`callbackType`、`callbackOrigin`、optional `userProvidedOAuthClientId` / `userProvidedOAuthClientSecret`、`approvalIntent`で構成される。既存moduleがある場合だけ`reconnect`となり、global Personal Agentでは`workflowId`を省略できる。`oauth_byo_app` schemeはadvanced settingsを有効化し、custom scopeは空白分割される。
+
+実装はscopeをtrim・deduplicateし、明示的な空選択と100件超を開始前に拒否する。BYO client ID/secretは対でのみ受理し、secretはrequest body以外へ永続化・返却しない。API responseはOAuth flowに必要な4 fieldだけへ縮小し、供給secretがallowlist値へechoされた場合も返却を停止する。reconnectはlive current-workspace MCP moduleとserver URL一致をread-only検証した後だけ許可する。4件のOAuth回帰追加後、全90 tests、TypeScript check、build、18-tool compiled stdio smokeが成功した。
+
+
+認証済みlive probeではpreconfigured catalog 23 URLを取得し、先頭12 endpointのOAuth discoveryがすべて成功した。Attioは`oauth_dcr`と3 scopesを返した。通常flowと、2 scopes・runtime生成BYO client ID/secretのflowはいずれもAttio authorization URL、completion flow ID、OAuth flow IDを返した。authorization requestにはpublic client IDが反映された一方、client secretは4-field outputに含まれなかった。前後でPersonal Agent module集合とaccount hashは不変、registry fileも作成されず、live resultはmode 0600で保存した。

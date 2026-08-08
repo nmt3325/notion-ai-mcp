@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
   McpConnectionManager, McpRegistry, buildAuthHeaderList, buildAuthHeaders,
-  normalizeEnabledToolNames, normalizeServerUrl, normalizeTransport, toolNamesFrom, type McpApi
+  normalizeEnabledToolNames, normalizeOAuthScopes, normalizeServerUrl, normalizeTransport, toolNamesFrom, type McpApi
 } from "../src/mcp-connections.js";
 
 const context = { spaceId: "space-1", userId: "user-1", spaceViewId: "view-1" };
@@ -110,6 +110,100 @@ test("enabled tool selections trim, deduplicate, and reject unknown names", () =
   assert.throws(() => normalizeEnabledToolNames(["missing"], ["read"]), /Unknown MCP tool name/);
   assert.throws(() => normalizeEnabledToolNames(["__NONE__"], ["__NONE__"]), /Unknown MCP tool name/);
   assert.throws(() => normalizeEnabledToolNames(["  "], ["read"]), /empty names/);
+});
+
+test("OAuth scopes trim, deduplicate, and reject explicit empty selections", () => {
+  assert.equal(normalizeOAuthScopes(undefined), undefined);
+  assert.deepEqual(normalizeOAuthScopes([" read ", "write", "read"]), ["read", "write"]);
+  assert.throws(() => normalizeOAuthScopes([]), /at least one scope/);
+  assert.throws(() => normalizeOAuthScopes(["  "]), /empty scopes/);
+});
+
+test("startOAuth sends the current payload and never returns or persists a BYO secret", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mcp-oauth-"));
+  try {
+    const registryPath = join(dir, "registry.json");
+    const secret = "test-client-secret";
+    const { api, calls } = fakeApi({
+      initiateMcpOAuth: {
+        authorizationUrl: "https://provider.example.com/authorize",
+        completionFlowId: "completion-1",
+        oauthFlowId: "flow-1",
+        userProvidedOAuthClientSecret: secret,
+        futureResponseField: { echoedSecret: secret }
+      }
+    });
+    const result = await new McpConnectionManager(api, registryPath).startOAuth(" https://mcp.example.com/mcp/ ", {
+      selectedScopes: [" read ", "write", "read"],
+      workflowId: "workflow-1",
+      userProvidedOAuthClientId: " client-id ",
+      userProvidedOAuthClientSecret: secret
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.endpoint, "initiateMcpOAuth");
+    const body = calls[0]?.body ?? {};
+    const integrationId = body.integrationId;
+    assert.equal(typeof integrationId, "string");
+    assert.deepEqual(body, {
+      serverUrl: "https://mcp.example.com/mcp",
+      spaceId: context.spaceId,
+      integrationId,
+      workflowId: "workflow-1",
+      selectedScopes: ["read", "write"],
+      initiationContext: "connect",
+      callbackType: "popup",
+      callbackOrigin: "https://app.notion.com",
+      userProvidedOAuthClientId: "client-id",
+      userProvidedOAuthClientSecret: secret,
+      approvalIntent: "approve_on_connect"
+    });
+    assert.deepEqual(result, {
+      integrationId,
+      authorizationUrl: "https://provider.example.com/authorize",
+      completionFlowId: "completion-1",
+      oauthFlowId: "flow-1"
+    });
+    assert.equal(JSON.stringify(result).includes(secret), false);
+    assert.equal(existsSync(registryPath), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("startOAuth rejects partial BYO credentials and unsafe explicit scope input before initiation", async () => {
+  const { api, calls } = fakeApi();
+  const manager = new McpConnectionManager(api);
+  await assert.rejects(manager.startOAuth("https://mcp.example.com/mcp", {
+    userProvidedOAuthClientId: "client-id"
+  }), /must be provided together/);
+  await assert.rejects(manager.startOAuth("https://mcp.example.com/mcp", {
+    userProvidedOAuthClientSecret: "secret"
+  }), /must be provided together/);
+  await assert.rejects(manager.startOAuth("https://mcp.example.com/mcp", {
+    selectedScopes: []
+  }), /at least one scope/);
+  assert.equal(calls.length, 0);
+});
+
+test("startOAuth uses reconnect context only after verifying the existing MCP module", async () => {
+  const moduleRecord = { recordMap: { workflow_module: { "module-1": { value: {
+    id: "module-1", alive: true, module_type: "mcpServer", space_id: context.spaceId,
+    data: { serverUrl: "https://mcp.example.com/mcp" }
+  } } } } };
+  const connected = fakeApi({
+    syncRecordValues: moduleRecord,
+    initiateMcpOAuth: { authorizationUrl: "https://provider.example.com/authorize" }
+  });
+  const result = await new McpConnectionManager(connected.api).startOAuth("https://mcp.example.com/mcp", {
+    existingModuleId: "module-1"
+  });
+  assert.deepEqual(connected.calls.map((call) => call.endpoint), ["syncRecordValues", "initiateMcpOAuth"]);
+  assert.equal(connected.calls[1]?.body.initiationContext, "reconnect");
+  assert.equal(result.authorizationUrl, "https://provider.example.com/authorize");
+
+  const mismatched = fakeApi({ syncRecordValues: moduleRecord });
+  await assert.rejects(new McpConnectionManager(mismatched.api).startOAuth("https://other.example.com/mcp", {
+    existingModuleId: "module-1"
+  }), /must match/);
+  assert.deepEqual(mismatched.calls.map((call) => call.endpoint), ["syncRecordValues"]);
 });
 
 test("list() discovers linked modules and merges only current-workspace registry metadata", async () => {
