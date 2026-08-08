@@ -225,6 +225,8 @@ Agent Serviceでuploadされた`fileIds`は`createAgentThread`の
 `content: [{type:"text"}, {type:"file",file_id}]`へ送り、継続ターンは`sendEventToAgentThread`を使います。
 Agent Service upload APIが既知のunsupported responseを返した場合、`upload_attachment`の既定`auto` modeは
 assistant-transcript uploadへfallbackし、不透明handleを`runInferenceTranscript`の`computer-file` stepへ変換します。
+明示的な`inference_transcript` uploadで`processForInference:true`を指定すると、現行Web clientと同じ
+`processAgentAttachment`処理完了を待ち、検証済みの`attachment` stepとして送信します。
 handleは作成されたthreadに固定され、Agent Service ID・別thread・別workspaceとの混在を拒否し、server再起動・workspace切替で失効します。
 同じactive inference conversationへ後からuploadできますが、`conversationId`指定済みの`auto` uploadは、失敗時に別threadへretargetしません。
 Agent Service file chatは安全のため`policies.approval_mode="ask"`を明示します。
@@ -380,13 +382,19 @@ Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_sta
 `auto`はAgent Serviceを優先し、既知の400/404/500/501 generation failureだけをassistant-transcriptへfallbackします。
 戻り値の`transport`で実際の経路を確認でき、fallback時は同時に返る`conversationId`をchat/downloadへ使用します。
 
+`processForInference:true`は`transport:"inference_transcript"`との組み合わせだけを許可します。
+`processAgentAttachment`が返す`task_output`を`complete` / `failed`までpollし、MIME別metadata・guardrail・error codeを
+current schemaで検証します。成功時は`processedForInference:true`を返し、chatでは`computer-file`ではなく
+processed `attachment` stepを使います。処理待ちは`NOTION_REQUEST_TIMEOUT_MS`で制限され、既定では無効です。
+
 upload例:
 
 ```json
 {
   "path": "inputs/report.pdf",
   "mimeType": "application/pdf",
-  "transport": "auto"
+  "transport": "inference_transcript",
+  "processForInference": true
 }
 ```
 

@@ -147,6 +147,23 @@ Personal Agentの現行file chatは主にAgent Serviceを使う。一方、assis
 Agent Service upload generationが利用できないworkspaceのfallbackとして使用できる。
 Agent Service contentは最大20 block、textは先頭に最大1件、fileはupload済みIDで表す。
 
+現行Web clientのprocessed attachment経路は、temporary upload後に次を送る。
+
+```json
+{
+  "url": "<temporary-file-url>",
+  "spaceId": "<space-id>",
+  "aiSessionPointer": { "table": "thread", "id": "<thread-id>", "spaceId": "<space-id>" },
+  "source": "user_upload",
+  "clientVersion": "<notion-client-version>"
+}
+```
+
+`processAgentAttachment`のresponseは`outputKey`と`spaceId`を返す。`task_output` recordを
+`syncRecordValuesMain`で読み、`status`が`complete`または`failed`になるまで待つ。`value.result`は
+`{type:"success",data:<MIME別metadata>}`または`{type:"error",data:{code,message}}`である。
+成功dataの`stepMetadata`を`attachmentSource:"user_upload"`とguardrail付きの`attachment` stepへ変換する。
+
 ```json
 [
   { "type": "text", "text": "このファイルを要約して" },
@@ -459,4 +476,7 @@ Web バンドルの chunk に、全モデルの定義がインラインで含ま
 - `conversationId`を指定した`auto` uploadは、Agent Service upload生成が失敗しても新しいassistant-transcript threadへretargetしない。
 - activeなinference-transcript conversationには後続fileをuploadできる。official Web helperと同じくupload URL requestの`createThread`は`true`のまま、次のinference requestは`createThread:false` / `isPartialTranscript:true`になる。
 - opaque transcript handleはthread・workspace・server processに固定され、1回だけchatへ添付できる。cross-thread、Agent Service IDとの混在、restart後、workspace切替後は拒否する。
+- 同一threadへuploadした複数handleは順序を保持して1 turnへ添付できる。別threadのhandleとの混在は拒否する。
+- explicit inference uploadの未知`conversationId`はaccount/API access前に拒否する。`file.notion.com`へ必要な`file_token`がなければredirect先へ接続しない。
+- `processForInference`はexplicit inference transportだけに限定し、`processAgentAttachment`のoutput key/workspace、task status、result union、MIME別metadataを検証してからprocessed stepを保存する。
 - temporary storage completionはHTTP 200または204だけを受理し、201を含む他の2xxを成功扱いしない。

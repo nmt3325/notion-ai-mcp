@@ -99,9 +99,9 @@ test("attachment tools forward upload and download options", async () => {
   const { client, uploaded, downloaded } = fakeClient();
   const { mcpClient, close } = await connect(client);
   try {
-    const upload = await mcpClient.callTool({ name: "upload_attachment", arguments: { base64: "aGVsbG8=", fileName: "notes.txt", mimeType: "text/plain", transport: "inference_transcript" } });
+    const upload = await mcpClient.callTool({ name: "upload_attachment", arguments: { base64: "aGVsbG8=", fileName: "notes.txt", mimeType: "text/plain", transport: "inference_transcript", processForInference: true } });
     assert.equal((upload.structuredContent as { fileId: string }).fileId, "file-1");
-    assert.deepEqual(uploaded[0], { base64: "aGVsbG8=", fileName: "notes.txt", mimeType: "text/plain", transport: "inference_transcript" });
+    assert.deepEqual(uploaded[0], { base64: "aGVsbG8=", fileName: "notes.txt", mimeType: "text/plain", transport: "inference_transcript", processForInference: true });
     const conversationId = "11111111-1111-4111-8111-111111111111";
     const download = await mcpClient.callTool({ name: "download_attachment", arguments: { conversationId, fileId: "file-1", returnBase64: true } });
     assert.equal((download.structuredContent as { base64: string }).base64, "aGVsbG8=");

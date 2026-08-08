@@ -310,3 +310,17 @@ Quick TunnelはHTTP/2でCloudflare edgeへ登録され、connectivity pre-check�
 localとpublic TLS endpointの未認証MCP POSTはいずれも401。公式SDKのStreamable HTTP clientをpublic URLへ接続し、initialize、19-tool listing、`complete_mcp_oauth`と`notion_ai_chat`の存在、`get_current_workspace` read callを確認した。前後のaccount hashは`06303073c76a7520`で不変、local MCP registryは作成されなかった。HTTP server、Quick Tunnel、mode 0600 token/result artifactsはdisposable environment内だけに保持し、secretや一時URLはrepositoryへ保存していない。
 
 再現用に`scripts/cloudflare-tunnel-smoke.mjs`と`npm run smoke:http:remote`を追加した。scriptはcredential-free HTTPS URLを要求し、未認証401、19 tools、任意のread callを確認するが、Bearer tokenとworkspace responseは出力しない。
+
+## 2026-08-08 Processed inference attachment調査・実装
+
+Notion純正web fetchは使わず、`wget`で保存済みのcurrent bundleを再解析した。chunk `29179` module `260064`は
+`processAgentAttachment`へ`url`、`spaceId`、`aiSessionPointer`、`source:"user_upload"`、`clientVersion`を送り、
+responseの`outputKey` / `spaceId`に対応する`task_output`を`complete` / `failed`まで購読する。result schemaは
+PDF、CSV、画像、text/code MIMEごとのmetadataとguardrail、または9種のerror codeである。chunk `94111` module
+`140258`はsuccessの`stepMetadata`を`attachmentSource`とguardrail付きの`attachment` transcript stepへ変換する。
+
+実装は明示的な`transport:"inference_transcript"`にoptional `processForInference:true`を追加した。output key/workspace、
+task status、success/error union、MIME別必須field、画像moderationを検証し、`syncRecordValuesMain`でbounded pollingする。
+既定のraw fallbackは待ち時間を増やさず`computer-file`のまま維持する。unknown conversationのpre-network拒否、generic
+Agent Service HTTP 400 fallback、同一thread複数handle順序、`file_token`欠落時のfile host非接続、processed success/errorを
+回帰化した。全109 testsとTypeScript checkが成功した。
