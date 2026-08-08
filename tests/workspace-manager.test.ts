@@ -78,7 +78,7 @@ test("listWorkspaces flags current, exhausted and pinned workspaces", async () =
   const alpha = all.find((ws) => ws.spaceId === SPACE_A);
   const beta = all.find((ws) => ws.spaceId === SPACE_B);
   assert.ok(alpha && beta);
-  assert.deepEqual([alpha.current, alpha.exhausted, alpha.pinned], [true, true, false]);
+  assert.deepEqual([alpha.current, alpha.exhausted, alpha.pinned], [true, false, false]);
   assert.deepEqual([beta.current, beta.exhausted, beta.pinned], [false, false, true]);
   assert.equal(manager.pinnedWorkspace(), SPACE_B);
   manager.pin("   ");
@@ -131,7 +131,18 @@ test("markCurrentExhausted marks the active workspace as used up", async () => {
   await manager.switchWorkspace("beta");
   manager.markCurrentExhausted();
   const all = await manager.listWorkspaces();
-  assert.ok(all.every((ws) => ws.exhausted));
+  assert.equal(all.find((ws) => ws.spaceId === SPACE_A)?.exhausted, false);
+  assert.equal(all.find((ws) => ws.spaceId === SPACE_B)?.exhausted, true);
+});
+
+test("rotate skips the exhausted current workspace without pre-marking its target", async () => {
+  const { manager } = makeManager();
+  manager.markCurrentExhausted();
+  assert.equal(await manager.rotate(), true);
+  const all = await manager.listWorkspaces();
+  assert.equal(all.find((ws) => ws.spaceId === SPACE_A)?.exhausted, true);
+  assert.equal(all.find((ws) => ws.spaceId === SPACE_B)?.exhausted, false);
+  assert.equal(manager.getCurrent().spaceId, SPACE_B);
 });
 
 test("account persistence retains credentials, unknown fields and the pinned workspace", async () => {

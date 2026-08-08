@@ -39,6 +39,9 @@ export function loadConfig(): NotionConfig {
   const fullCookie = optional("NOTION_FULL_COOKIE", fileString(file, "full_cookie"));
   const pinnedSpaceId = optional("NOTION_PINNED_SPACE_ID", fileString(file, "pinned_space_id"));
   const maxRetries = Number(optional("NOTION_MAX_WORKSPACE_RETRIES", "5"));
+  if (!Number.isSafeInteger(maxRetries) || maxRetries < 0) {
+    throw new Error("NOTION_MAX_WORKSPACE_RETRIES must be a non-negative safe integer");
+  }
   const maxAttachmentBytes = Number(optional("NOTION_MAX_ATTACHMENT_BYTES", String(20 * 1024 * 1024)));
   if (!Number.isSafeInteger(maxAttachmentBytes) || maxAttachmentBytes <= 0) throw new Error("NOTION_MAX_ATTACHMENT_BYTES must be a positive safe integer");
   return {
@@ -49,7 +52,7 @@ export function loadConfig(): NotionConfig {
     mcpRegistryPath: optional("NOTION_MCP_REGISTRY_FILE") || undefined,
     attachmentRoot: optional("NOTION_ATTACHMENT_ROOT", process.cwd()),
     maxAttachmentBytes,
-    maxWorkspaceRetries: Number.isFinite(maxRetries) && maxRetries > 0 ? maxRetries : 5,
+    maxWorkspaceRetries: maxRetries,
     account: {
       tokenV2,
       userId: optional("NOTION_USER_ID", fileString(file, "user_id")),
