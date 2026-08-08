@@ -1,8 +1,8 @@
-researched_at=2026-08-08T01:10:33Z
+researched_at=2026-08-08T01:23:15Z
 method=wget plus webpack-runtime dependency crawl
 
 == Fetch login and initial JavaScript assets ==
-login_bytes=19225
+login_bytes=19222
 initial_asset_count=12
 asset_host=transcend-cdn.com asset_path=/cm/4d6a6beb-faf4-4a4e-9e1c-c7692d5f9c2f/airgap.js
 asset_host=www.notion.so asset_path=/_assets/11027-41e444141dd95910.js
