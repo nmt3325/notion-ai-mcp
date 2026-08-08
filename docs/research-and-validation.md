@@ -300,3 +300,13 @@ route bundleでは`/initiateExternalAuthenticationFromDesktop`、`/mcp-oauth-com
 回帰はpending no-write、completed create/link、secret/capability非永続化、fresh module ID、workspace binding、failure consumption、expiry、replay、concurrency、workflow rejection、reconnect full-data保持、filter clear、rollback、新規cleanup、preconfigured policy propagationを含む。全103 tests、TypeScript check、build、19-tool compiled stdio smoke、diff checkが成功した。
 
 認証済みAttio live probeではnative flowを開始し、wrapper host/path `app.notion.com/initiateExternalAuthenticationFromDesktop`、provider host `app.attio.com`を確認した。provider認可は行わず1回pollして`pending`を取得した。Personal Agent module countは0→0、module set hashとaccount hash `06303073c76a7520`は不変、registry fileは作成されなかった。結果はrepository外のmode 0600 artifactに保存した。
+
+## 2026-08-08 Remote HTTP・Cloudflare Tunnel live検証
+
+GitHub release APIを`wget`で取得し、cloudflared 2026.7.3 linux-amd64 assetのGitHub提供SHA-256 digestとdownload後のbinary hash `9d71c677db00134c1bd4144b7783486b654ad281b1ea62b4972098d19f770f17`が一致することを確認した。HTTP MCPは`127.0.0.1:3210`だけで待受し、`token_v2`とは別にruntime生成した64桁hex bearer tokenをmode 0600 fileへ保持した。
+
+Quick TunnelはHTTP/2でCloudflare edgeへ登録され、connectivity pre-checkはDNS、UDP、TCP、Cloudflare APIすべてPASSだった。runnerのstub resolverだけが生成直後のtrycloudflare hostnameを返さなかったため、Cloudflare DNS-over-HTTPSで2つのA recordを確認し、そのうち1つへのSNI/TLS requestが`/healthz` 200を返すことを検証してからlocal hostsへ一時pinした。これはrunner固有の名前解決回避で、tunnel自体はregistered状態だった。
+
+localとpublic TLS endpointの未認証MCP POSTはいずれも401。公式SDKのStreamable HTTP clientをpublic URLへ接続し、initialize、19-tool listing、`complete_mcp_oauth`と`notion_ai_chat`の存在、`get_current_workspace` read callを確認した。前後のaccount hashは`06303073c76a7520`で不変、local MCP registryは作成されなかった。HTTP server、Quick Tunnel、mode 0600 token/result artifactsはdisposable environment内だけに保持し、secretや一時URLはrepositoryへ保存していない。
+
+再現用に`scripts/cloudflare-tunnel-smoke.mjs`と`npm run smoke:http:remote`を追加した。scriptはcredential-free HTTPS URLを要求し、未認証401、19 tools、任意のread callを確認するが、Bearer tokenとworkspace responseは出力しない。
