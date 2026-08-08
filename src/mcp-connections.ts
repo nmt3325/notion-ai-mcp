@@ -404,6 +404,8 @@ function safeOAuthResponse(response: JsonObject, integrationId: string, clientSe
 const OAUTH_FLOW_TTL_MS = 3 * 60 * 1_000;
 const OAUTH_POLL_INTERVAL_MS = 5_000;
 const MAX_PENDING_OAUTH_FLOWS = 100;
+const MAX_OAUTH_FLOW_ID_LENGTH = 2_048;
+const MAX_OAUTH_CONNECTION_ID_LENGTH = 8_192;
 const OAUTH_CONNECTION_HEADER = "__oauth_connection_id";
 
 function sleep(milliseconds: number): Promise<void> {
@@ -1168,8 +1170,8 @@ export class McpConnectionManager {
     const safe = safeOAuthResponse(response, integrationId, rawClientSecret);
     const authorizationUrl = asString(safe.authorizationUrl);
     const oauthFlowId = asString(safe.oauthFlowId);
-    if (!authorizationUrl || !oauthFlowId) {
-      throw new Error("Notion OAuth initiation did not return authorizationUrl and oauthFlowId");
+    if (!authorizationUrl || !oauthFlowId || oauthFlowId.length > MAX_OAUTH_FLOW_ID_LENGTH) {
+      throw new Error("Notion OAuth initiation did not return a valid authorizationUrl and oauthFlowId");
     }
     const browserAuthorizationUrl = nativeOAuthBrowserUrl(authorizationUrl);
     const expiresAt = Date.now() + OAUTH_FLOW_TTL_MS;
@@ -1200,6 +1202,34 @@ export class McpConnectionManager {
     return { ...safe, browserAuthorizationUrl, expiresAt: new Date(expiresAt).toISOString() };
   }
 
+  private async loadOAuthReconnectTarget(
+    pending: PendingOAuthFlow,
+    context: McpContext
+  ): Promise<{ moduleRecord: JsonObject; currentData: JsonObject }> {
+    const moduleId = pending.existingModuleId;
+    if (!moduleId) throw new Error("OAuth reconnect target is missing");
+    const moduleRecord = await this.loadSpaceRecord(context, "workflow_module", moduleId);
+    const currentData = object(moduleRecord.data);
+    let currentServerUrl = "";
+    try { currentServerUrl = normalizeServerUrl(asString(currentData.serverUrl)); }
+    catch { currentServerUrl = ""; }
+    if (moduleRecord.alive !== true
+      || asString(moduleRecord.module_type) !== "mcpServer"
+      || asString(moduleRecord.space_id, context.spaceId) !== context.spaceId
+      || currentServerUrl !== pending.serverUrl) {
+      throw new Error(`${moduleId} is no longer a matching live MCP module in the active workspace`);
+    }
+    const settings = await this.loadSpaceViewSettings(context);
+    const linked = linkedModules(settings).some((entry) => {
+      const pointer = object(object(entry).pointer);
+      return asString(pointer.table) === "workflow_module"
+        && asString(pointer.id) === moduleId
+        && asString(pointer.spaceId, context.spaceId) === context.spaceId;
+    });
+    if (!linked) throw new Error(`MCP connection ${moduleId} is no longer linked to the current Personal Agent`);
+    return { moduleRecord, currentData };
+  }
+
   private async persistCompletedOAuth(
     pending: PendingOAuthFlow,
     connectionId: string,
@@ -1219,6 +1249,8 @@ export class McpConnectionManager {
       : pending.enabledToolNames;
     const runReadToolsAutomatically = options.runReadToolsAutomatically ?? pending.runReadToolsAutomatically;
     const runWriteToolsAutomatically = options.runWriteToolsAutomatically ?? pending.runWriteToolsAutomatically;
+    // Reconnect capabilities must not be validated for a target that is already stale.
+    if (pending.existingModuleId) await this.loadOAuthReconnectTarget(pending, context);
     const validation = await this.validateInContext(
       context,
       pending.serverUrl,
@@ -1234,18 +1266,8 @@ export class McpConnectionManager {
 
     if (pending.existingModuleId) {
       const moduleId = pending.existingModuleId;
-      const moduleRecord = await this.loadSpaceRecord(context, "workflow_module", moduleId);
-      const currentData = object(moduleRecord.data);
-      if (moduleRecord.alive !== true
-        || asString(moduleRecord.module_type) !== "mcpServer"
-        || asString(moduleRecord.space_id, context.spaceId) !== context.spaceId
-        || normalizeServerUrl(asString(currentData.serverUrl)) !== pending.serverUrl) {
-        throw new Error(`${moduleId} is no longer a matching live MCP module in the active workspace`);
-      }
-      const settings = await this.loadSpaceViewSettings(context);
-      if (!linkedModules(settings).some((entry) => linkedModuleId(entry) === moduleId)) {
-        throw new Error(`MCP connection ${moduleId} is no longer linked to the current Personal Agent`);
-      }
+      // Validate again after the external capability probe to close the reconnect race before writes.
+      const { moduleRecord, currentData } = await this.loadOAuthReconnectTarget(pending, context);
       const data: JsonObject = {
         ...currentData,
         id: moduleId,
@@ -1404,7 +1426,9 @@ export class McpConnectionManager {
           throw new Error(`Unexpected OAuth flow status: ${status || "missing"}`);
         }
         const connectionId = asString(response.connectionId).trim();
-        if (!connectionId || connectionId.length > 8_192) {
+        if (!connectionId
+          || connectionId.length > MAX_OAUTH_CONNECTION_ID_LENGTH
+          || /[\u0000-\u001f\u007f]/u.test(connectionId)) {
           throw new Error("Completed OAuth flow did not return a valid connectionId");
         }
         const connected = await this.persistCompletedOAuth(pending, connectionId, context, options);

@@ -324,3 +324,15 @@ task status、success/error union、MIME別必須field、画像moderationを検�
 既定のraw fallbackは待ち時間を増やさず`computer-file`のまま維持する。unknown conversationのpre-network拒否、generic
 Agent Service HTTP 400 fallback、同一thread複数handle順序、`file_token`欠落時のfile host非接続、processed success/errorを
 回帰化した。全109 testsとTypeScript checkが成功した。
+
+## 2026-08-08 OAuth completionの競合・malformed result hardening
+
+native OAuth completionの残存境界を追加検証した。OAuth flow IDはprocess内mapへ保存する前に2,048文字へ制限し、
+duplicate IDは既存bindingを置換しない。unknown status、missing/oversized/control-character付き`connectionId`は
+module validationやwriteを行わず、flowを再poll可能なまま保持する。`waitSeconds`付きpollは上限内で複数回確認し、
+terminal resultで直ちに停止する。
+
+reconnect completionはOAuth capabilityをvalidationへ渡す前と、validation後のwrite直前の2回、target moduleの
+alive/type/workspace/server URLとPersonal Agent linkage（table/id/spaceId）を再検証する。開始後にunlinkされたtargetは
+capability validation前に拒否し、validation中にserver identityが変化したtargetも永続化前に拒否する。追加5回帰を
+含む全114 tests、TypeScript check、build、19-tool compiled stdio smoke、diff/EOF scanを検証対象とした。
