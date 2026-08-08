@@ -252,4 +252,12 @@ workspace-bound conversation/fileは自動rotationせず、新規chat/uploadを�
 
 同じcompiled stdio processで20-byte CSVを`auto` uploadし、file-backed chatのexact marker、proxy downloadの
 byte/SHA-256一致、通常名`Claude Opus 4.5`を指定したcontinuationのexact markerまで連続成功した。
-最終検証は75/75 tests、TypeScript check、build、18-tool compiled stdio smoke、diff/EOF/credential scanを対象にした。
+最終検証は80/80 tests、TypeScript check、build、18-tool compiled stdio smoke、diff/EOF/credential scanを対象にした。
+
+### Attachment lifecycle boundaryの追加検証
+
+current bundleのmodule `803083`を`wget`取得artifactから再確認すると、assistant-transcript upload helperはactive pointerを受け取る場合も`createThread:true`を送る。したがって既存conversation uploadでもこのwire shapeを保持し、次の`runInferenceTranscript`だけを`createThread:false` / `isPartialTranscript:true`とする。
+
+`conversationId`指定済みのAgent Service upload失敗を新しいtranscript threadへ暗黙fallbackしていた境界を修正した。active conversationへの後続one-shot upload、cross-thread/mixed transport拒否、restart/workspace切替でのhandle失効、unknown handle、HTTP 201 storage拒否を回帰化した。全回帰は80/80 testsである。
+
+compiled stdioのlive試験でも、1つ目のfile upload/chat後、同じ`conversationId`を指定した2つ目の`auto` uploadとfile-backed continuationが同じthreadで成功した。2つ目のfile downloadも元bytes/SHA-256と一致し、18 toolsのまま全exact markerを満たした。

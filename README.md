@@ -210,7 +210,8 @@ Agent Serviceでuploadされた`fileIds`は`createAgentThread`の
 `content: [{type:"text"}, {type:"file",file_id}]`へ送り、継続ターンは`sendEventToAgentThread`を使います。
 Agent Service upload APIが既知のunsupported responseを返した場合、`upload_attachment`の既定`auto` modeは
 assistant-transcript uploadへfallbackし、不透明handleを`runInferenceTranscript`の`computer-file` stepへ変換します。
-handleは作成されたthreadに固定され、Agent Service ID・別thread・別workspaceとの混在を拒否します。
+handleは作成されたthreadに固定され、Agent Service ID・別thread・別workspaceとの混在を拒否し、server再起動・workspace切替で失効します。
+同じactive inference conversationへ後からuploadできますが、`conversationId`指定済みの`auto` uploadは、失敗時に別threadへretargetしません。
 Agent Service file chatは安全のため`policies.approval_mode="ask"`を明示します。
 
 継続 chat の session は現在メモリ内にだけ保持するため、サーバー再起動後は以前の `conversationId` を
@@ -320,7 +321,7 @@ join transactionが失敗した場合も、自動で再作成せずpartial failu
 
 作成後のconnect、space-view可視化、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、該当pointerだけをunlinkします。remove時も他のsettingsとmodule pointerを保持します。update/remove/statusはcurrent linkageとlive recordを検証し、local recordが存在する場合はactive workspace/viewとの不一致も拒否します。
 
-Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験では、別processでNotion-onlyとして再発見した一時moduleのname-only update、full-data保持、明示的no-auth reconnect、3 tools、cleanup後の`alive:false`・`linked:false`、既存module不変を確認しました。現在の全回帰は75/75です。
+Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験では、別processでNotion-onlyとして再発見した一時moduleのname-only update、full-data保持、明示的no-auth reconnect、3 tools、cleanup後の`alive:false`・`linked:false`、既存module不変を確認しました。現在の全回帰は80/80です。
 
 ## 添付ファイル
 
