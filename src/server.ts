@@ -109,7 +109,8 @@ export function createServer(client: NotionClient): McpServer {
       fileName: z.string().min(1).optional().describe("Required for a meaningful base64 upload name; optional path override"),
       mimeType: z.string().min(1).optional(),
       conversationId: z.string().uuid().optional().describe("Existing conversation target; omit for a new file chat"),
-      transport: z.enum(["auto", "agent_service", "inference_transcript"]).optional().describe("Upload transport. Auto falls back when Agent Service is unavailable.")
+      transport: z.enum(["auto", "agent_service", "inference_transcript"]).optional().describe("Upload transport. Auto falls back when Agent Service is unavailable."),
+      processForInference: z.boolean().optional().describe("For explicit inference_transcript uploads, wait for Notion's processAgentAttachment result and emit a processed attachment step")
     }
   }, async (input) => result(await client.uploadAttachment({
     ...(input.path ? { path: input.path } : {}),
@@ -117,7 +118,8 @@ export function createServer(client: NotionClient): McpServer {
     ...(input.fileName ? { fileName: input.fileName } : {}),
     ...(input.mimeType ? { mimeType: input.mimeType } : {}),
     ...(input.conversationId ? { conversationId: input.conversationId } : {}),
-    ...(input.transport ? { transport: input.transport } : {})
+    ...(input.transport ? { transport: input.transport } : {}),
+    ...(input.processForInference !== undefined ? { processForInference: input.processForInference } : {})
   })));
 
   server.registerTool("download_attachment", {

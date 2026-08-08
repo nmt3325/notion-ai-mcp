@@ -39,6 +39,11 @@ interface ChatOptions {
 type AgentUploadTarget = { type: "user" } | { type: "thread"; threadId: string };
 type AttachmentTransport = "auto" | "agent_service" | "inference_transcript";
 
+interface ProcessedTranscriptAttachment {
+  contentType: string;
+  metadata: JsonObject;
+}
+
 interface TranscriptUploadRecord {
   handleId: string;
   stepId: string;
@@ -50,6 +55,7 @@ interface TranscriptUploadRecord {
   sizeBytes: number;
   sha256: string;
   usedInChat: boolean;
+  processed?: ProcessedTranscriptAttachment | undefined;
 }
 
 function signedHeaders(value: unknown): Headers {
@@ -375,14 +381,29 @@ export class NotionClient {
     const sub = session.turnCount > 0;
     const now = new Date().toISOString();
     const userStep: JsonObject = { id: randomUUID(), type: "user", value: [[prompt]], userId: account.userId, createdAt: now };
-    const attachmentSteps = attachments.map((attachment) => ({
-      id: attachment.stepId,
-      type: "computer-file",
-      fileUrl: attachment.fileUrl,
-      fileName: attachment.fileName,
-      contentType: attachment.mediaType,
-      metadata: { fileSize: attachment.sizeBytes, attachmentSource: "user_upload" }
-    }));
+    const attachmentSteps = attachments.map((attachment) => {
+      if (attachment.processed) {
+        const metadata: JsonObject = { ...attachment.processed.metadata, attachmentSource: "user_upload" };
+        if (Object.keys(object(metadata.guardrail)).length === 0) metadata.guardrail = { attachmentRisk: "skipped" };
+        return {
+          id: attachment.stepId,
+          type: "attachment",
+          fileUrl: attachment.fileUrl,
+          fileName: attachment.fileName,
+          contentType: attachment.processed.contentType,
+          ...(attachment.processed.contentType === "application/pdf" ? { base64EncodedFileUrl: "" } : {}),
+          metadata
+        };
+      }
+      return {
+        id: attachment.stepId,
+        type: "computer-file",
+        fileUrl: attachment.fileUrl,
+        fileName: attachment.fileName,
+        contentType: attachment.mediaType,
+        metadata: { fileSize: attachment.sizeBytes, attachmentSource: "user_upload" }
+      };
+    });
     const transcript: JsonObject[] = [
       { id: session.configId, type: "config", value: buildConfigValue(model, webSearch, workspaceSearch, readOnly, sub) },
       { id: session.contextId, type: "context", value: this.buildContext(account, session.originalDatetime, attachments.length > 0) },
@@ -515,7 +536,124 @@ export class NotionClient {
     };
   }
 
-  private async uploadInferenceTranscriptAttachment(account: AccountContext, prepared: PreparedAttachment, conversationId?: string): Promise<AttachmentUploadResult> {
+  private taskOutputRecord(payload: JsonObject, outputKey: string): JsonObject | null {
+    const table = object(object(payload.recordMap).task_output);
+    const entry = object(table[outputKey]);
+    if (Object.keys(entry).length === 0) return null;
+    const value = object(entry.value);
+    const nestedValue = object(value.value);
+    return [entry, value, nestedValue].find((candidate) => typeof candidate.status === "string") ?? null;
+  }
+
+  private processedTranscriptAttachment(value: unknown): ProcessedTranscriptAttachment {
+    let wrapper = object(value);
+    if (wrapper.result === undefined && object(wrapper.value).result !== undefined) wrapper = object(wrapper.value);
+    const result = object(wrapper.result);
+    const resultType = asString(result.type);
+    const data = object(result.data);
+    if (resultType === "error") {
+      const code = asString(data.code, "UNKNOWN");
+      const message = asString(data.message, "Attachment processing failed").slice(0, 1_000);
+      const allowedCodes = new Set([
+        "CORRUPTED_FILE", "FILE_NOT_FOUND", "FILE_SIZE_EXCEEDS_MAX_SIZE", "FILE_SIZE_IS_0", "INTERNAL_ERROR",
+        "PASSWORD_PROTECTED", "PROCESSING_FAILED", "UNKNOWN", "UNSUPPORTED_CONTENT_TYPE"
+      ]);
+      if (!allowedCodes.has(code)) throw new Error("Attachment processing returned an invalid error code");
+      throw new Error(`Attachment processing failed (${code}): ${message}`);
+    }
+    if (resultType !== "success") throw new Error("Attachment processing returned an invalid result type");
+
+    const contentType = asString(data.contentType).trim().toLowerCase();
+    const attachmentRisk = asString(data.attachmentRisk);
+    if (!new Set(["confirmed_safe_by_user", "failed", "risky", "scanned", "skipped"]).has(attachmentRisk)) {
+      throw new Error("Attachment processing returned an invalid attachment risk");
+    }
+    const fileSizeBytes = data.fileSizeBytes;
+    if (typeof fileSizeBytes !== "number" || !Number.isSafeInteger(fileSizeBytes) || fileSizeBytes < 0) {
+      throw new Error("Attachment processing returned an invalid file size");
+    }
+    const integerField = (name: string): void => {
+      const field = data[name];
+      if (typeof field !== "number" || !Number.isSafeInteger(field) || field < 0) {
+        throw new Error(`Attachment processing returned an invalid ${name}`);
+      }
+    };
+    const imageTypes = new Set(["image/gif", "image/heic", "image/jpeg", "image/png", "image/webp"]);
+    const textTypes = new Set([
+      "application/javascript", "application/json", "application/typescript", "text/css", "text/html", "text/markdown",
+      "text/plain", "text/x-c", "text/x-c++src", "text/x-go", "text/x-java-source", "text/x-python", "text/x-ruby",
+      "text/x-rust", "text/x-shellscript", "text/xml", "text/yaml"
+    ]);
+    if (contentType === "application/pdf") integerField("numPages");
+    else if (contentType === "text/csv") { integerField("numFields"); integerField("numRows"); }
+    else if (imageTypes.has(contentType)) {
+      integerField("height");
+      integerField("width");
+      const moderation = object(data.moderation);
+      const moderationStatus = asString(moderation.status);
+      if (!new Set(["flagged", "passed", "skipped", "failed"]).has(moderationStatus)) {
+        throw new Error("Attachment processing returned an invalid moderation status");
+      }
+      if (moderationStatus === "flagged") {
+        const scores = object(moderation.scores);
+        for (const name of ["hate", "hate/threatening", "self-harm", "sexual", "sexual/minors", "violence/graphic"]) {
+          if (typeof scores[name] !== "number" || !Number.isFinite(scores[name])) {
+            throw new Error("Attachment processing returned invalid moderation scores");
+          }
+        }
+      }
+    } else if (!textTypes.has(contentType)) {
+      throw new Error(`Attachment processing returned unsupported content type ${contentType || "<empty>"}`);
+    }
+    return { contentType, metadata: object(data.stepMetadata) };
+  }
+
+  private async processInferenceTranscriptAttachment(
+    account: AccountContext,
+    threadId: string,
+    fileUrl: string,
+    fileName: string
+  ): Promise<ProcessedTranscriptAttachment> {
+    const started = await this.fetchJson("processAgentAttachment", {
+      url: fileUrl,
+      spaceId: account.spaceId,
+      aiSessionPointer: { table: "thread", id: threadId, spaceId: account.spaceId },
+      source: "user_upload",
+      clientVersion: account.clientVersion
+    });
+    const outputKey = asString(started.outputKey).trim();
+    const outputSpaceId = asString(started.spaceId).trim();
+    if (!UUID_PATTERN.test(outputKey)) throw new Error("processAgentAttachment returned an invalid outputKey");
+    if (!UUID_PATTERN.test(outputSpaceId) || outputSpaceId !== account.spaceId) {
+      throw new Error("processAgentAttachment returned a different or invalid workspace");
+    }
+
+    const deadline = Date.now() + this.config.requestTimeoutMs;
+    while (Date.now() < deadline) {
+      const payload = await this.fetchJson("syncRecordValuesMain", {
+        requests: [{ pointer: { table: "task_output", id: outputKey, spaceId: outputSpaceId }, version: -1 }]
+      });
+      const record = this.taskOutputRecord(payload, outputKey);
+      if (record) {
+        const status = asString(record.status);
+        if (status === "complete") return this.processedTranscriptAttachment(record.value);
+        if (status === "failed") {
+          const failedValue = object(record.value);
+          if (failedValue.result !== undefined || object(failedValue.value).result !== undefined) {
+            return this.processedTranscriptAttachment(failedValue);
+          }
+          throw new Error("Attachment processing task failed without a result");
+        }
+        if (status && status !== "pending" && status !== "in_progress") {
+          throw new Error(`Attachment processing returned unknown task status ${status}`);
+        }
+      }
+      await sleep(250);
+    }
+    throw new Error("Timed out waiting for attachment processing");
+  }
+
+  private async uploadInferenceTranscriptAttachment(account: AccountContext, prepared: PreparedAttachment, conversationId?: string, processForInference = false): Promise<AttachmentUploadResult> {
     const existing = conversationId ? this.sessions.get(conversationId) : undefined;
     if (conversationId && (!existing || existing.transport !== "inference_transcript")) {
       throw new Error("Inference-transcript upload requires an active inference-transcript conversation");
@@ -544,11 +682,15 @@ export class NotionClient {
     const uploadResponse = await this.signedRequest(signedUploadPostUrl, { method: "POST", headers: postHeaders, body: form }, "Transcript attachment upload");
     if (uploadResponse.status !== 200 && uploadResponse.status !== 204) throw new Error(`Transcript attachment upload returned unsupported HTTP ${uploadResponse.status}`);
 
+    const processed = processForInference
+      ? await this.processInferenceTranscriptAttachment(account, threadId, fileUrl, prepared.fileName)
+      : undefined;
     const handleId = `${TRANSCRIPT_FILE_HANDLE_PREFIX}${randomUUID()}`;
     const sha256 = createHash("sha256").update(prepared.data).digest("hex");
     const record: TranscriptUploadRecord = {
       handleId, stepId: randomUUID(), threadId, spaceId: account.spaceId, fileUrl, fileName: prepared.fileName,
-      mediaType: prepared.mediaType, sizeBytes: prepared.sizeBytes, sha256, usedInChat: false
+      mediaType: prepared.mediaType, sizeBytes: prepared.sizeBytes, sha256, usedInChat: false,
+      ...(processed ? { processed } : {})
     };
     this.transcriptUploads.set(handleId, record);
     this.sessions.set(threadId, session);
@@ -556,17 +698,24 @@ export class NotionClient {
     return {
       transport: "inference_transcript", fileId: handleId, conversationId: threadId, fileName: prepared.fileName,
       mediaType: prepared.mediaType, sizeBytes: prepared.sizeBytes, sha256,
+      ...(processed ? { processedForInference: true } : {}),
       target: { type: "thread", threadId }, file
     };
   }
 
-  async uploadAttachment(options: AttachmentInput & { conversationId?: string | undefined; transport?: AttachmentTransport | undefined }): Promise<AttachmentUploadResult> {
+  async uploadAttachment(options: AttachmentInput & { conversationId?: string | undefined; transport?: AttachmentTransport | undefined; processForInference?: boolean | undefined }): Promise<AttachmentUploadResult> {
+    const requestedTransport = options.transport ?? "auto";
+    if (options.processForInference && requestedTransport !== "inference_transcript") {
+      throw new Error("processForInference requires transport inference_transcript");
+    }
+    const known = options.conversationId ? this.sessions.get(options.conversationId) : undefined;
+    if (requestedTransport === "inference_transcript" && options.conversationId && !known) {
+      throw new Error("Inference-transcript upload requires an active inference-transcript conversation");
+    }
     const account = await this.account();
     const maxBytes = this.config.maxAttachmentBytes ?? 20 * 1024 * 1024;
     const root = this.config.attachmentRoot ?? process.cwd();
     const prepared = await prepareAttachmentInput(options, root, maxBytes);
-    const requestedTransport = options.transport ?? "auto";
-    const known = options.conversationId ? this.sessions.get(options.conversationId) : undefined;
     if (known?.transport === "inference_transcript" && requestedTransport === "agent_service") {
       throw new Error("Agent Service uploads cannot target an inference-transcript conversation");
     }
@@ -574,7 +723,7 @@ export class NotionClient {
       throw new Error("Inference-transcript uploads cannot target an Agent Service conversation");
     }
     if (known?.transport === "inference_transcript" || requestedTransport === "inference_transcript") {
-      return this.uploadInferenceTranscriptAttachment(account, prepared, options.conversationId);
+      return this.uploadInferenceTranscriptAttachment(account, prepared, options.conversationId, options.processForInference ?? false);
     }
     if (known && known.transport !== "agent_service") throw new Error("Attachments cannot cross chat transports");
     const target: AgentUploadTarget = options.conversationId

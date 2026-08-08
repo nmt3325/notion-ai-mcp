@@ -553,3 +553,306 @@ test("transcript storage rejects HTTP 201 instead of treating it as completion",
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("explicit transcript uploads reject unknown conversations before account networking", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-unknown-transcript-target-"));
+  let networkCalls = 0;
+  try {
+    const unresolved = config(root);
+    unresolved.account.userId = "";
+    unresolved.account.spaceId = "";
+    const fakeFetch = async (): Promise<Response> => {
+      networkCalls += 1;
+      return json({ message: "unexpected" }, 500);
+    };
+    const client = new NotionClient(unresolved, fakeFetch as typeof fetch);
+    await assert.rejects(
+      () => client.uploadAttachment({
+        base64: "YQ==",
+        fileName: "unknown.txt",
+        conversationId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        transport: "inference_transcript"
+      }),
+      /requires an active inference-transcript conversation/
+    );
+    assert.equal(networkCalls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("auto mode falls back after a generic Agent Service HTTP 400", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-generic-400-fallback-"));
+  const endpoints: string[] = [];
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "upload.example") return new Response(null, { status: 204 });
+      const endpoint = url.pathname.split("/").at(-1) ?? "";
+      endpoints.push(endpoint);
+      if (endpoint === "createAgentServiceFileUploadURL") return json({ message: "invalid input" }, 400);
+      if (endpoint === "getUploadFileUrlForAssistantChatTranscriptUpload") {
+        const pointer = requestBody(init).assistantChatTranscriptSessionPointer as Record<string, unknown>;
+        return json({
+          url: `${SPACE_ID}:fallback-400.txt`,
+          signedGetUrl: "https://download.example/fallback-400",
+          signedUploadPostUrl: "https://upload.example/fallback-400",
+          postHeaders: [],
+          fields: { key: "safe/fallback-400.txt" },
+          chatId: pointer.id
+        });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+    const uploaded = await client.uploadAttachment({ base64: "YQ==", fileName: "fallback.txt", transport: "auto" });
+    assert.equal(uploaded.transport, "inference_transcript");
+    assert.deepEqual(endpoints, ["createAgentServiceFileUploadURL", "getUploadFileUrlForAssistantChatTranscriptUpload"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("multiple transcript handles from one thread are attached in order", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-multi-transcript-"));
+  const uploadRequests: Array<Record<string, unknown>> = [];
+  let inferenceRequest: Record<string, unknown> | undefined;
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "upload.example") return new Response(null, { status: 204 });
+      const endpoint = url.pathname.split("/").at(-1);
+      if (endpoint === "getUploadFileUrlForAssistantChatTranscriptUpload") {
+        const body = requestBody(init);
+        uploadRequests.push(body);
+        const pointer = body.assistantChatTranscriptSessionPointer as Record<string, unknown>;
+        const index = uploadRequests.length;
+        return json({
+          url: `${SPACE_ID}:multi-${index}.txt`,
+          signedGetUrl: `https://download.example/multi-${index}`,
+          signedUploadPostUrl: `https://upload.example/multi-${index}`,
+          postHeaders: [],
+          fields: { key: `safe/multi-${index}.txt` },
+          chatId: pointer.id
+        });
+      }
+      if (endpoint === "runInferenceTranscript") {
+        inferenceRequest = requestBody(init);
+        return inference("Both files received");
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+    const first = await client.uploadAttachment({ base64: "MQ==", fileName: "one.txt", transport: "inference_transcript" });
+    const second = await client.uploadAttachment({
+      base64: "Mg==",
+      fileName: "two.txt",
+      conversationId: first.conversationId,
+      transport: "inference_transcript"
+    });
+    const chat = await client.chat({ prompt: "Compare", fileIds: [first.fileId, second.fileId] });
+    assert.equal(chat.conversationId, first.conversationId);
+    assert.equal(second.conversationId, first.conversationId);
+    assert.deepEqual(
+      uploadRequests.map((request) => (request.assistantChatTranscriptSessionPointer as Record<string, unknown>).id),
+      [first.conversationId, first.conversationId]
+    );
+    const transcript = inferenceRequest?.transcript as Array<Record<string, unknown>>;
+    assert.deepEqual(transcript.map((step) => step.type), ["config", "context", "computer-file", "computer-file", "user"]);
+    assert.deepEqual(
+      transcript.filter((step) => step.type === "computer-file").map((step) => step.fileName),
+      ["one.txt", "two.txt"]
+    );
+    await assert.rejects(
+      () => client.chat({ prompt: "Reuse", conversationId: chat.conversationId, fileIds: [first.fileId, second.fileId] }),
+      /can only be attached once/
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("missing file_token rejects before contacting file.notion.com", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-missing-file-token-"));
+  let proxyCalls = 0;
+  let fileHostCalls = 0;
+  try {
+    const configured = config(root);
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "upload.example") return new Response(null, { status: 204 });
+      if (url.hostname === "app.notion.com") {
+        proxyCalls += 1;
+        return new Response(null, { status: 302, headers: { location: "https://file.notion.com/safe/missing-token.txt" } });
+      }
+      if (url.hostname === "file.notion.com") {
+        fileHostCalls += 1;
+        return new Response("should-not-download", { status: 200 });
+      }
+      const endpoint = url.pathname.split("/").at(-1);
+      if (endpoint === "getUploadFileUrlForAssistantChatTranscriptUpload") {
+        const pointer = requestBody(init).assistantChatTranscriptSessionPointer as Record<string, unknown>;
+        return json({
+          url: `${SPACE_ID}:missing-token.txt`,
+          signedGetUrl: "https://download.example/missing-token",
+          signedUploadPostUrl: "https://upload.example/missing-token",
+          postHeaders: [],
+          fields: { key: "safe/missing-token.txt" },
+          chatId: pointer.id
+        });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const client = new NotionClient(configured, fakeFetch as typeof fetch);
+    const uploaded = await client.uploadAttachment({ base64: "YQ==", fileName: "missing-token.txt", transport: "inference_transcript" });
+    configured.account.fullCookie = "token_v2=test-token";
+    await assert.rejects(
+      () => client.downloadAttachment({ conversationId: uploaded.conversationId, fileId: uploaded.fileId, returnBase64: true }),
+      /requires file_token/
+    );
+    assert.equal(proxyCalls, 1);
+    assert.equal(fileHostCalls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("processed transcript uploads poll task_output and emit official attachment steps", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-processed-transcript-"));
+  const outputKey = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const processRequests: Array<Record<string, unknown>> = [];
+  const syncRequests: Array<Record<string, unknown>> = [];
+  let syncCalls = 0;
+  let inferenceRequest: Record<string, unknown> | undefined;
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "upload.example") return new Response(null, { status: 204 });
+      const endpoint = url.pathname.split("/").at(-1);
+      if (endpoint === "getUploadFileUrlForAssistantChatTranscriptUpload") {
+        const pointer = requestBody(init).assistantChatTranscriptSessionPointer as Record<string, unknown>;
+        return json({
+          url: `${SPACE_ID}:processed.csv`,
+          signedGetUrl: "https://download.example/processed",
+          signedUploadPostUrl: "https://upload.example/processed",
+          postHeaders: [],
+          fields: { key: "safe/processed.csv" },
+          chatId: pointer.id
+        });
+      }
+      if (endpoint === "processAgentAttachment") {
+        processRequests.push(requestBody(init));
+        return json({ outputKey, spaceId: SPACE_ID });
+      }
+      if (endpoint === "syncRecordValuesMain") {
+        syncCalls += 1;
+        syncRequests.push(requestBody(init));
+        const status = syncCalls === 1 ? "in_progress" : "complete";
+        const value = status === "complete" ? {
+          result: {
+            type: "success",
+            data: {
+              attachmentRisk: "scanned",
+              contentType: "text/csv",
+              fileSizeBytes: 4,
+              numFields: 2,
+              numRows: 1,
+              stepMetadata: {
+                fileSizeBytes: 4,
+                numFields: 2,
+                numRows: 1,
+                guardrail: { attachmentRisk: "scanned" }
+              }
+            }
+          }
+        } : {};
+        return json({ recordMap: { task_output: { [outputKey]: { value: { version: syncCalls, status, value } } } } });
+      }
+      if (endpoint === "runInferenceTranscript") {
+        inferenceRequest = requestBody(init);
+        return inference("Processed");
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+    const uploaded = await client.uploadAttachment({
+      base64: Buffer.from("a,b\n").toString("base64"),
+      fileName: "processed.csv",
+      mimeType: "text/csv",
+      transport: "inference_transcript",
+      processForInference: true
+    });
+    assert.equal(uploaded.processedForInference, true);
+    assert.equal(syncCalls, 2);
+    assert.deepEqual(processRequests[0], {
+      url: `${SPACE_ID}:processed.csv`,
+      spaceId: SPACE_ID,
+      aiSessionPointer: { table: "thread", id: uploaded.conversationId, spaceId: SPACE_ID },
+      source: "user_upload",
+      clientVersion: "23.13.test"
+    });
+    assert.deepEqual(syncRequests[0], {
+      requests: [{ pointer: { table: "task_output", id: outputKey, spaceId: SPACE_ID }, version: -1 }]
+    });
+    await client.chat({ prompt: "Analyze", fileIds: [uploaded.fileId] });
+    const transcript = inferenceRequest?.transcript as Array<Record<string, unknown>>;
+    assert.deepEqual(transcript.map((step) => step.type), ["config", "context", "attachment", "user"]);
+    const attachment = transcript[2] as Record<string, unknown>;
+    assert.equal(attachment.contentType, "text/csv");
+    assert.equal(attachment.fileName, "processed.csv");
+    assert.deepEqual(attachment.metadata, {
+      fileSizeBytes: 4,
+      numFields: 2,
+      numRows: 1,
+      guardrail: { attachmentRisk: "scanned" },
+      attachmentSource: "user_upload"
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("processed transcript uploads surface validated task errors", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-processed-error-"));
+  const outputKey = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "upload.example") return new Response(null, { status: 204 });
+      const endpoint = url.pathname.split("/").at(-1);
+      if (endpoint === "getUploadFileUrlForAssistantChatTranscriptUpload") {
+        const pointer = requestBody(init).assistantChatTranscriptSessionPointer as Record<string, unknown>;
+        return json({
+          url: `${SPACE_ID}:protected.pdf`,
+          signedGetUrl: "https://download.example/protected",
+          signedUploadPostUrl: "https://upload.example/protected",
+          postHeaders: [],
+          fields: { key: "safe/protected.pdf" },
+          chatId: pointer.id
+        });
+      }
+      if (endpoint === "processAgentAttachment") return json({ outputKey, spaceId: SPACE_ID });
+      if (endpoint === "syncRecordValuesMain") {
+        return json({ recordMap: { task_output: { [outputKey]: { value: {
+          version: 1,
+          status: "complete",
+          value: { result: { type: "error", data: { code: "PASSWORD_PROTECTED", message: "Password required" } } }
+        } } } } });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+    await assert.rejects(
+      () => client.uploadAttachment({
+        base64: "YQ==",
+        fileName: "protected.pdf",
+        mimeType: "application/pdf",
+        transport: "inference_transcript",
+        processForInference: true
+      }),
+      /PASSWORD_PROTECTED.*Password required/
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
