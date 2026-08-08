@@ -315,6 +315,164 @@ test("completeOAuth permits only one concurrent finalizer per flow", async () =>
   assert.equal(base.calls.filter(({ endpoint }) => endpoint === "getMcpOAuthFlowResult").length, 1);
 });
 
+test("startOAuth bounds and deduplicates flow IDs without replacing the original binding", async () => {
+  const duplicate = fakeApi({
+    initiateMcpOAuth: {
+      authorizationUrl: "https://provider.example.com/authorize",
+      completionFlowId: "completion-duplicate",
+      oauthFlowId: "flow-duplicate"
+    },
+    getMcpOAuthFlowResult: { status: "pending" }
+  });
+  const manager = new McpConnectionManager(duplicate.api);
+  await manager.startOAuth("https://mcp.example.com/mcp");
+  await assert.rejects(manager.startOAuth("https://mcp.example.com/mcp"), /duplicate OAuth flow ID/);
+  const pending = await manager.completeOAuth("flow-duplicate");
+  assert.equal(pending.status, "pending");
+  assert.equal(duplicate.calls.filter(({ endpoint }) => endpoint === "initiateMcpOAuth").length, 2);
+
+  const oversized = fakeApi({
+    initiateMcpOAuth: {
+      authorizationUrl: "https://provider.example.com/authorize",
+      oauthFlowId: "x".repeat(2_049)
+    }
+  });
+  await assert.rejects(new McpConnectionManager(oversized.api).startOAuth("https://mcp.example.com/mcp"), /valid authorizationUrl/);
+});
+
+test("completeOAuth keeps malformed terminal results retryable and performs no writes", async () => {
+  const base = fakeApi({
+    initiateMcpOAuth: {
+      authorizationUrl: "https://provider.example.com/authorize",
+      completionFlowId: "completion-malformed",
+      oauthFlowId: "flow-malformed"
+    }
+  });
+  const results: Array<Record<string, unknown>> = [
+    { status: "mystery" },
+    { status: "completed" },
+    { status: "completed", connectionId: "x".repeat(8_193) },
+    { status: "completed", connectionId: "bad\r\ncapability" },
+    { status: "pending" }
+  ];
+  const api: McpApi = {
+    ...base.api,
+    post: async (endpoint, body) => {
+      if (endpoint === "getMcpOAuthFlowResult") {
+        base.calls.push({ endpoint, body });
+        return results.shift() ?? { status: "pending" };
+      }
+      return base.api.post(endpoint, body);
+    }
+  };
+  const manager = new McpConnectionManager(api);
+  await manager.startOAuth("https://mcp.example.com/mcp");
+  await assert.rejects(manager.completeOAuth("flow-malformed"), /Unexpected OAuth flow status/);
+  await assert.rejects(manager.completeOAuth("flow-malformed"), /valid connectionId/);
+  await assert.rejects(manager.completeOAuth("flow-malformed"), /valid connectionId/);
+  await assert.rejects(manager.completeOAuth("flow-malformed"), /valid connectionId/);
+  const pending = await manager.completeOAuth("flow-malformed");
+  assert.equal(pending.status, "pending");
+  assert.equal(base.calls.some(({ endpoint }) => ["validateMcpConnection", "saveTransactionsFanout", "postWorkflowsMcpServerConnect"].includes(endpoint)), false);
+});
+
+test("completeOAuth rejects an unlinked reconnect target before capability validation", async () => {
+  const moduleRecord = { recordMap: { workflow_module: { "existing-module": { value: {
+    id: "existing-module", alive: true, module_type: "mcpServer", space_id: context.spaceId,
+    data: { id: "existing-module", name: "Existing", serverUrl: "https://mcp.example.com/mcp", preferredTransport: "sse" }
+  } } } } };
+  const base = fakeApi({
+    syncRecordValues: moduleRecord,
+    initiateMcpOAuth: {
+      authorizationUrl: "https://provider.example.com/authorize",
+      completionFlowId: "completion-unlinked",
+      oauthFlowId: "flow-unlinked"
+    },
+    getMcpOAuthFlowResult: { status: "completed", connectionId: "oauth-unlinked-capability" },
+    validateMcpConnection: { success: true, tools: [{ name: "read" }] }
+  });
+  let settingsReads = 0;
+  const api: McpApi = {
+    ...base.api,
+    post: async (endpoint, body) => {
+      if (endpoint === "syncRecordValuesMain") {
+        base.calls.push({ endpoint, body });
+        settingsReads += 1;
+        return settingsReads === 1 ? spaceViewResponse() : spaceViewResponse([]);
+      }
+      return base.api.post(endpoint, body);
+    }
+  };
+  const manager = new McpConnectionManager(api);
+  await manager.startOAuth("https://mcp.example.com/mcp", { existingModuleId: "existing-module" });
+  await assert.rejects(manager.completeOAuth("flow-unlinked"), /no longer linked/);
+  assert.equal(base.calls.some(({ endpoint }) => endpoint === "validateMcpConnection"), false);
+  assert.equal(base.calls.some(({ endpoint }) => endpoint === "saveTransactionsFanout"), false);
+});
+
+test("completeOAuth rechecks reconnect identity after validation and before writes", async () => {
+  const record = (serverUrl: string) => ({ recordMap: { workflow_module: { "existing-module": { value: {
+    id: "existing-module", alive: true, module_type: "mcpServer", space_id: context.spaceId,
+    data: { id: "existing-module", name: "Existing", serverUrl, preferredTransport: "sse" }
+  } } } } });
+  const base = fakeApi({
+    initiateMcpOAuth: {
+      authorizationUrl: "https://provider.example.com/authorize",
+      completionFlowId: "completion-race",
+      oauthFlowId: "flow-race"
+    },
+    getMcpOAuthFlowResult: { status: "completed", connectionId: "oauth-race-capability" },
+    validateMcpConnection: { success: true, tools: [{ name: "read" }] }
+  });
+  let recordReads = 0;
+  const api: McpApi = {
+    ...base.api,
+    post: async (endpoint, body) => {
+      if (endpoint === "syncRecordValues") {
+        base.calls.push({ endpoint, body });
+        recordReads += 1;
+        return record(recordReads < 3 ? "https://mcp.example.com/mcp" : "https://changed.example.com/mcp");
+      }
+      return base.api.post(endpoint, body);
+    }
+  };
+  const manager = new McpConnectionManager(api);
+  await manager.startOAuth("https://mcp.example.com/mcp", { existingModuleId: "existing-module" });
+  await assert.rejects(manager.completeOAuth("flow-race"), /no longer a matching live MCP module/);
+  assert.equal(base.calls.filter(({ endpoint }) => endpoint === "validateMcpConnection").length, 1);
+  assert.equal(base.calls.some(({ endpoint }) => endpoint === "saveTransactionsFanout"), false);
+});
+
+test("completeOAuth performs bounded multi-poll waiting and stops on completion", async () => {
+  const base = fakeApi({
+    initiateMcpOAuth: {
+      authorizationUrl: "https://provider.example.com/authorize",
+      completionFlowId: "completion-wait",
+      oauthFlowId: "flow-wait"
+    },
+    validateMcpConnection: { success: true, tools: [{ name: "read" }] }
+  });
+  let polls = 0;
+  const api: McpApi = {
+    ...base.api,
+    post: async (endpoint, body) => {
+      if (endpoint === "getMcpOAuthFlowResult") {
+        base.calls.push({ endpoint, body });
+        polls += 1;
+        return polls === 1
+          ? { status: "pending" }
+          : { status: "completed", connectionId: "oauth-wait-capability" };
+      }
+      return base.api.post(endpoint, body);
+    }
+  };
+  const manager = new McpConnectionManager(api);
+  await manager.startOAuth("https://mcp.example.com/mcp");
+  const connected = await manager.completeOAuth("flow-wait", { waitSeconds: 1 });
+  assert.equal(connected.status, "connected");
+  assert.equal(polls, 2);
+});
+
 test("completeOAuth validates the OAuth connection and creates a linked Personal Agent module without persisting capability IDs", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mcp-oauth-complete-"));
   try {
