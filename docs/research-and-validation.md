@@ -286,3 +286,17 @@ current chunk `11987`の`ConnectMcpServerModal`を再解析した。公式reques
 実装はlive catalogをID/name/tagline/visibility/URL config/auth schemes/scope/approval intentへallowlistし、hidden・malformed・unknown fieldを除外する。catalog IDは接続直前に再取得して照合する。OAuth entryは標準`initiateMcpOAuth`を使い、non-OAuth credentialは既存のvalidation・factory-compatible module・connect・space-view link transactionへ渡す。Token authがserver tool layerでBearerへ誤変換されていた経路も修正し、`Authorization: Token`を保持する。
 
 compiled-stdio live試験では表示対象20件、hidden除外、top-level allowlist、Amplitude 2 variantsを確認した。EU variantは`mcp.eu.amplitude.com`へ解決され、OAuth authorization/completion flowを取得した。前後でPersonal Agent module集合とaccount hashは不変、registry fileは作成されなかった。全95 tests、TypeScript check、build、18-tool stdio smoke、diff/EOF/credential scanが成功した。
+
+## 2026-08-08 MCP OAuth native completion調査・実装
+
+current chunk `11987`を再解析し、desktop flowが`callbackType:"nativeredirect"`を使い、5秒間隔で`getMcpOAuthFlowResult({flowId,spaceId})`をpollすることを確認した。API dataは`status:"completed"` + `connectionId`、`status:"failed"` + `error`、またはpendingとなる。validation helperは`validateMcpConnection`へ`connectionId`を渡し、connect helperは`[{name:"__oauth_connection_id",value:connectionId}]`を使う。UI timeout messageとcaller timeoutは3分である。
+
+route bundleでは`/initiateExternalAuthenticationFromDesktop`、`/mcp-oauth-complete`、`/workflows/mcp/oauth/callback`を確認した。native browser wrapperはNotion loginを確認してからprovider authorization URLへredirectし、completion pageは`connectionId`、`spaceId`、`completionFlowId`、`error`をnative schemeへhandoffする。server pollがあるため、CLIはnative schemeを受信せずcompletionを回収できる。
+
+公式persist helperはOAuth開始時のintegration IDをmodule IDへ再利用せず、認可成功後にfresh `workflow_module` pointerを生成する。既存module reconnectだけ既存pointerを再利用し、full data spreadで未知fieldを保持する。この追加証拠に合わせ、新規completionもfresh module ID、reconnectはexisting IDとした。
+
+実装はcredential-free pending map（100件、3分）、workspace/server/module/policy binding、native wrapper、`complete_mcp_oauth`、bounded 0〜60秒poll、pending/failed/expired/replayed/concurrent/cross-workspace処理を追加した。completionはOAuth connection ID付きvalidation、factory-compatible module作成、pseudo-header connect、Personal Agent link、non-secret registry保存を行う。新規partial failureはdeactivate/unlinkし、existing reconnect failureは元module dataへrollbackする。workflow-scoped completionは明示的に拒否する。
+
+回帰はpending no-write、completed create/link、secret/capability非永続化、fresh module ID、workspace binding、failure consumption、expiry、replay、concurrency、workflow rejection、reconnect full-data保持、filter clear、rollback、新規cleanup、preconfigured policy propagationを含む。全103 tests、TypeScript check、build、19-tool compiled stdio smoke、diff checkが成功した。
+
+認証済みAttio live probeではnative flowを開始し、wrapper host/path `app.notion.com/initiateExternalAuthenticationFromDesktop`、provider host `app.attio.com`を確認した。provider認可は行わず1回pollして`pending`を取得した。Personal Agent module countは0→0、module set hashとaccount hash `06303073c76a7520`は不変、registry fileは作成されなかった。結果はrepository外のmode 0600 artifactに保存した。

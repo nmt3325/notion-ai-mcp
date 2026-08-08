@@ -72,6 +72,7 @@ test("Streamable HTTP server requires bearer auth and executes MCP tools", async
     assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), [
       "add_mcp_connection",
       "check_mcp_oauth_support",
+      "complete_mcp_oauth",
       "connect_preconfigured_mcp_server",
       "create_workspace",
       "download_attachment",

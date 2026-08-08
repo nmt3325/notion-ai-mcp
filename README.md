@@ -19,7 +19,7 @@ stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion 
 **MCP 接続管理（Notion 側の Settings > Connections > MCP を API から操作）**
 
 - `list_mcp_connections` / `add_mcp_connection` / `update_mcp_connection` / `remove_mcp_connection`
-- `get_mcp_connection_status` / `check_mcp_oauth_support` / `start_mcp_oauth`
+- `get_mcp_connection_status` / `check_mcp_oauth_support` / `start_mcp_oauth` / `complete_mcp_oauth`
 - `list_preconfigured_mcp_servers` / `connect_preconfigured_mcp_server`
 
 ## 重要な注意
@@ -313,16 +313,22 @@ join transactionが失敗した場合も、自動で再作成せずpartial failu
 | `apiKey` | `key`（`headerName` 任意） | `X-API-Key: <key>` または指定ヘッダー |
 | `basic` | `username`, `password` | `Authorization: Basic <base64>` |
 | `header` | `headers`（任意の map） | 指定したヘッダーをそのまま |
-| `oauth` | なし | `start_mcp_oauth` で取得した URL をブラウザで開く |
+| `oauth` | なし | `start_mcp_oauth` の `browserAuthorizationUrl` を開き、`complete_mcp_oauth` を呼ぶ |
 | `none` | なし | なし |
 
-### OAuth scope・BYO app
+### OAuth start・completion・BYO app
 
-`start_mcp_oauth`は`selectedScopes`、`workflowId`、`existingModuleId`、`userProvidedOAuthClientId`、`userProvidedOAuthClientSecret`を任意指定できます。scopeはtrim・重複除去し、明示した空配列や空scopeをOAuth開始前に拒否します。BYO client IDとsecretは必ず対で指定し、secretは`initiateMcpOAuth`の1 requestだけに使用してlocal registryや戻り値へ保存しません。戻り値も`integrationId`、`authorizationUrl`、`completionFlowId`、`oauthFlowId`だけに制限します。
+`start_mcp_oauth`はnative redirect flowを開始し、provider直URLに加えてNotionのログイン確認wrapperである`browserAuthorizationUrl`を返します。wrapperをブラウザで開いて認可した後、同じMCP server processで`complete_mcp_oauth`へ`oauthFlowId`を渡します。`waitSeconds`は0〜60秒で、未完了なら`status:"pending"`と次回poll目安を返します。
 
-通常は`initiationContext:"connect"`です。`existingModuleId`を指定した場合だけ、active workspaceのlive MCP moduleであることとserver URL一致を先に検証し、成功後に`"reconnect"`を送ります。Personal Agentでは`workflowId`を省略し、workflowへ追加する場合だけ明示します。
+pending flowはprocess内だけに最大100件・3分間保持し、開始時のworkspace、space view、正規化済みserver URL、display name、transport、tool policyへ束縛します。BYO client credentialやOAuth `connectionId`は保存しません。workspace切り替え、期限切れ、未知・再利用flow、同時finalizerを拒否します。server再起動後はflowを再開できないため、OAuthを開始し直してください。
 
-認証済みcompiled-stdio live試験ではAttioのOAuth discoveryから3 scopesを取得し、2 scopesと実行時生成したBYO client credentialでOAuth開始に成功しました。authorization URLにはpublic client IDが反映され、client secretは戻り値に含まれません。module集合、account file hash、local registryはいずれも不変でした。
+完了時は`getMcpOAuthFlowResult`の`connectionId`を`validateMcpConnection`へ渡してtoolsを再取得し、認可成功後に新しい`workflow_module`を作成します。現行Notion clientと同様、OAuth開始時のintegration IDとmodule IDは別です。`postWorkflowsMcpServerConnect`には`__oauth_connection_id` pseudo-headerを渡し、Personal Agentへlinkした後、非secret metadataだけをlocal registryへ保存します。途中失敗時は新規moduleをdeactivate/unlinkします。
+
+`existingModuleId`を指定したreconnectでは、開始時と完了時の両方でcurrent workspace・linked module・server URL一致を再検証します。未知のmodule dataを保持し、connect失敗時は直前のdataへrollbackします。`workflowId`付きflowの開始は互換性のため維持していますが、CLI completionは現時点でPersonal Agent moduleだけを対象とし、workflow-scoped flowはNotion UIで完了してください。
+
+`start_mcp_oauth`は`selectedScopes`、`workflowId`、`existingModuleId`、`connectionName`、`transport`、tool policy、`userProvidedOAuthClientId`、`userProvidedOAuthClientSecret`を任意指定できます。scopeはtrim・重複除去し、明示した空配列や空scopeをOAuth開始前に拒否します。BYO client IDとsecretは必ず対で指定し、secretは`initiateMcpOAuth`の1 requestだけに使用してlocal registry、pending flow、module data、戻り値へ保存しません。
+
+認証済みlive pending試験ではAttioのnative flowを開始し、wrapper host/pathとprovider hostを確認してから1回pollし`pending`を取得しました。provider認可は行わず、前後のPersonal Agent module集合、account file hash、local registryが不変であることを確認しました。completed/reconnect/rollback pathは回帰試験で検証し、全103 tests、TypeScript check、build、19-tool compiled stdio smokeが成功しています。
 
 ### Preconfigured MCP catalog
 
@@ -344,7 +350,7 @@ join transactionが失敗した場合も、自動で再作成せずpartial failu
 
 作成後のconnect、space-view可視化、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、該当pointerだけをunlinkします。remove時も他のsettingsとmodule pointerを保持します。update/remove/statusはcurrent linkageとlive recordを検証し、local recordが存在する場合はactive workspace/viewとの不一致も拒否します。
 
-Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験では、別processでNotion-onlyとして再発見した一時moduleのname-only update、full-data保持、明示的no-auth reconnect、3 tools、cleanup後の`alive:false`・`linked:false`、既存module不変を確認しました。現在の全回帰は95/95です。
+Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験では、別processでNotion-onlyとして再発見した一時moduleのname-only update、full-data保持、明示的no-auth reconnect、3 tools、cleanup後の`alive:false`・`linked:false`、既存module不変を確認しました。現在の全回帰は103/103です。
 2026-08-08の追加live試験では一時DeepWiki moduleに対し、既定policy、1 tool選択、全tool無効、filter削除による全tool復元を順に検証しました。3 toolsとconnected状態を維持し、終了時は一時moduleとregistryを削除、account file hashも不変でした。
 
 ## 添付ファイル
