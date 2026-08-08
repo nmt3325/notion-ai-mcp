@@ -261,3 +261,11 @@ current bundleのmodule `803083`を`wget`取得artifactから再確認すると�
 `conversationId`指定済みのAgent Service upload失敗を新しいtranscript threadへ暗黙fallbackしていた境界を修正した。active conversationへの後続one-shot upload、cross-thread/mixed transport拒否、restart/workspace切替でのhandle失効、unknown handle、HTTP 201 storage拒否を回帰化した。全回帰は80/80 testsである。
 
 compiled stdioのlive試験でも、1つ目のfile upload/chat後、同じ`conversationId`を指定した2つ目の`auto` uploadとfile-backed continuationが同じthreadで成功した。2つ目のfile downloadも元bytes/SHA-256と一致し、18 toolsのまま全exact markerを満たした。
+
+## 2026-08-08 MCP tool filter・run policy bundle調査
+
+Notionの純正web fetchを使わず、`scripts/research-mcp-connections.sh`でlogin HTML、current Rspack runtime、2,079 chunkを`wget`取得した。2,078 chunk（約89.6 MB）を解析し、MCP候補24 sourceを抽出した。current persisted-state schemaは`enabledToolNames?: string[]`を正式に持ち、undefinedは後方互換として全tool有効である。`runReadToolsAutomatically`はundefined/trueで自動実行、`runWriteToolsAutomatically`はtrueだけで自動実行となる。
+
+実装はadd/update schemaにtool filterとread/write policyを追加した。addの安全な既定値はread=true、write=false。current UIは全tool無効を空配列ではなく`["__NONE__"]`で保存する。外部APIの`[]`をこのsentinelへ変換し、`null`はfull `data` setでfieldを削除し全tool有効へ戻す。選択名はtrim・deduplicateし、validation済み/cached catalogにない名前をwrite前に拒否する。name/filter/policyだけの変更はreconnectせず、live `data`全体を保持する。86/86 tests、TypeScript check、build、18-tool compiled stdio smokeが成功した。raw credentialや認証sessionはresearch artifactへ保存していない。
+
+compiled stdioの一時DeepWiki module試験では、既定の全tool、1 tool選択、`["__NONE__"]`による全無効、field削除による全tool復元をlive recordから確認した。最初のprobeで空配列がremoteから消えること、次のprobeでshallow mergeからkeyを省くだけでは既存sentinelが残ることを検出したため、現行UI sentinelへの変換とclear時のfull-data `set`へ修正した。3 tools、connected状態、read/write policyを維持し、一時moduleとmode 0600 registryをcleanupした。account file hashは前後で不変だった。
