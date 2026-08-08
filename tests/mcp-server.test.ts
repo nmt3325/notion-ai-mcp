@@ -140,5 +140,7 @@ test("toMcpAuth rejects incomplete credentials", () => {
   assert.throws(() => toMcpAuth({ type: "basic", username: "u" }), /auth.username/);
   assert.throws(() => toMcpAuth({ type: "header", headers: {} }), /auth.headers/);
   assert.deepEqual(toMcpAuth({ type: "none" }), { type: "none" });
+  assert.deepEqual(toMcpAuth({ type: "bearer", token: " b " }), { type: "bearer", token: "b" });
+  assert.deepEqual(toMcpAuth({ type: "token", token: " t " }), { type: "token", token: "t" });
   assert.equal(toMcpAuth(undefined), undefined);
 });

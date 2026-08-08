@@ -382,7 +382,7 @@ message ID を100件ずつ取得する。表示対象は次だけである。
 | `saveTransactionsFanout` | `{ requestId, transactions: [...] }` | `workflow_module` の作成/更新/削除 |
 | `postWorkflowsMcpServerConnect` | `{ integrationId, spaceId, authHeaders, initiationContext, approvalIntent }` | 接続確定 |
 | `initiateMcpOAuth` | `{ serverUrl, spaceId, integrationId, workflowId?, selectedScopes?, initiationContext, callbackType, callbackOrigin, userProvidedOAuthClientId?, userProvidedOAuthClientSecret?, approvalIntent }` | OAuth開始URLを返す |
-| `getPreconfiguredMcpServers` | `{}` | Notion 標準の MCP カタログ（21 件） |
+| `getPreconfiguredMcpServers` | `{ spaceId }` | Notion 標準の MCP カタログ（21 件） |
 
 `workflow_module` レコードの主要キー: `alive, created_by_id, created_by_table, created_time, data, id,
 last_edited_by_id, last_edited_by_table, last_edited_time, module_type, parent_id, parent_table, space_id, version`。
@@ -400,6 +400,14 @@ current Web UIは`initiateMcpOAuth`へnew integration IDを渡し、既存module
 外部toolではscope配列をtrim・deduplicateし、明示的な空配列/空要素を拒否する。client ID/secretは片方だけの入力を拒否する。secretはregistry・module data・戻り値・ログへ保存せず、OAuth API responseも`authorizationUrl`、`completionFlowId`、`oauthFlowId`のallowlistだけを返す。`existingModuleId`でreconnectする前にcurrent workspaceのlive `mcpServer` recordとserver URL一致を検証する。
 
 認証済みcompiled-stdio live試験ではAttioの`oauth_dcr` discovery（3 scopes）に対し2 scopesとsynthetic BYO credentialで開始し、Attio authorization URL、completion flow ID、OAuth flow IDを取得した。public client IDはauthorization requestへ反映され、client secretはoutputに存在せず、module/account/registryも不変だった。
+
+### Preconfigured MCP catalog
+
+current Web clientは`getPreconfiguredMcpServers({spaceId})`だけでcatalogを取得し、`connectPreconfiguredMcpServer`というendpointはcurrent 2,078-chunk bundleに存在しない。preconfigured entryの接続もcustom entryと同じconnect actionを使い、`isPreconfiguredServer`はanalytics/UI contextである。
+
+URL設定は`fixed`、`variant`、`template`、`pattern`の4形式。official resolverはvariant indexからURLを選び、template placeholderを`encodeURIComponent`して置換し、patternはcatalog regexで照合する。外部toolはvariant名で選択し、hidden entryを除外したallowlisted catalogを返す。OAuth entryは通常のOAuth initiationを返し、明示的なnon-OAuth authは既存Personal Agent MCP transactionへ渡す。raw catalogの未知fieldや認証情報は返さない。
+
+live catalogは21件（enabled 20、hidden 1）で、variant 3件、pattern 1件、template 1件だった。compiled-stdioで表示対象20件、Amplitude EU URL解決、OAuth initiation、module/account/registry不変を確認した。
 
 ### Personal Agent MCP 永続化とstatus
 

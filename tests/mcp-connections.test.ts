@@ -5,7 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   McpConnectionManager, McpRegistry, buildAuthHeaderList, buildAuthHeaders,
-  normalizeEnabledToolNames, normalizeOAuthScopes, normalizeServerUrl, normalizeTransport, toolNamesFrom, type McpApi
+  normalizeEnabledToolNames, normalizeOAuthScopes, normalizeServerUrl, normalizeTransport,
+  resolvePreconfiguredServerUrl, sanitizePreconfiguredCatalog, toolNamesFrom, type McpApi
 } from "../src/mcp-connections.js";
 
 const context = { spaceId: "space-1", userId: "user-1", spaceViewId: "view-1" };
@@ -166,6 +167,20 @@ test("startOAuth sends the current payload and never returns or persists a BYO s
     assert.equal(JSON.stringify(result).includes(secret), false);
     assert.equal(existsSync(registryPath), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("startOAuth rejects an encoded secret in an allowlisted response field", async () => {
+  const secret = 'dangerous "& client secret';
+  const { api } = fakeApi({
+    initiateMcpOAuth: { authorizationUrl: `https://auth.example/authorize?client_secret=${encodeURIComponent(secret)}` }
+  });
+  await assert.rejects(
+    () => new McpConnectionManager(api).startOAuth("https://oauth.example/mcp", {
+      userProvidedOAuthClientId: "client-id",
+      userProvidedOAuthClientSecret: secret
+    }),
+    /unsafe OAuth response/
+  );
 });
 
 test("startOAuth rejects partial BYO credentials and unsafe explicit scope input before initiation", async () => {
@@ -542,4 +557,106 @@ test("registry persists connections to disk", () => {
     assert.equal(registry.remove("a"), true);
     assert.equal(new McpRegistry(path).list().length, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("preconfigured catalog is allowlisted, hides hidden entries, and resolves every URL config", () => {
+  const catalog = sanitizePreconfiguredCatalog({ servers: [
+    {
+      id: "direct", name: "Direct", visibility: "enabled", serverUrl: "https://direct.example/mcp/",
+      tagline: "Safe display text", supportedAuthSchemes: ["oauth_dcr", "oauth_dcr"], rawCredential: "must-not-escape"
+    },
+    {
+      id: "variant", name: "Regional", visibility: "enabled", serverUrl: "https://us.example/mcp",
+      supportedAuthSchemes: ["oauth_dcr"], serverUrlConfig: { type: "variant", variants: [
+        { name: "US", url: "https://us.example/mcp" }, { name: "EU", url: "https://eu.example/mcp" }
+      ] }
+    },
+    {
+      id: "template", name: "Template", visibility: "enabled", serverUrl: "",
+      supportedAuthSchemes: ["authorization_token"], serverUrlConfig: {
+        type: "template", urlTemplate: "https://{tenant}.example/mcp/{path}", placeholders: [
+          { key: "tenant", label: "Tenant", pattern: "^[a-z]+$" }, { key: "path", label: "Path" }
+        ]
+      }
+    },
+    {
+      id: "pattern", name: "Pattern", visibility: "enabled", serverUrl: "",
+      supportedAuthSchemes: ["authorization_bearer"], serverUrlConfig: {
+        type: "pattern", validationPattern: "^https://[a-z0-9-]+\\.n8n\\.example/mcp$", placeholder: "https://team.n8n.example/mcp"
+      }
+    },
+    { id: "hidden", name: "Hidden", visibility: "hidden", serverUrl: "https://hidden.example/mcp", supportedAuthSchemes: [] },
+    { id: "invalid", name: "Invalid", visibility: "enabled", serverUrl: "javascript:alert(1)", supportedAuthSchemes: [] }
+  ] });
+  assert.deepEqual(catalog.map(({ id }) => id), ["direct", "variant", "template", "pattern"]);
+  assert.equal(JSON.stringify(catalog).includes("must-not-escape"), false);
+  assert.equal(catalog[0]?.serverUrl, "https://direct.example/mcp");
+  assert.deepEqual(catalog[0]?.supportedAuthSchemes, ["oauth_dcr"]);
+  assert.equal(resolvePreconfiguredServerUrl(catalog[0]!), "https://direct.example/mcp");
+  assert.equal(resolvePreconfiguredServerUrl(catalog[1]!, { variant: "eu" }), "https://eu.example/mcp");
+  assert.equal(resolvePreconfiguredServerUrl(catalog[2]!, { templateValues: { tenant: "acme", path: "a/b" } }), "https://acme.example/mcp/a%2Fb");
+  assert.equal(resolvePreconfiguredServerUrl(catalog[3]!, { serverUrl: "https://team.n8n.example/mcp" }), "https://team.n8n.example/mcp");
+  assert.throws(() => resolvePreconfiguredServerUrl(catalog[1]!, { variant: "APAC" }), /Unknown Regional variant/);
+  assert.throws(() => resolvePreconfiguredServerUrl(catalog[2]!, { templateValues: { tenant: "ACME", path: "x" } }), /catalog pattern/);
+  assert.throws(() => resolvePreconfiguredServerUrl(catalog[3]!, { serverUrl: "https://other.example/mcp" }), /catalog pattern/);
+});
+
+test("listPreconfigured returns only the sanitized current-workspace catalog", async () => {
+  const { api, calls } = fakeApi({ getPreconfiguredMcpServers: { servers: [
+    { id: "visible", name: "Visible", visibility: "enabled", serverUrl: "https://visible.example/mcp", tagline: "Hello", supportedAuthSchemes: ["oauth_dcr"], futureSecret: "drop" },
+    { id: "hidden", name: "Hidden", visibility: "hidden", serverUrl: "https://hidden.example/mcp", supportedAuthSchemes: [] }
+  ] } });
+  const listed = await new McpConnectionManager(api).listPreconfigured() as { servers: Array<Record<string, unknown>> };
+  assert.equal(listed.servers.length, 1);
+  assert.equal(listed.servers[0]?.id, "visible");
+  assert.equal("futureSecret" in (listed.servers[0] ?? {}), false);
+  assert.deepEqual(calls[0], { endpoint: "getPreconfiguredMcpServers", body: { spaceId: context.spaceId } });
+});
+
+test("preconfigured OAuth resolves variants through the standard initiation flow", async () => {
+  const secret = "synthetic-preconfigured-client-secret";
+  const { api, calls } = fakeApi({
+    getPreconfiguredMcpServers: { servers: [{
+      id: "amplitude", name: "Amplitude", visibility: "enabled", serverUrl: "https://us.example/mcp",
+      supportedAuthSchemes: ["oauth_dcr"], supportedOAuthScopes: ["catalog:read"],
+      serverUrlConfig: { type: "variant", variants: [
+        { name: "US", url: "https://us.example/mcp" }, { name: "EU", url: "https://eu.example/mcp" }
+      ] }
+    }] },
+    initiateMcpOAuth: {
+      authorizationUrl: "https://auth.example/authorize", completionFlowId: "completion-1", oauthFlowId: "oauth-1",
+      echoedSecret: secret, future: { unsafe: true }
+    }
+  });
+  const result = await new McpConnectionManager(api).connectPreconfigured("amplitude", {
+    variant: "EU", selectedScopes: [" custom:read ", "custom:read"],
+    userProvidedOAuthClientId: "client-id", userProvidedOAuthClientSecret: secret
+  });
+  assert.equal(result.status, "oauth_authorization_required");
+  assert.deepEqual(Object.keys(result).sort(), ["authorizationUrl", "completionFlowId", "integrationId", "oauthFlowId", "preconfiguredServer", "status"]);
+  assert.equal(JSON.stringify(result).includes(secret), false);
+  const initiation = calls.find(({ endpoint }) => endpoint === "initiateMcpOAuth");
+  assert.equal(initiation?.body.serverUrl, "https://eu.example/mcp");
+  assert.deepEqual(initiation?.body.selectedScopes, ["custom:read"]);
+  assert.equal(initiation?.body.userProvidedOAuthClientSecret, secret);
+  assert.equal(calls.some(({ endpoint }) => endpoint === "connectPreconfiguredMcpServer"), false);
+});
+
+test("preconfigured non-OAuth auth uses the validated Personal Agent connect transaction", async () => {
+  const { api, calls } = fakeApi({
+    getPreconfiguredMcpServers: { servers: [{
+      id: "github", name: "GitHub", visibility: "enabled", serverUrl: "https://github.example/mcp/",
+      supportedAuthSchemes: ["authorization_token"]
+    }] },
+    validateMcpConnection: { tools: [{ name: "read_repository" }] }
+  });
+  const result = await new McpConnectionManager(api).connectPreconfigured("github", {
+    auth: { type: "token", token: "token-value" }, enabledToolNames: ["read_repository"]
+  });
+  assert.equal(result.status, "connected");
+  const validation = calls.find(({ endpoint }) => endpoint === "validateMcpConnection");
+  assert.deepEqual(validation?.body.authHeaders, [{ name: "Authorization", value: "Token token-value" }]);
+  assert.equal(calls.some(({ endpoint }) => endpoint === "postWorkflowsMcpServerConnect"), true);
+  assert.equal(calls.filter(({ endpoint }) => endpoint === "saveTransactionsFanout").length, 2);
+  assert.equal(calls.some(({ endpoint }) => endpoint === "connectPreconfiguredMcpServer"), false);
 });
