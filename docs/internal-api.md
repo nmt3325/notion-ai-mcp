@@ -381,7 +381,7 @@ message ID を100件ずつ取得する。表示対象は次だけである。
 | `validateMcpConnection` | `{ serverUrl, spaceId, authHeaders, approvalIntent }` | 接続検証と tool 一覧取得 |
 | `saveTransactionsFanout` | `{ requestId, transactions: [...] }` | `workflow_module` の作成/更新/削除 |
 | `postWorkflowsMcpServerConnect` | `{ integrationId, spaceId, authHeaders, initiationContext, approvalIntent }` | 接続確定 |
-| `initiateMcpOAuth` | `{ serverUrl, spaceId, integrationId, name? }` | `authorizationUrl` を返す |
+| `initiateMcpOAuth` | `{ serverUrl, spaceId, integrationId, workflowId?, selectedScopes?, initiationContext, callbackType, callbackOrigin, userProvidedOAuthClientId?, userProvidedOAuthClientSecret?, approvalIntent }` | OAuth開始URLを返す |
 | `getPreconfiguredMcpServers` | `{}` | Notion 標準の MCP カタログ（21 件） |
 
 `workflow_module` レコードの主要キー: `alive, created_by_id, created_by_table, created_time, data, id,
@@ -392,6 +392,14 @@ preferredTransport, runReadToolsAutomatically, runWriteToolsAutomatically, serve
 
 削除は `saveTransactionsFanout` で `args: { alive: false }`、更新は `path: ["data"]` と `path: []` の
 2 オペレーションを送ります。
+
+### OAuth scope・BYO app
+
+current Web UIは`initiateMcpOAuth`へnew integration IDを渡し、既存moduleがある場合だけ`initiationContext:"reconnect"`、それ以外は`"connect"`とする。scopeはdiscovery結果または空白区切りcustom inputを解決した配列で、BYO appでは`userProvidedOAuthClientId`と`userProvidedOAuthClientSecret`も同じrequestにだけ含める。
+
+外部toolではscope配列をtrim・deduplicateし、明示的な空配列/空要素を拒否する。client ID/secretは片方だけの入力を拒否する。secretはregistry・module data・戻り値・ログへ保存せず、OAuth API responseも`authorizationUrl`、`completionFlowId`、`oauthFlowId`のallowlistだけを返す。`existingModuleId`でreconnectする前にcurrent workspaceのlive `mcpServer` recordとserver URL一致を検証する。
+
+認証済みcompiled-stdio live試験ではAttioの`oauth_dcr` discovery（3 scopes）に対し2 scopesとsynthetic BYO credentialで開始し、Attio authorization URL、completion flow ID、OAuth flow IDを取得した。public client IDはauthorization requestへ反映され、client secretはoutputに存在せず、module/account/registryも不変だった。
 
 ### Personal Agent MCP 永続化とstatus
 

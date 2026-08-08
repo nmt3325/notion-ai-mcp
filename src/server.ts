@@ -266,12 +266,22 @@ export function createServer(client: NotionClient): McpServer {
 
   server.registerTool("start_mcp_oauth", {
     title: "Start MCP OAuth",
-    description: "Begin the OAuth flow for an MCP server and return the authorization URL to open in a browser.",
+    description: "Begin an MCP OAuth flow with optional scopes or transient BYO app credentials; secrets are never stored or returned.",
     inputSchema: {
       serverUrl: z.string().min(1),
-      name: z.string().min(1).optional()
+      selectedScopes: z.array(z.string().min(1).max(1_024)).max(100).optional(),
+      workflowId: z.string().uuid().optional(),
+      existingModuleId: z.string().uuid().optional().describe("Existing MCP module to reauthenticate; its server URL must match"),
+      userProvidedOAuthClientId: z.string().trim().min(1).max(2_048).optional(),
+      userProvidedOAuthClientSecret: z.string().min(1).max(8_192).optional()
     }
-  }, async ({ serverUrl, name }) => result(await client.mcp().startOAuth(serverUrl, name)));
+  }, async ({ serverUrl, selectedScopes, workflowId, existingModuleId, userProvidedOAuthClientId, userProvidedOAuthClientSecret }) => result(await client.mcp().startOAuth(serverUrl, {
+    ...(selectedScopes !== undefined ? { selectedScopes } : {}),
+    ...(workflowId ? { workflowId } : {}),
+    ...(existingModuleId ? { existingModuleId } : {}),
+    ...(userProvidedOAuthClientId ? { userProvidedOAuthClientId } : {}),
+    ...(userProvidedOAuthClientSecret ? { userProvidedOAuthClientSecret } : {})
+  })));
 
   server.registerTool("list_preconfigured_mcp_servers", {
     title: "List preconfigured MCP servers",

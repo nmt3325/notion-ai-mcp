@@ -182,6 +182,40 @@ export function normalizeEnabledToolNames(value: string[], availableToolNames: s
   return names;
 }
 
+/** Normalize optional OAuth scopes exactly as the current connect UI resolves them. */
+export function normalizeOAuthScopes(value: string[] | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (value.length > 100) throw new Error("selectedScopes supports at most 100 scopes");
+  const scopes: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const scope = item.trim();
+    if (!scope) throw new Error("selectedScopes cannot contain empty scopes");
+    if (scope.length > 1_024) throw new Error("selectedScopes contains an excessively long scope");
+    if (seen.has(scope)) continue;
+    seen.add(scope);
+    scopes.push(scope);
+  }
+  if (scopes.length === 0) throw new Error("selectedScopes must contain at least one scope when provided");
+  return scopes;
+}
+
+const SAFE_OAUTH_RESPONSE_FIELDS = ["authorizationUrl", "completionFlowId", "oauthFlowId"] as const;
+
+/** Keep transient credentials request-only, even if a future API response accidentally echoes them. */
+function safeOAuthResponse(response: JsonObject, integrationId: string, clientSecret?: string): JsonObject {
+  const safe: JsonObject = { integrationId };
+  for (const key of SAFE_OAUTH_RESPONSE_FIELDS) {
+    const value = response[key];
+    if (typeof value !== "string" || !value) continue;
+    if (clientSecret && value.includes(clientSecret)) {
+      throw new Error("Notion returned an unsafe OAuth response containing supplied credentials");
+    }
+    safe[key] = value;
+  }
+  return safe;
+}
+
 /** Local mirror of the modules we created, so the tools keep working across restarts. */
 export class McpRegistry {
   private records: McpConnectionRecord[] = [];
@@ -237,6 +271,16 @@ export interface UpdateConnectionInput {
   enabledToolNames?: string[] | null;
   runReadToolsAutomatically?: boolean;
   runWriteToolsAutomatically?: boolean;
+}
+
+export interface StartOAuthOptions {
+  selectedScopes?: string[];
+  workflowId?: string;
+  /** Supplying a verified current-workspace module enables reconnect context. */
+  existingModuleId?: string;
+  /** BYO OAuth credentials are transient and are never persisted or returned. */
+  userProvidedOAuthClientId?: string;
+  userProvidedOAuthClientSecret?: string;
 }
 
 export class McpConnectionManager {
@@ -719,21 +763,56 @@ export class McpConnectionManager {
     };
   }
 
-  async startOAuth(serverUrl: string, name?: string): Promise<JsonObject> {
-    const { spaceId } = await this.context();
+  async startOAuth(serverUrl: string, options: StartOAuthOptions | string = {}): Promise<JsonObject> {
+    // Accept the old optional name string without forwarding the obsolete field.
+    const resolved = typeof options === "string" ? {} : options;
+    const normalizedServerUrl = normalizeServerUrl(serverUrl);
+    const selectedScopes = normalizeOAuthScopes(resolved.selectedScopes);
+    const workflowId = resolved.workflowId?.trim();
+    const existingModuleId = resolved.existingModuleId?.trim();
+    if (resolved.workflowId !== undefined && !workflowId) throw new Error("workflowId cannot be empty");
+    if (resolved.existingModuleId !== undefined && !existingModuleId) throw new Error("existingModuleId cannot be empty");
+
+    const rawClientId = resolved.userProvidedOAuthClientId;
+    const rawClientSecret = resolved.userProvidedOAuthClientSecret;
+    if ((rawClientId === undefined) !== (rawClientSecret === undefined)) {
+      throw new Error("userProvidedOAuthClientId and userProvidedOAuthClientSecret must be provided together");
+    }
+    const clientId = rawClientId?.trim();
+    if (rawClientId !== undefined && !clientId) throw new Error("userProvidedOAuthClientId cannot be empty");
+    if (rawClientSecret !== undefined && !rawClientSecret.trim()) throw new Error("userProvidedOAuthClientSecret cannot be empty");
+
+    const context = await this.context();
+    if (existingModuleId) {
+      const moduleRecord = await this.loadSpaceRecord(context, "workflow_module", existingModuleId);
+      const moduleData = object(moduleRecord.data);
+      if (moduleRecord.alive !== true || asString(moduleRecord.module_type) !== "mcpServer") {
+        throw new Error(`${existingModuleId} is not a live MCP workflow module`);
+      }
+      if (asString(moduleRecord.space_id, context.spaceId) !== context.spaceId) {
+        throw new Error(`${existingModuleId} is not in the active workspace`);
+      }
+      const currentServerUrl = asString(moduleData.serverUrl);
+      if (!currentServerUrl || normalizeServerUrl(currentServerUrl) !== normalizedServerUrl) {
+        throw new Error("OAuth reconnect serverUrl must match the existing MCP module");
+      }
+    }
+
     const integrationId = randomUUID();
     const response = await this.api.post("initiateMcpOAuth", {
-      serverUrl: normalizeServerUrl(serverUrl),
-      spaceId,
+      serverUrl: normalizedServerUrl,
+      spaceId: context.spaceId,
       integrationId,
-      selectedScopes: [],
-      initiationContext: "connect",
+      ...(workflowId ? { workflowId } : {}),
+      ...(selectedScopes ? { selectedScopes } : {}),
+      initiationContext: existingModuleId ? "reconnect" : "connect",
       callbackType: "popup",
       callbackOrigin: ["https:", "", "app.notion.com"].join("/"),
-      approvalIntent: "approve_on_connect",
-      ...(name ? { name } : {})
+      ...(clientId ? { userProvidedOAuthClientId: clientId } : {}),
+      ...(rawClientSecret ? { userProvidedOAuthClientSecret: rawClientSecret } : {}),
+      approvalIntent: "approve_on_connect"
     });
-    return { integrationId, ...response };
+    return safeOAuthResponse(response, integrationId, rawClientSecret);
   }
 
   async listPreconfigured(): Promise<JsonObject> {
