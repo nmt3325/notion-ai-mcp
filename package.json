@@ -21,7 +21,8 @@
     "dev": "tsx src/index.ts",
     "dev:http": "tsx src/http.ts",
     "test": "node --import tsx --test tests/**/*.test.ts",
-    "smoke:live": "tsx scripts/live-smoke.ts"
+    "smoke:live": "tsx scripts/live-smoke.ts",
+    "smoke:http:remote": "node scripts/cloudflare-tunnel-smoke.mjs"
   },
   "engines": {
     "node": ">=20.0.0"

@@ -1,7 +1,7 @@
 # Notion AI MCP Server
 
 Notion AI の非公式な内部 API を MCP サーバーとしてラップする、個人検証用の TypeScript 実装です。
-stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次の 18 ツールを利用できます。
+stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次の 19 ツールを利用できます。
 
 **チャット / 履歴**
 
@@ -139,6 +139,21 @@ HTTP版の設定:
 設定ファイルへtokenを直接保存できないクライアントでは、クライアント側の環境変数・Secret機能を
 利用してください。HTTPのままインターネットへ公開せず、Caddy、Nginx、Cloudflare Tunnelなどで
 HTTPS終端してください。サーバーを再起動するとHTTP sessionと、そのsession内の継続chat状態は失われます。
+
+Cloudflare Quick Tunnelで短時間の疎通試験をする場合は、HTTP serverを`127.0.0.1`で起動したまま別terminalで実行します。
+Quick TunnelはURL・uptimeの保証がなくproduction向けではありません。公開URL自体に認証機能はないため、十分長い
+Remote MCP専用Bearer tokenを必ず維持してください。
+
+```bash
+cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:3000
+
+export NOTION_MCP_REMOTE_URL=https://<generated-host>.trycloudflare.com
+export NOTION_MCP_REMOTE_CALL_READ=1
+npm run smoke:http:remote
+```
+
+remote smokeは、未認証requestが401になること、TLS越しのMCP initialize、19-tool listing、任意の
+`get_current_workspace` read callを検証します。Bearer tokenやworkspace responseは出力しません。
 
 最小のCaddy例:
 
