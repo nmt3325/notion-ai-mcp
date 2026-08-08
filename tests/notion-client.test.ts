@@ -246,6 +246,33 @@ test("chat creates a workflow thread and continues it with a partial transcript"
 });
 
 
+test("premium limits do not rotate workspace-bound conversations", async () => {
+  let inferenceCalls = 0;
+  let workspaceDiscoveryCalls = 0;
+  const fakeFetch = async (input: string | URL | Request): Promise<Response> => {
+    const endpoint = String(input).split("/").at(-1) ?? "";
+    if (endpoint === "runInferenceTranscript") {
+      inferenceCalls += 1;
+      if (inferenceCalls === 1) return ndjsonResponse([{ type: "agent-inference", value: [{ type: "text", content: "Started" }] }]);
+      return ndjsonResponse([{ type: "premium-feature-unavailable", featureAvailability: { limit: { current: 5, total: 5 } } }]);
+    }
+    if (endpoint === "loadUserContent") {
+      workspaceDiscoveryCalls += 1;
+      return jsonResponse({});
+    }
+    return new Response("unexpected", { status: 500 });
+  };
+  const client = new NotionClient({ ...config, maxWorkspaceRetries: 5, account: { ...account } }, fakeFetch as typeof fetch);
+  const first = await client.chat({ prompt: "Start" });
+  await assert.rejects(
+    () => client.chat({ prompt: "Continue", conversationId: first.conversationId }),
+    /workspace-bound; switch workspace, then start a new chat and upload again/
+  );
+  assert.equal(inferenceCalls, 2);
+  assert.equal(workspaceDiscoveryCalls, 0);
+});
+
+
 test("workspace switching and creation stay active in the same client process", async () => {
   const spaceA = "81000000-0000-4000-8000-000000000001";
   const spaceB = "81000000-0000-4000-8000-000000000002";

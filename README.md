@@ -83,7 +83,8 @@ node dist/src/index.js
 | `NOTION_DEFAULT_MODEL` | 任意 | Notion 内部 model ID。既定 `almond-croissant-low` |
 | `NOTION_API_BASE` | 任意 | 既定 `https://www.notion.so/api/v3` |
 | `NOTION_REQUEST_TIMEOUT_MS` | 任意 | 内部 API request timeout（workspace操作にも適用）。既定 300000 ms |
-| `NOTION_FULL_COOKIE` | 任意 | 必要な場合だけ完全な Cookie header を指定 |
+| `NOTION_MAX_WORKSPACE_RETRIES` | 任意 | credit枯渇時のworkspaceローテーション上限。既定5、`0`で無効 |
+| `NOTION_FULL_COOKIE` | 任意 | 完全なCookie header。assistant-transcript downloadにはブラウザsessionの`file_token`が必要 |
 | `NOTION_MODEL_ALIASES` | 任意 | モデル別名を追加/上書きする JSON。例 `{"my-fast":"oatmeal-cookie"}` |
 | `NOTION_MCP_REGISTRY_FILE` | 任意 | 登録済み MCP 接続の保存先（mode 0600） |
 | `NOTION_ATTACHMENT_ROOT` | 任意 | upload元/download先として許可するroot。既定は起動時のworking directory |
@@ -278,8 +279,11 @@ NOTION_ACCOUNT_FILE=/absolute/path/account.json NOTION_SMOKE_CHAT=1 npm run smok
 
 無料プランの AI 応答枚数を使い切ると、ストリームに `premium-feature-unavailable` が流れます。
 本実装はこのイベントの `featureAvailability.limit` を読み、`AI credit limit reached: 78/75` のように
-実数値を含めたエラーを返します。同時に workspace を自動ローテーションして再試行します（`NOTION_MAX_WORKSPACE_RETRIES`）。
-手動で回避する場合は `create_workspace` で新規 workspace を作成し、`pin` で固定します。
+実数値を含めたエラーを返します。実際にlimitを返したworkspaceだけを枯渇済みにし、未検証の既存workspaceへ
+順番にローテーションします。既存候補を使い切った場合だけ新規workspaceを作成します。
+`NOTION_MAX_WORKSPACE_RETRIES=0`で自動ローテーションを無効化できます。conversationまたはfile handleは
+workspaceに固定されるため自動ローテーションせず、明示的に切り替えて新規chat/uploadを開始するよう案内します。
+手動で回避する場合は `switch_workspace`、必要な場合だけ`create_workspace`を使い、`pin`で固定します。
 ただし `/createSpace` は server-side rate limit の対象です。HTTP 429 時は連続実行せず、Notion が返す
 `Retry-After`（存在する場合）または十分なcooldownを尊重してください。workspace作成だけ成功して
 join transactionが失敗した場合も、自動で再作成せずpartial failureとして調査してください。
@@ -316,7 +320,7 @@ join transactionが失敗した場合も、自動で再作成せずpartial failu
 
 作成後のconnect、space-view可視化、local registry保存のいずれかが失敗した場合は、作成済みmoduleをdead化し、該当pointerだけをunlinkします。remove時も他のsettingsとmodule pointerを保持します。update/remove/statusはcurrent linkageとlive recordを検証し、local recordが存在する場合はactive workspace/viewとの不一致も拒否します。
 
-Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験では、別processでNotion-onlyとして再発見した一時moduleのname-only update、full-data保持、明示的no-auth reconnect、3 tools、cleanup後の`alive:false`・`linked:false`、既存module不変を確認しました。全回帰は70/70です。
+Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_status`はworkflow専用の`getMcpOAuthStatus`を呼びません。liveな`workflow_module`、space-view linkage、`external_connection`から`connected` / `needs_reauth` / `needs_setup` / `disconnected`を判定します。2026-08-07のcompiled-stdio DeepWiki試験では、別processでNotion-onlyとして再発見した一時moduleのname-only update、full-data保持、明示的no-auth reconnect、3 tools、cleanup後の`alive:false`・`linked:false`、既存module不変を確認しました。現在の全回帰は75/75です。
 
 ## 添付ファイル
 
@@ -389,14 +393,18 @@ multipartはpart数・一意な連番・file境界・method・URLを**転送開�
 `NOTION_REQUEST_TIMEOUT_MS`でabortします。
 
 upload完了metadataのfile ID・size・任意のSHA-256をローカルbytesと照合します。downloadは
-Agent Serviceでは`getFileContentURLForAgentThread`、assistant-transcriptでは`getSignedFileUrls`を使い、
+Agent Serviceでは`getFileContentURLForAgentThread`、assistant-transcriptでは公式Web clientと同じ
+`app.notion.com/signed/<encoded-source-url>` proxyを使い、`file.notion.com`へのredirectにだけ
+`file_token` cookieを転送します。`token_v2`や完全なCookie headerをredirect先へ転送しません。
 sizeとSHA-256を実download bytesに対して検証します。ローカルpathは`NOTION_ATTACHMENT_ROOT`の
 実パス配下だけ許可し、path traversalとsymlink parentを拒否します。download先を省略した場合は
 `downloads/<filename>`、同名ファイルは`overwrite:true`のときだけ置換します。転送前後の両方で
 `NOTION_MAX_ATTACHMENT_BYTES`を強制します。
 
 assistant-transcript descriptorはURL、header、form field、chat pointer、count/length、private-network hostを
-storage転送前に検証します。署名URL・S3 policy・一時credential・form fieldは保存も返却もせず、
+storage転送前に検証します。proxy redirectもHTTPS・userinfo・private/link-local/metadata hostを再検証します。
+`NOTION_FULL_COOKIE`またはaccount JSONの`full_cookie`に`file_token`がない場合、transcript downloadは
+明示的な設定errorで停止します。署名URL・S3 policy・一時credential・form fieldは保存も返却もせず、
 workspace/thread/file URL/metadata/SHA-256だけを不透明handleに紐づけてメモリ内に保持します。
 
 `fileIds`は空白を除去して重複を排除し、text blockと合わせて最大20 blocksになるよう一意なfileを

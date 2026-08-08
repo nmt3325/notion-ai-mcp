@@ -230,3 +230,26 @@ commit `2d3eace`に対するself-reporting CIはNode 24でTypeScript check、54/
 6. remove後は一時moduleが`alive:false`、space-viewで`linked:false`となり、registryは0件へ復元。
 
 前後で既存moduleのdata hash、account credential hash、linked module setが不変であることも確認した。account、registry、live resultはmode `0600`で、raw token、module ID、external-connection recordはログへ保存していない。自動回帰は67/67 tests、TypeScript check、build、18-tool compiled stdio smoke、diff/EOF/credential scanに成功した。
+
+## 2026-08-08 Signed proxy・workspace枯渇追跡のlive検証
+
+新しいLinux/Playwright環境でpasskey backupから認証sessionを復旧し、5 workspaceを再取得した。
+assistant-transcript uploadとfile-backed chatは成功したが、`getSignedFileUrls`が返す`file.notion.so` URLの
+直接GETは有効期限内でもHTTP 403だった。current bundleのsigned-file helperを再調査し、公式Web clientが
+`app.notion.com/signed/<encodeURIComponent(sourceUrl)>`へpermission queryを付けることを確認した。
+
+origin/cookieを分離したlive probeでは、app proxyが`file.notion.com`へHTTP 302を返し、redirectをCookieなしまたは
+`token_v2`だけで取得するとHTTP 403、`file_token`だけならHTTP 200かつ元bytes/SHA-256と一致した。実装はproxyへ
+認証headerを付け、redirect先がexact `file.notion.com`の場合だけpurpose-specific `file_token`を転送する。任意hostへ
+full Cookieや`token_v2`を転送せず、unsafe redirectは接続前に拒否する。18-tool compiled stdioで25-byte CSVの
+`auto` fallback upload → opaque handle downloadを実行し、transport、size、bytes、SHA-256がすべて一致した。
+
+workspace probeは`NOTION_MAX_WORKSPACE_RETRIES=0`で5件を明示切り替えし、3件でexact response、2件で
+`premium-feature-unavailable`を確認した。最終`list_workspaces`のexhausted flagはlive結果と全件一致し、
+利用可能な最後のworkspaceをcurrent/pinnedへ復元した。利用可能workspaceが残るため、新規作成は行っていない。
+constructorやrotation targetを先行してexhaustedにする旧挙動を削除し、実際にlimitを返したworkspaceだけを記録する。
+workspace-bound conversation/fileは自動rotationせず、新規chat/uploadを要求する。
+
+同じcompiled stdio processで20-byte CSVを`auto` uploadし、file-backed chatのexact marker、proxy downloadの
+byte/SHA-256一致、通常名`Claude Opus 4.5`を指定したcontinuationのexact markerまで連続成功した。
+最終検証は75/75 tests、TypeScript check、build、18-tool compiled stdio smoke、diff/EOF/credential scanを対象にした。

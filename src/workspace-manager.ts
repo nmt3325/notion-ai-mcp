@@ -43,7 +43,6 @@ export class WorkspaceManager {
     this.discoveryAttempts = Math.max(1, Math.floor(options.discoveryAttempts ?? 8));
     this.discoveryDelayMs = Math.max(0, Math.floor(options.discoveryDelayMs ?? 250));
     this.requestTimeoutMs = Math.max(1, Math.floor(options.requestTimeoutMs ?? 30_000));
-    if (account.spaceId) this.exhausted.add(account.spaceId);
   }
 
   private requestHeaders(spaceId = this.account.spaceId): Record<string, string> {
@@ -297,13 +296,13 @@ export class WorkspaceManager {
 
   async rotate(): Promise<boolean> {
     const workspaces = await this.discoverWorkspaces();
-    const fresh = workspaces.filter((workspace) => !this.exhausted.has(workspace.spaceId));
+    const fresh = workspaces.filter((workspace) =>
+      workspace.spaceId !== this.account.spaceId && !this.exhausted.has(workspace.spaceId)
+    );
     for (const workspace of fresh) {
-      this.exhausted.add(workspace.spaceId);
       if (await this.switchTo(workspace)) return true;
     }
     const created = await this.createWorkspace();
-    this.exhausted.add(created.spaceId);
     return this.switchTo(created);
   }
 
@@ -352,12 +351,14 @@ export class WorkspaceManager {
       ?? all.find((workspace) => workspace.spaceName.toLowerCase().includes(needle));
     if (!match) throw new Error(`Workspace ${selector} was not found for this account`);
     if (!(await this.switchTo(match))) throw new Error(`Workspace ${match.spaceName} could not be activated`);
+    this.exhausted.delete(match.spaceId);
     return match;
   }
 
   async createAndSwitchWorkspace(name?: string, options: { pin?: boolean } = {}): Promise<WorkspaceInfo> {
     const created = await this.createWorkspace(name);
     if (!(await this.switchTo(created))) throw new Error("The new workspace could not be activated");
+    this.exhausted.delete(created.spaceId);
     if (options.pin) this.pin(created.spaceId);
     return created;
   }

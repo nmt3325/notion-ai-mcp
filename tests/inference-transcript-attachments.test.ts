@@ -19,6 +19,7 @@ function config(root: string): NotionConfig {
     maxAttachmentBytes: 1024,
     account: {
       tokenV2: "test-token",
+      fullCookie: "token_v2=test-token; file_token=file-secret",
       userId: USER_ID,
       userName: "Test User",
       userEmail: "test@example.com",
@@ -60,7 +61,8 @@ test("automatic transcript fallback uploads, chats, continues, and downloads by 
   let uploadRequest: Record<string, unknown> | undefined;
   let firstInference: Record<string, unknown> | undefined;
   let secondInference: Record<string, unknown> | undefined;
-  let signedDownloadRequest: Record<string, unknown> | undefined;
+  let signedProxyRequest: Record<string, unknown> | undefined;
+  let fileDownloadCookie: string | null | undefined;
   let runCalls = 0;
   try {
     const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -104,9 +106,27 @@ test("automatic transcript fallback uploads, chats, continues, and downloads by 
         else secondInference = requestBody(init);
         return inference(runCalls === 1 ? "CSV received" : "Continued");
       }
-      if (endpoint === "getSignedFileUrls") {
-        signedDownloadRequest = requestBody(init);
-        return json({ signedUrls: ["https://download.example/file?signature=secret-download"] });
+      if (url.pathname.startsWith("/signed/")) {
+        const headers = new Headers(init?.headers);
+        signedProxyRequest = {
+          host: url.hostname,
+          sourceUrl: decodeURIComponent(url.pathname.slice("/signed/".length)),
+          method: init?.method,
+          hasCookie: Boolean(headers.get("cookie")),
+          table: url.searchParams.get("table"),
+          id: url.searchParams.get("id"),
+          spaceId: url.searchParams.get("spaceId"),
+          name: url.searchParams.get("name"),
+          download: url.searchParams.get("download"),
+          userId: url.searchParams.get("userId"),
+          cache: url.searchParams.get("cache"),
+          imgBuildSrc: url.searchParams.get("imgBuildSrc")
+        };
+        return new Response(null, { status: 302, headers: { location: "https://file.notion.com/f/signed-download" } });
+      }
+      if (url.hostname === "file.notion.com") {
+        fileDownloadCookie = new Headers(init?.headers).get("cookie");
+        return new Response(data, { status: 200, headers: { "content-type": "text/csv", "content-length": String(data.length) } });
       }
       return new Response("unexpected", { status: 500 });
     };
@@ -155,14 +175,67 @@ test("automatic transcript fallback uploads, chats, continues, and downloads by 
     assert.equal(downloaded.source, "inference_transcript");
     assert.equal(downloaded.base64, data.toString("base64"));
     assert.equal(downloaded.sha256, sha256);
-    assert.deepEqual(signedDownloadRequest, {
-      urls: [{
-        url: `${SPACE_ID}:server-object.csv`,
-        download: true,
-        downloadName: "table.csv",
-        permissionRecord: { table: "thread", id: first.conversationId, spaceId: SPACE_ID }
-      }]
+    assert.deepEqual(signedProxyRequest, {
+      host: "app.notion.com",
+      sourceUrl: `${SPACE_ID}:server-object.csv`,
+      method: "GET",
+      hasCookie: true,
+      table: "thread",
+      id: first.conversationId,
+      spaceId: SPACE_ID,
+      name: "table.csv",
+      download: "true",
+      userId: USER_ID,
+      cache: "v2",
+      imgBuildSrc: "getSignedFileProxyUrl"
     });
+    assert.equal(fileDownloadCookie, "file_token=file-secret");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test("transcript download rejects unsafe signed-proxy redirects before connecting", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-unsafe-proxy-"));
+  const data = Buffer.from("unsafe redirect probe");
+  let unsafeHostCalls = 0;
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "upload.example") return new Response(null, { status: 204 });
+      if (url.hostname === "10.0.0.1") {
+        unsafeHostCalls += 1;
+        return new Response(data);
+      }
+      const endpoint = url.pathname.split("/").at(-1);
+      if (endpoint === "getUploadFileUrlForAssistantChatTranscriptUpload") {
+        const pointer = requestBody(init).assistantChatTranscriptSessionPointer as Record<string, unknown>;
+        return json({
+          url: `${SPACE_ID}:unsafe-proxy.txt`,
+          signedGetUrl: "https://download.example/preview",
+          signedUploadPostUrl: "https://upload.example/post",
+          postHeaders: [],
+          fields: { key: "safe/object.txt" },
+          chatId: pointer.id
+        });
+      }
+      if (url.pathname.startsWith("/signed/")) {
+        return new Response(null, { status: 302, headers: { location: "https://10.0.0.1/private" } });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const client = new NotionClient(config(root), fakeFetch as typeof fetch);
+    const uploaded = await client.uploadAttachment({
+      base64: data.toString("base64"),
+      fileName: "unsafe-proxy.txt",
+      transport: "inference_transcript"
+    });
+    await assert.rejects(
+      () => client.downloadAttachment({ conversationId: uploaded.conversationId, fileId: uploaded.fileId, returnBase64: true }),
+      /unsafe host/
+    );
+    assert.equal(unsafeHostCalls, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

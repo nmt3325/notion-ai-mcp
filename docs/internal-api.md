@@ -23,6 +23,7 @@
 | thread file URL | POST | `/api/v3/getFileContentURLForAgentThread` | 同上 | threadId, fileId, metadata flag | signed URL + metadata |
 | assistant-transcript upload URL | POST | `/api/v3/getUploadFileUrlForAssistantChatTranscriptUpload` | 同上 | thread pointer, name, MIME, length, createThread | S3 POST descriptor + relative file URL + chatId |
 | file URL署名 | POST | `/api/v3/getSignedFileUrls` | 同上 | original URL, download flag/name, permissionRecord | ordered signed URL array |
+| assistant-transcript download proxy | GET | `https://app.notion.com/signed/<encoded-source-url>` | session Cookie | table, id, spaceId, name, download, userId, cache, imgBuildSrc | 200または302 |
 
 ベース URL は `https://www.notion.so/api/v3` を既定値にしている。ブラウザの
 `app.notion.com` サーフェスでは同一パスが `https://app.notion.com/api/v3` として観測された。
@@ -302,8 +303,11 @@ processingを使えない場合の公式fallback step:
 
 MCP実装は署名URL、S3 policy、security token、form fieldを永続化・出力しない。代わりにworkspace、
 thread、relative file URL、plain filename、MIME、size、SHA-256をin-memory opaque handleへ紐づける。
-handleのdownloadは`getSignedFileUrls`へ`download:true`と
-`permissionRecord:{table:"thread",id:threadId,spaceId}`を送り、size/SHA-256を再検証する。
+handleのdownloadはcurrent Web clientの`/signed/<encodeURIComponent(fileUrl)>` proxyへ
+`table:"thread"`, `id:threadId`, `spaceId`, `name`, `download:true`, `userId`, `cache:v2`,
+`imgBuildSrc:getSignedFileProxyUrl`を送る。proxy requestだけにsession Cookieを付け、302の`file.notion.com`
+redirectには`full_cookie`から抽出した`file_token`だけを付ける。他hostへNotion Cookieを転送しない。
+proxyとredirect URLの双方でHTTPS、userinfo、private/link-local/metadata hostを検証し、size/SHA-256を再検証する。
 workspace/thread/transport混在と再利用済みstepを拒否し、workspace switchまたはprocess restartでhandleを破棄する。
 
 ## `getInferenceTranscriptsForUser`

@@ -17,6 +17,7 @@ const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 const SEC_CH_UA = '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"';
 
 const NOTION_ORIGIN = ["https:", "", "www.notion.so"].join("/");
+const NOTION_FILE_PROXY_ORIGIN = ["https:", "", "app.notion.com"].join("/");
 
 type JsonObject = Record<string, unknown>;
 
@@ -131,6 +132,35 @@ function validateTranscriptFileUrl(value: unknown): string {
   try { if (new URL(raw).protocol === "https:") return raw; } catch { /* not an absolute URL */ }
   if (/^[A-Za-z0-9][A-Za-z0-9._:-]{1,2047}$/.test(raw) && raw.includes(":")) return raw;
   throw new Error("Transcript upload returned an invalid file URL");
+}
+
+function signedFileProxyUrl(
+  sourceUrl: string,
+  fileName: string,
+  permissionRecord: { table: string; id: string; spaceId: string },
+  currentUserId: string
+): string {
+  const query = new URLSearchParams({
+    table: permissionRecord.table,
+    id: permissionRecord.id,
+    spaceId: permissionRecord.spaceId,
+    name: fileName,
+    download: "true",
+    userId: currentUserId,
+    cache: "v2",
+    imgBuildSrc: "getSignedFileProxyUrl"
+  });
+  return `${NOTION_FILE_PROXY_ORIGIN}/signed/${encodeURIComponent(sourceUrl)}?${query.toString()}`;
+}
+
+function cookieValue(cookieHeader: string | undefined, name: string): string | undefined {
+  for (const segment of (cookieHeader ?? "").split(";")) {
+    const separator = segment.indexOf("=");
+    if (separator < 1 || segment.slice(0, separator).trim() !== name) continue;
+    const value = segment.slice(separator + 1).trim();
+    return value && !/[\r\n]/.test(value) ? value : undefined;
+  }
+  return undefined;
 }
 
 function validateTranscriptHeaders(value: unknown): Headers {
@@ -370,10 +400,17 @@ export class NotionClient {
       const message = error instanceof Error ? error.message : String(error);
       const isPremiumLimit = message.includes("premium feature unavailable") || message.includes("premium-feature-unavailable");
       const attempt = (options._retryCount ?? 0) + 1;
-      if (isPremiumLimit && this.workspaceManager && attempt <= maxRetries) {
-        await this.workspaceManager.handleLimitReached();
-        this.accountPromise = null;
-        return this.chat({ ...options, _retryCount: attempt });
+      if (isPremiumLimit && this.workspaceManager) {
+        this.workspaceManager.markCurrentExhausted();
+        const workspaceBound = Boolean(options.conversationId || options.fileIds?.some((id) => id.trim()));
+        if (workspaceBound) {
+          throw new Error("This conversation or attachment is workspace-bound; switch workspace, then start a new chat and upload again.");
+        }
+        if (attempt <= maxRetries) {
+          await this.workspaceManager.handleLimitReached();
+          this.accountPromise = null;
+          return this.chat({ ...options, _retryCount: attempt });
+        }
       }
       throw error;
     }
@@ -432,6 +469,38 @@ export class NotionClient {
   private async signedRequest(url: string, init: RequestInit, label: string): Promise<Response> {
     const parsed = new URL(validateSignedUrl(url, label));
     const response = await this.fetchImpl(parsed, { ...init, redirect: "error", signal: AbortSignal.timeout(this.config.requestTimeoutMs) });
+    if (!response.ok) {
+      const errorBody = (await response.text()).slice(0, 500);
+      throw new Error(`${label} returned HTTP ${response.status}: ${errorBody}`);
+    }
+    return response;
+  }
+
+  private async notionSignedProxyRequest(url: string, account: AccountContext, label: string): Promise<Response> {
+    const parsed = new URL(validateSignedUrl(url, label));
+    const headers = new Headers(this.headers(account, false));
+    headers.set("accept", "*/*");
+    headers.delete("content-type");
+    const response = await this.fetchImpl(parsed, {
+      method: "GET",
+      headers,
+      redirect: "manual",
+      signal: AbortSignal.timeout(this.config.requestTimeoutMs)
+    });
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location) throw new Error(`${label} redirect did not include a Location header`);
+      const redirectedUrl = new URL(location, parsed);
+      const redirectInit: RequestInit = { method: "GET" };
+      if (redirectedUrl.hostname.toLowerCase() === "file.notion.com") {
+        const fileToken = cookieValue(account.fullCookie, "file_token");
+        if (!fileToken) {
+          throw new Error(`${label} requires file_token in the account full_cookie or NOTION_FULL_COOKIE`);
+        }
+        redirectInit.headers = { cookie: `file_token=${fileToken}` };
+      }
+      return this.signedRequest(redirectedUrl.toString(), redirectInit, label);
+    }
     if (!response.ok) {
       const errorBody = (await response.text()).slice(0, 500);
       throw new Error(`${label} returned HTTP ${response.status}: ${errorBody}`);
@@ -627,18 +696,14 @@ export class NotionClient {
     if (transcriptUpload) {
       if (transcriptUpload.spaceId !== account.spaceId) throw new Error("Attachment handle belongs to another workspace");
       if (transcriptUpload.threadId !== conversationId) throw new Error("Attachment handle belongs to another conversation");
-      const descriptor = await this.fetchJson("getSignedFileUrls", {
-        urls: [{
-          url: transcriptUpload.fileUrl,
-          download: true,
-          downloadName: transcriptUpload.fileName,
-          permissionRecord: { table: "thread", id: transcriptUpload.threadId, spaceId: transcriptUpload.spaceId }
-        }]
-      });
-      const signedUrls = descriptor.signedUrls;
-      if (!Array.isArray(signedUrls) || signedUrls.length !== 1) throw new Error("getSignedFileUrls did not return exactly one signed URL");
-      const signedUrl = validateSignedUrl(signedUrls[0], "Transcript attachment download");
-      const response = await this.signedRequest(signedUrl, { method: "GET" }, "Transcript attachment download");
+      const permissionRecord = { table: "thread", id: transcriptUpload.threadId, spaceId: transcriptUpload.spaceId };
+      const proxyUrl = signedFileProxyUrl(
+        transcriptUpload.fileUrl,
+        transcriptUpload.fileName,
+        permissionRecord,
+        account.userId
+      );
+      const response = await this.notionSignedProxyRequest(proxyUrl, account, "Transcript attachment download");
       const data = await readResponseBuffer(response, maxBytes);
       if (data.byteLength !== transcriptUpload.sizeBytes) throw new Error("Downloaded transcript attachment size did not match the upload");
       const sha256 = createHash("sha256").update(data).digest("hex");
