@@ -382,6 +382,7 @@ message ID を100件ずつ取得する。表示対象は次だけである。
 | `saveTransactionsFanout` | `{ requestId, transactions: [...] }` | `workflow_module` の作成/更新/削除 |
 | `postWorkflowsMcpServerConnect` | `{ integrationId, spaceId, authHeaders, initiationContext, approvalIntent }` | 接続確定 |
 | `initiateMcpOAuth` | `{ serverUrl, spaceId, integrationId, workflowId?, selectedScopes?, initiationContext, callbackType, callbackOrigin, userProvidedOAuthClientId?, userProvidedOAuthClientSecret?, approvalIntent }` | OAuth開始URLを返す |
+| `getMcpOAuthFlowResult` | `{ flowId, spaceId }` | native OAuthの`pending` / `completed` / `failed`を返す |
 | `getPreconfiguredMcpServers` | `{ spaceId }` | Notion 標準の MCP カタログ（21 件） |
 
 `workflow_module` レコードの主要キー: `alive, created_by_id, created_by_table, created_time, data, id,
@@ -393,13 +394,29 @@ preferredTransport, runReadToolsAutomatically, runWriteToolsAutomatically, serve
 削除は `saveTransactionsFanout` で `args: { alive: false }`、更新は `path: ["data"]` と `path: []` の
 2 オペレーションを送ります。
 
-### OAuth scope・BYO app
+### OAuth native completion・scope・BYO app
 
-current Web UIは`initiateMcpOAuth`へnew integration IDを渡し、既存moduleがある場合だけ`initiationContext:"reconnect"`、それ以外は`"connect"`とする。scopeはdiscovery結果または空白区切りcustom inputを解決した配列で、BYO appでは`userProvidedOAuthClientId`と`userProvidedOAuthClientSecret`も同じrequestにだけ含める。
+current desktop clientは`initiateMcpOAuth`へnew OAuth integration ID、`callbackType:"nativeredirect"`、`callbackOrigin`、任意のworkflow/scope/BYO credentialを送る。browser authorizationは`/initiateExternalAuthenticationFromDesktop?redirectUri=<provider-url>`で包み、Notion login確認後にproviderへ遷移する。provider完了は`/mcp-oauth-complete`へ戻り、native scheme handoffと並行して`getMcpOAuthFlowResult({flowId,spaceId})`から`status:"completed"`と`connectionId`を回収できる。公式poll intervalは5秒、UI timeoutは3分。
 
-外部toolではscope配列をtrim・deduplicateし、明示的な空配列/空要素を拒否する。client ID/secretは片方だけの入力を拒否する。secretはregistry・module data・戻り値・ログへ保存せず、OAuth API responseも`authorizationUrl`、`completionFlowId`、`oauthFlowId`のallowlistだけを返す。`existingModuleId`でreconnectする前にcurrent workspaceのlive `mcpServer` recordとserver URL一致を検証する。
+外部toolのpending flowはcredential-freeなprocess-local mapで、最大100件・3分、active `spaceId` / `spaceViewId`、正規化済みserver URL、既存module、name/transport/tool policyへ束縛する。完了時のworkspace違い、期限切れ、未知・replayed・concurrent flowを拒否する。`failed`と期限切れはterminalとして消費し、`pending`はwriteを行わない。`workflowId`付きflowは開始できるが、CLI finalizerはPersonal Agent persistenceだけを実装しているためcompletionを拒否する。
 
-認証済みcompiled-stdio live試験ではAttioの`oauth_dcr` discovery（3 scopes）に対し2 scopesとsynthetic BYO credentialで開始し、Attio authorization URL、completion flow ID、OAuth flow IDを取得した。public client IDはauthorization requestへ反映され、client secretはoutputに存在せず、module/account/registryも不変だった。
+completionは`validateMcpConnection`へ通常のempty `authHeaders`とOAuth `connectionId`を渡してtoolsを取得する。新規接続では認可後にfresh `workflow_module` IDを発行する。これはcurrent clientがOAuth開始用integration IDとは別にmodule pointerを生成する挙動と一致する。factory-compatible module作成後、`postWorkflowsMcpServerConnect`へ次を渡し、current `space_view`へlinkする。
+
+```json
+{
+  "integrationId": "<new-workflow-module-id>",
+  "spaceId": "<active-space-id>",
+  "authHeaders": [{ "name": "__oauth_connection_id", "value": "<ephemeral-connection-id>" }],
+  "initiationContext": "connect",
+  "approvalIntent": "approve_on_connect"
+}
+```
+
+OAuth `connectionId`はcapabilityとしてAPI callsのみに使い、tool result、registry、module data、logsへ返却・保存しない。module作成後のconnect/link失敗ではdeactivate/unlinkする。既存module reconnectは開始時と完了時にworkspace・link・server URLを再検証し、full dataをspreadして未知fieldを保持する。connect前のmetadata updateが失敗した場合はwriteなし、connect失敗時は元dataへrollbackする。
+
+scope配列はtrim・deduplicateし、明示的な空配列/空要素を拒否する。client ID/secretは片方だけの入力を拒否し、secretは`initiateMcpOAuth` request以外へ保持しない。API responseは`authorizationUrl`、`completionFlowId`、`oauthFlowId`だけをallowlistし、生成したwrapper URLとexpiryを加えて返す。供給secretがallowlist値へechoされた場合も返却を停止する。
+
+認証済みlive試験ではAttio native flowのwrapperが`app.notion.com/initiateExternalAuthenticationFromDesktop`、providerが`app.attio.com`であることを確認し、provider認可なしのpollは`pending`だった。前後のmodule集合とaccount hashは同一でregistryも作成されなかった。全103 tests、TypeScript check、build、19-tool stdio smokeが成功した。
 
 ### Preconfigured MCP catalog
 

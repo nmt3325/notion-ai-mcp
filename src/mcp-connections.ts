@@ -401,6 +401,47 @@ function safeOAuthResponse(response: JsonObject, integrationId: string, clientSe
   return safe;
 }
 
+const OAUTH_FLOW_TTL_MS = 3 * 60 * 1_000;
+const OAUTH_POLL_INTERVAL_MS = 5_000;
+const MAX_PENDING_OAUTH_FLOWS = 100;
+const OAUTH_CONNECTION_HEADER = "__oauth_connection_id";
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function normalizePendingToolNames(value: string[] | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const name = item.trim();
+    if (!name) throw new Error("enabledToolNames cannot contain empty names");
+    if (name === MCP_NO_TOOLS_SENTINEL) throw new Error(`Unknown MCP tool name(s): ${name}`);
+    if (seen.has(name)) continue;
+    seen.add(name);
+    names.push(name);
+  }
+  return names;
+}
+
+function nativeOAuthBrowserUrl(authorizationUrl: string): string {
+  let target: URL;
+  try { target = new URL(authorizationUrl); }
+  catch { throw new Error("Notion returned an invalid OAuth authorization URL"); }
+  if (target.protocol !== "https:" && target.hostname !== "localhost" && target.hostname !== "127.0.0.1") {
+    throw new Error("OAuth authorization URL must use https (localhost is allowed for testing)");
+  }
+  const wrapper = new URL("https://app.notion.com/initiateExternalAuthenticationFromDesktop");
+  wrapper.searchParams.set("redirectUri", target.toString());
+  return wrapper.toString();
+}
+
+function oauthFailureMessage(value: unknown): string {
+  const raw = typeof value === "string" ? value : asString(object(value).message);
+  return (raw.trim() || "OAuth authorization failed").slice(0, 2_048);
+}
+
 /** Local mirror of the modules we created, so the tools keep working across restarts. */
 export class McpRegistry {
   private records: McpConnectionRecord[] = [];
@@ -458,14 +499,48 @@ export interface UpdateConnectionInput {
   runWriteToolsAutomatically?: boolean;
 }
 
-export interface StartOAuthOptions {
+export interface StartOAuthOptions extends McpToolSettings {
   selectedScopes?: string[];
   workflowId?: string;
   /** Supplying a verified current-workspace module enables reconnect context. */
   existingModuleId?: string;
+  /** Local display name used when the completed flow creates a Personal Agent module. */
+  connectionName?: string;
+  transport?: string;
+  approvalIntent?: McpApprovalIntent;
   /** BYO OAuth credentials are transient and are never persisted or returned. */
   userProvidedOAuthClientId?: string;
   userProvidedOAuthClientSecret?: string;
+}
+
+export interface CompleteOAuthOptions {
+  /** Override the display name captured when the flow started. */
+  connectionName?: string;
+  transport?: string;
+  /** null removes an existing reconnect filter; [] disables all discovered tools. */
+  enabledToolNames?: string[] | null;
+  runReadToolsAutomatically?: boolean;
+  runWriteToolsAutomatically?: boolean;
+  /** Bounded polling window. Zero performs one immediate status check. */
+  waitSeconds?: number;
+}
+
+interface PendingOAuthFlow {
+  oauthFlowId: string;
+  integrationId: string;
+  completionFlowId?: string;
+  serverUrl: string;
+  spaceId: string;
+  spaceViewId: string;
+  connectionName: string;
+  transport: McpTransport;
+  enabledToolNames?: string[];
+  runReadToolsAutomatically: boolean;
+  runWriteToolsAutomatically: boolean;
+  approvalIntent: McpApprovalIntent;
+  existingModuleId?: string;
+  workflowId?: string;
+  expiresAt: number;
 }
 
 export type PreconfiguredServerUrlConfig =
@@ -505,9 +580,18 @@ export interface ConnectPreconfiguredOptions extends PreconfiguredMcpSelection, 
 
 export class McpConnectionManager {
   private readonly registry: McpRegistry;
+  /** Credential-free, process-local flow bindings. They intentionally do not survive a restart. */
+  private readonly pendingOAuthFlows = new Map<string, PendingOAuthFlow>();
+  private readonly completingOAuthFlows = new Set<string>();
 
   constructor(private readonly api: McpApi, registryPath?: string) {
     this.registry = new McpRegistry(registryPath);
+  }
+
+  private prunePendingOAuthFlows(now = Date.now()): void {
+    for (const [flowId, flow] of this.pendingOAuthFlows) {
+      if (flow.expiresAt <= now) this.pendingOAuthFlows.delete(flowId);
+    }
   }
 
   private async context(): Promise<McpContext> {
@@ -523,11 +607,20 @@ export class McpConnectionManager {
     return this.api.post("checkMcpOAuthSupport", { serverUrl: normalizeServerUrl(serverUrl), spaceId });
   }
 
-  private async validateInContext(context: McpContext, serverUrl: string, auth?: McpAuth, approvalIntent: McpApprovalIntent = "approve_on_connect"): Promise<JsonObject> {
+  private async validateInContext(
+    context: McpContext,
+    serverUrl: string,
+    auth?: McpAuth,
+    approvalIntent: McpApprovalIntent = "approve_on_connect",
+    oauthConnectionId?: string
+  ): Promise<JsonObject> {
+    const connectionId = oauthConnectionId?.trim();
+    if (oauthConnectionId !== undefined && !connectionId) throw new Error("OAuth connectionId cannot be empty");
     const response = await this.api.post("validateMcpConnection", {
       serverUrl: normalizeServerUrl(serverUrl),
       spaceId: context.spaceId,
       authHeaders: buildAuthHeaderList(auth),
+      ...(connectionId ? { connectionId } : {}),
       approvalIntent
     });
     if (response.success === false) {
@@ -646,6 +739,23 @@ export class McpConnectionManager {
         id: randomUUID(),
         spaceId: context.spaceId,
         operations: [this.settingsOperation(context, settings, moduleId, linked)]
+      }]
+    };
+  }
+
+
+  private moduleDataTransaction(moduleId: string, spaceId: string, data: JsonObject): JsonObject {
+    return {
+      requestId: randomUUID(),
+      transactions: [{
+        id: randomUUID(),
+        spaceId,
+        operations: [{
+          pointer: { table: "workflow_module", id: moduleId, spaceId },
+          path: ["data"],
+          command: "set",
+          args: data
+        }]
       }]
     };
   }
@@ -990,8 +1100,11 @@ export class McpConnectionManager {
     const selectedScopes = normalizeOAuthScopes(resolved.selectedScopes);
     const workflowId = resolved.workflowId?.trim();
     const existingModuleId = resolved.existingModuleId?.trim();
+    const suppliedName = resolved.connectionName?.trim();
     if (resolved.workflowId !== undefined && !workflowId) throw new Error("workflowId cannot be empty");
     if (resolved.existingModuleId !== undefined && !existingModuleId) throw new Error("existingModuleId cannot be empty");
+    if (resolved.connectionName !== undefined && !suppliedName) throw new Error("connectionName cannot be empty");
+    if (suppliedName && suppliedName.length > 500) throw new Error("connectionName must not exceed 500 characters");
 
     const rawClientId = resolved.userProvidedOAuthClientId;
     const rawClientSecret = resolved.userProvidedOAuthClientSecret;
@@ -1003,6 +1116,11 @@ export class McpConnectionManager {
     if (rawClientSecret !== undefined && !rawClientSecret.trim()) throw new Error("userProvidedOAuthClientSecret cannot be empty");
 
     const context = await this.context();
+    let connectionName = suppliedName ?? new URL(normalizedServerUrl).hostname;
+    let transport = normalizeTransport(resolved.transport);
+    let runReadToolsAutomatically = resolved.runReadToolsAutomatically ?? true;
+    let runWriteToolsAutomatically = resolved.runWriteToolsAutomatically ?? false;
+    const enabledToolNames = normalizePendingToolNames(resolved.enabledToolNames);
     if (existingModuleId) {
       const moduleRecord = await this.loadSpaceRecord(context, "workflow_module", existingModuleId);
       const moduleData = object(moduleRecord.data);
@@ -1016,9 +1134,24 @@ export class McpConnectionManager {
       if (!currentServerUrl || normalizeServerUrl(currentServerUrl) !== normalizedServerUrl) {
         throw new Error("OAuth reconnect serverUrl must match the existing MCP module");
       }
+      const settings = await this.loadSpaceViewSettings(context);
+      const linked = linkedModules(settings).some((entry) => {
+        const pointer = object(object(entry).pointer);
+        return asString(pointer.table) === "workflow_module"
+          && asString(pointer.id) === existingModuleId
+          && asString(pointer.spaceId, context.spaceId) === context.spaceId;
+      });
+      if (!linked) throw new Error(`MCP connection ${existingModuleId} is not linked to the current Personal Agent`);
+      connectionName = suppliedName ?? asString(moduleData.name, asString(moduleData.officialName, existingModuleId));
+      transport = resolved.transport === undefined
+        ? normalizeTransport(asString(moduleData.preferredTransport, "streamableHttp"))
+        : normalizeTransport(resolved.transport);
+      runReadToolsAutomatically = resolved.runReadToolsAutomatically ?? moduleData.runReadToolsAutomatically !== false;
+      runWriteToolsAutomatically = resolved.runWriteToolsAutomatically ?? moduleData.runWriteToolsAutomatically === true;
     }
 
     const integrationId = randomUUID();
+    const approvalIntent = resolved.approvalIntent ?? "approve_on_connect";
     const response = await this.api.post("initiateMcpOAuth", {
       serverUrl: normalizedServerUrl,
       spaceId: context.spaceId,
@@ -1026,13 +1159,261 @@ export class McpConnectionManager {
       ...(workflowId ? { workflowId } : {}),
       ...(selectedScopes ? { selectedScopes } : {}),
       initiationContext: existingModuleId ? "reconnect" : "connect",
-      callbackType: "popup",
+      callbackType: "nativeredirect",
       callbackOrigin: ["https:", "", "app.notion.com"].join("/"),
       ...(clientId ? { userProvidedOAuthClientId: clientId } : {}),
       ...(rawClientSecret ? { userProvidedOAuthClientSecret: rawClientSecret } : {}),
-      approvalIntent: "approve_on_connect"
+      approvalIntent
     });
-    return safeOAuthResponse(response, integrationId, rawClientSecret);
+    const safe = safeOAuthResponse(response, integrationId, rawClientSecret);
+    const authorizationUrl = asString(safe.authorizationUrl);
+    const oauthFlowId = asString(safe.oauthFlowId);
+    if (!authorizationUrl || !oauthFlowId) {
+      throw new Error("Notion OAuth initiation did not return authorizationUrl and oauthFlowId");
+    }
+    const browserAuthorizationUrl = nativeOAuthBrowserUrl(authorizationUrl);
+    const expiresAt = Date.now() + OAUTH_FLOW_TTL_MS;
+    this.prunePendingOAuthFlows();
+    if (this.pendingOAuthFlows.has(oauthFlowId)) throw new Error("Notion returned a duplicate OAuth flow ID");
+    while (this.pendingOAuthFlows.size >= MAX_PENDING_OAUTH_FLOWS) {
+      const oldest = this.pendingOAuthFlows.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.pendingOAuthFlows.delete(oldest);
+    }
+    this.pendingOAuthFlows.set(oauthFlowId, {
+      oauthFlowId,
+      integrationId,
+      ...(asString(safe.completionFlowId) ? { completionFlowId: asString(safe.completionFlowId) } : {}),
+      serverUrl: normalizedServerUrl,
+      spaceId: context.spaceId,
+      spaceViewId: context.spaceViewId,
+      connectionName,
+      transport,
+      ...(enabledToolNames !== undefined ? { enabledToolNames } : {}),
+      runReadToolsAutomatically,
+      runWriteToolsAutomatically,
+      approvalIntent,
+      ...(existingModuleId ? { existingModuleId } : {}),
+      ...(workflowId ? { workflowId } : {}),
+      expiresAt
+    });
+    return { ...safe, browserAuthorizationUrl, expiresAt: new Date(expiresAt).toISOString() };
+  }
+
+  private async persistCompletedOAuth(
+    pending: PendingOAuthFlow,
+    connectionId: string,
+    context: McpContext,
+    options: CompleteOAuthOptions
+  ): Promise<JsonObject> {
+    if (pending.workflowId) {
+      throw new Error("CLI OAuth completion currently supports Personal Agent modules only; complete workflow-scoped OAuth in Notion");
+    }
+    const suppliedName = options.connectionName?.trim();
+    if (options.connectionName !== undefined && !suppliedName) throw new Error("connectionName cannot be empty");
+    if (suppliedName && suppliedName.length > 500) throw new Error("connectionName must not exceed 500 characters");
+    const name = suppliedName ?? pending.connectionName;
+    const transport = options.transport === undefined ? pending.transport : normalizeTransport(options.transport);
+    const requestedTools = options.enabledToolNames !== undefined
+      ? (options.enabledToolNames === null ? null : normalizePendingToolNames(options.enabledToolNames))
+      : pending.enabledToolNames;
+    const runReadToolsAutomatically = options.runReadToolsAutomatically ?? pending.runReadToolsAutomatically;
+    const runWriteToolsAutomatically = options.runWriteToolsAutomatically ?? pending.runWriteToolsAutomatically;
+    const validation = await this.validateInContext(
+      context,
+      pending.serverUrl,
+      undefined,
+      pending.approvalIntent,
+      connectionId
+    );
+    const toolList = Array.isArray(validation.tools) ? validation.tools as unknown[] : [];
+    const enabledToolNames = Array.isArray(requestedTools)
+      ? normalizeEnabledToolNames(requestedTools, toolNamesFrom(toolList))
+      : undefined;
+    const authHeaders: McpHeader[] = [{ name: OAUTH_CONNECTION_HEADER, value: connectionId }];
+
+    if (pending.existingModuleId) {
+      const moduleId = pending.existingModuleId;
+      const moduleRecord = await this.loadSpaceRecord(context, "workflow_module", moduleId);
+      const currentData = object(moduleRecord.data);
+      if (moduleRecord.alive !== true
+        || asString(moduleRecord.module_type) !== "mcpServer"
+        || asString(moduleRecord.space_id, context.spaceId) !== context.spaceId
+        || normalizeServerUrl(asString(currentData.serverUrl)) !== pending.serverUrl) {
+        throw new Error(`${moduleId} is no longer a matching live MCP module in the active workspace`);
+      }
+      const settings = await this.loadSpaceViewSettings(context);
+      if (!linkedModules(settings).some((entry) => linkedModuleId(entry) === moduleId)) {
+        throw new Error(`MCP connection ${moduleId} is no longer linked to the current Personal Agent`);
+      }
+      const data: JsonObject = {
+        ...currentData,
+        id: moduleId,
+        name,
+        serverUrl: pending.serverUrl,
+        preferredTransport: transport,
+        ...(toolList.length > 0 ? { tools: toolList } : {}),
+        ...(enabledToolNames !== undefined ? { enabledToolNames: persistedToolNames(enabledToolNames) } : {}),
+        runReadToolsAutomatically,
+        runWriteToolsAutomatically
+      };
+      if (requestedTools === null) delete data.enabledToolNames;
+      await this.api.post("saveTransactionsFanout", this.moduleDataTransaction(moduleId, context.spaceId, data));
+      try {
+        await this.api.post("postWorkflowsMcpServerConnect", {
+          integrationId: moduleId,
+          spaceId: context.spaceId,
+          authHeaders,
+          initiationContext: "reconnect",
+          approvalIntent: pending.approvalIntent
+        });
+      } catch (error) {
+        await this.api.post("saveTransactionsFanout", this.moduleDataTransaction(moduleId, context.spaceId, currentData)).catch(() => undefined);
+        throw error;
+      }
+      const existing = this.registry.get(moduleId);
+      const recordTools = toolNamesFrom(data.tools);
+      const storedEnabled = storedToolNames(data.enabledToolNames);
+      const record: McpConnectionRecord = {
+        id: moduleId,
+        name,
+        serverUrl: pending.serverUrl,
+        spaceId: context.spaceId,
+        spaceViewId: context.spaceViewId,
+        authType: "oauth",
+        transport,
+        toolNames: recordTools.length > 0 ? recordTools : [...(existing?.toolNames ?? [])],
+        ...(storedEnabled !== undefined ? { enabledToolNames: storedEnabled } : {}),
+        runReadToolsAutomatically,
+        runWriteToolsAutomatically,
+        createdAt: existing?.createdAt ?? asIsoTimestamp(moduleRecord.created_time) ?? new Date().toISOString()
+      };
+      this.registry.upsert(record);
+      return { status: "connected", reconnected: true, ...record };
+    }
+
+    // The current Notion client allocates the workflow_module only after OAuth succeeds.
+    // The initiation integration ID belongs to the OAuth flow and is not reused as the module ID.
+    const moduleId = randomUUID();
+    const input: AddConnectionInput = {
+      name,
+      serverUrl: pending.serverUrl,
+      auth: { type: "oauth" },
+      transport,
+      ...(enabledToolNames !== undefined ? { enabledToolNames } : {}),
+      runReadToolsAutomatically,
+      runWriteToolsAutomatically,
+      approvalIntent: pending.approvalIntent
+    };
+    await this.api.post("saveTransactionsFanout", this.buildCreateTransaction(moduleId, context, input, toolList));
+    try {
+      await this.api.post("postWorkflowsMcpServerConnect", {
+        integrationId: moduleId,
+        spaceId: context.spaceId,
+        authHeaders,
+        initiationContext: "connect",
+        approvalIntent: pending.approvalIntent
+      });
+      const settings = await this.loadSpaceViewSettings(context);
+      await this.api.post("saveTransactionsFanout", this.settingsTransaction(context, settings, moduleId, true));
+    } catch (error) {
+      await this.deactivateAndUnlink(moduleId, context).catch(() => undefined);
+      throw error;
+    }
+    const record: McpConnectionRecord = {
+      id: moduleId,
+      name,
+      serverUrl: pending.serverUrl,
+      spaceId: context.spaceId,
+      spaceViewId: context.spaceViewId,
+      authType: "oauth",
+      transport,
+      toolNames: toolNamesFrom(toolList),
+      ...(enabledToolNames !== undefined ? { enabledToolNames: [...enabledToolNames] } : {}),
+      runReadToolsAutomatically,
+      runWriteToolsAutomatically,
+      createdAt: new Date().toISOString()
+    };
+    try { this.registry.upsert(record); }
+    catch (error) {
+      await this.deactivateAndUnlink(moduleId, context).catch(() => undefined);
+      throw error;
+    }
+    return { status: "connected", reconnected: false, ...record };
+  }
+
+  async completeOAuth(oauthFlowId: string, options: CompleteOAuthOptions = {}): Promise<JsonObject> {
+    const flowId = oauthFlowId.trim();
+    if (!flowId) throw new Error("oauthFlowId is required");
+    const waitSeconds = options.waitSeconds ?? 0;
+    if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 60) {
+      throw new Error("waitSeconds must be an integer from 0 to 60");
+    }
+    this.prunePendingOAuthFlows();
+    const pending = this.pendingOAuthFlows.get(flowId);
+    if (!pending) throw new Error("OAuth flow is unknown or expired; restart OAuth in the same MCP server process");
+    if (pending.workflowId) {
+      throw new Error("CLI OAuth completion currently supports Personal Agent modules only; complete workflow-scoped OAuth in Notion");
+    }
+    if (this.completingOAuthFlows.has(flowId)) throw new Error("OAuth flow completion is already in progress");
+
+    // Claim the flow before awaiting context so simultaneous callers cannot both pass the guard.
+    this.completingOAuthFlows.add(flowId);
+    try {
+      const context = await this.context();
+      if (context.spaceId !== pending.spaceId || context.spaceViewId !== pending.spaceViewId) {
+        throw new Error("OAuth flow belongs to a different active workspace; switch back before completing it");
+      }
+      const deadline = Date.now() + waitSeconds * 1_000;
+      while (true) {
+        if (Date.now() >= pending.expiresAt) {
+          this.pendingOAuthFlows.delete(flowId);
+          throw new Error("OAuth flow expired; restart OAuth");
+        }
+        const response = await this.api.post("getMcpOAuthFlowResult", {
+          flowId,
+          spaceId: context.spaceId
+        });
+        const status = asString(response.status);
+        if (status === "pending") {
+          const now = Date.now();
+          if (now >= pending.expiresAt) {
+            this.pendingOAuthFlows.delete(flowId);
+            throw new Error("OAuth flow expired; restart OAuth");
+          }
+          if (now >= deadline) {
+            return {
+              status: "pending",
+              oauthFlowId: flowId,
+              retryAfterSeconds: OAUTH_POLL_INTERVAL_MS / 1_000,
+              expiresAt: new Date(pending.expiresAt).toISOString()
+            };
+          }
+          await sleep(Math.min(
+            OAUTH_POLL_INTERVAL_MS,
+            Math.max(1, deadline - now),
+            Math.max(1, pending.expiresAt - now)
+          ));
+          continue;
+        }
+        if (status === "failed") {
+          this.pendingOAuthFlows.delete(flowId);
+          throw new Error(`OAuth authorization failed: ${oauthFailureMessage(response.error)}`);
+        }
+        if (status !== "completed") {
+          throw new Error(`Unexpected OAuth flow status: ${status || "missing"}`);
+        }
+        const connectionId = asString(response.connectionId).trim();
+        if (!connectionId || connectionId.length > 8_192) {
+          throw new Error("Completed OAuth flow did not return a valid connectionId");
+        }
+        const connected = await this.persistCompletedOAuth(pending, connectionId, context, options);
+        this.pendingOAuthFlows.delete(flowId);
+        return connected;
+      }
+    } finally {
+      this.completingOAuthFlows.delete(flowId);
+    }
   }
 
   private async loadPreconfiguredCatalog(): Promise<PreconfiguredMcpServer[]> {
@@ -1063,6 +1444,12 @@ export class McpConnectionManager {
       }
       const selectedScopes = options.selectedScopes ?? (server.supportedOAuthScopes.length > 0 ? server.supportedOAuthScopes : undefined);
       const flow = await this.startOAuth(serverUrl, {
+        connectionName: server.name,
+        approvalIntent: server.mcpApprovalIntent ?? "approve_on_connect",
+        ...(options.transport !== undefined ? { transport: options.transport } : {}),
+        ...(options.enabledToolNames !== undefined ? { enabledToolNames: options.enabledToolNames } : {}),
+        ...(options.runReadToolsAutomatically !== undefined ? { runReadToolsAutomatically: options.runReadToolsAutomatically } : {}),
+        ...(options.runWriteToolsAutomatically !== undefined ? { runWriteToolsAutomatically: options.runWriteToolsAutomatically } : {}),
         ...(selectedScopes !== undefined ? { selectedScopes } : {}),
         ...(options.userProvidedOAuthClientId !== undefined ? { userProvidedOAuthClientId: options.userProvidedOAuthClientId } : {}),
         ...(options.userProvidedOAuthClientSecret !== undefined ? { userProvidedOAuthClientSecret: options.userProvidedOAuthClientSecret } : {})

@@ -270,21 +270,59 @@ export function createServer(client: NotionClient): McpServer {
 
   server.registerTool("start_mcp_oauth", {
     title: "Start MCP OAuth",
-    description: "Begin an MCP OAuth flow with optional scopes or transient BYO app credentials; secrets are never stored or returned.",
+    description: "Begin a process-bound native-redirect MCP OAuth flow; open browserAuthorizationUrl, then call complete_mcp_oauth. BYO secrets are never stored or returned.",
     inputSchema: {
       serverUrl: z.string().min(1),
+      connectionName: z.string().trim().min(1).max(500).optional(),
+      transport: z.string().min(1).optional(),
       selectedScopes: z.array(z.string().min(1).max(1_024)).max(100).optional(),
-      workflowId: z.string().uuid().optional(),
-      existingModuleId: z.string().uuid().optional().describe("Existing MCP module to reauthenticate; its server URL must match"),
+      workflowId: z.string().uuid().optional().describe("OAuth can be initiated for a workflow, but CLI completion currently supports Personal Agent modules only"),
+      existingModuleId: z.string().uuid().optional().describe("Existing linked MCP module to reauthenticate; its server URL must match"),
       userProvidedOAuthClientId: z.string().trim().min(1).max(2_048).optional(),
-      userProvidedOAuthClientSecret: z.string().min(1).max(8_192).optional()
+      userProvidedOAuthClientSecret: z.string().min(1).max(8_192).optional(),
+      enabledToolNames: z.array(z.string().min(1)).max(1_000).optional(),
+      runReadToolsAutomatically: z.boolean().optional(),
+      runWriteToolsAutomatically: z.boolean().optional()
     }
-  }, async ({ serverUrl, selectedScopes, workflowId, existingModuleId, userProvidedOAuthClientId, userProvidedOAuthClientSecret }) => result(await client.mcp().startOAuth(serverUrl, {
+  }, async ({
+    serverUrl, connectionName, transport, selectedScopes, workflowId, existingModuleId,
+    userProvidedOAuthClientId, userProvidedOAuthClientSecret, enabledToolNames,
+    runReadToolsAutomatically, runWriteToolsAutomatically
+  }) => result(await client.mcp().startOAuth(serverUrl, {
+    ...(connectionName ? { connectionName } : {}),
+    ...(transport ? { transport } : {}),
     ...(selectedScopes !== undefined ? { selectedScopes } : {}),
     ...(workflowId ? { workflowId } : {}),
     ...(existingModuleId ? { existingModuleId } : {}),
     ...(userProvidedOAuthClientId ? { userProvidedOAuthClientId } : {}),
-    ...(userProvidedOAuthClientSecret ? { userProvidedOAuthClientSecret } : {})
+    ...(userProvidedOAuthClientSecret ? { userProvidedOAuthClientSecret } : {}),
+    ...(enabledToolNames !== undefined ? { enabledToolNames } : {}),
+    ...(runReadToolsAutomatically !== undefined ? { runReadToolsAutomatically } : {}),
+    ...(runWriteToolsAutomatically !== undefined ? { runWriteToolsAutomatically } : {})
+  })));
+
+  server.registerTool("complete_mcp_oauth", {
+    title: "Complete MCP OAuth",
+    description: "Poll a native-redirect OAuth flow started by this process and, once authorized, create or reconnect the linked Personal Agent MCP module.",
+    inputSchema: {
+      oauthFlowId: z.string().min(1).max(2_048),
+      waitSeconds: z.number().int().min(0).max(60).optional(),
+      connectionName: z.string().trim().min(1).max(500).optional(),
+      transport: z.string().min(1).optional(),
+      enabledToolNames: z.array(z.string().min(1)).max(1_000).nullable().optional().describe("Exact tool names; [] disables all and null restores all during reconnect"),
+      runReadToolsAutomatically: z.boolean().optional(),
+      runWriteToolsAutomatically: z.boolean().optional()
+    }
+  }, async ({
+    oauthFlowId, waitSeconds, connectionName, transport, enabledToolNames,
+    runReadToolsAutomatically, runWriteToolsAutomatically
+  }) => result(await client.mcp().completeOAuth(oauthFlowId, {
+    ...(waitSeconds !== undefined ? { waitSeconds } : {}),
+    ...(connectionName ? { connectionName } : {}),
+    ...(transport ? { transport } : {}),
+    ...(enabledToolNames !== undefined ? { enabledToolNames } : {}),
+    ...(runReadToolsAutomatically !== undefined ? { runReadToolsAutomatically } : {}),
+    ...(runWriteToolsAutomatically !== undefined ? { runWriteToolsAutomatically } : {})
   })));
 
   server.registerTool("list_preconfigured_mcp_servers", {

@@ -8,6 +8,7 @@ import { createServer, toMcpAuth } from "../src/server.js";
 export const EXPECTED_TOOLS = [
   "add_mcp_connection",
   "check_mcp_oauth_support",
+  "complete_mcp_oauth",
   "connect_preconfigured_mcp_server",
   "create_workspace",
   "download_attachment",
