@@ -53,7 +53,11 @@ node dist/src/index.js
 ```
 
 `NOTION_SPACE_ID` と `NOTION_USER_ID` を省略すると、起動後の最初の tool call で
-`loadUserContent` を使って account/workspace を解決します。
+`loadUserContent` を使って account/workspace を解決します。自動検出は space レコードを
+参照できない pointer（退会済み・削除済み workspace など）を候補から除外し、
+`NOTION_PINNED_SPACE_ID`、次に AI 有効・有料 plan の順で選びます。
+`NOTION_SPACE_ID` だけを指定した場合、自動検出はその workspace を上書きせず、
+不足している `space_view_id` や表示名だけを補完します。
 
 `notion_manager` 互換の account JSON がある場合:
 
@@ -75,7 +79,7 @@ node dist/src/index.js
 |---|---:|---|
 | `NOTION_TOKEN_V2` | 条件付き | `NOTION_ACCOUNT_FILE` に `token_v2` がなければ必須 |
 | `NOTION_ACCOUNT_FILE` | 条件付き | `notion_manager` 互換 JSON。token をリポジトリ外に置くことを推奨 |
-| `NOTION_SPACE_ID` | 任意 | workspace UUID。未指定時は自動検出 |
+| `NOTION_SPACE_ID` | 任意 | workspace UUID。指定時は自動検出より優先。未指定時は自動検出 |
 | `NOTION_SPACE_VIEW_ID` | 任意 | workspace の `space_view` UUID |
 | `NOTION_PINNED_SPACE_ID` | 任意 | 起動時に復元する固定 workspace UUID |
 | `NOTION_USER_ID` | 任意 | user UUID。未指定時は自動検出 |

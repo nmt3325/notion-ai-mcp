@@ -336,3 +336,151 @@ test("workspace switching and creation stay active in the same client process", 
   assert.equal(localConfig.account.spaceId, spaceC);
   assert.equal((requests.find((request) => request.endpoint === "createSpace")?.body).planSelection, "personal");
 });
+
+const FIRST_SPACE = "90000000-0000-4000-8000-000000000001";
+const FIRST_VIEW = "91000000-0000-4000-8000-000000000001";
+const READABLE_SPACE = "90000000-0000-4000-8000-000000000002";
+const READABLE_VIEW = "91000000-0000-4000-8000-000000000002";
+const OTHER_SPACE = "90000000-0000-4000-8000-000000000003";
+const OTHER_VIEW = "91000000-0000-4000-8000-000000000003";
+const DISCOVERY_USER = "92000000-0000-4000-8000-000000000001";
+
+function discoveryFetch(
+  calls: string[] = [],
+  options: { firstSpaceRecord?: Record<string, unknown>; extraUsers?: Record<string, unknown> } = {}
+): typeof fetch {
+  const fakeFetch = async (input: string | URL | Request): Promise<Response> => {
+    const endpoint = String(input).split("/").at(-1) ?? "";
+    calls.push(endpoint);
+    if (endpoint !== "loadUserContent") return new Response("unexpected", { status: 500 });
+    return jsonResponse({
+      recordMap: {
+        notion_user: {
+          ...(options.extraUsers ?? {}),
+          [DISCOVERY_USER]: { value: { id: DISCOVERY_USER, name: "Discovered User", email: "discovered@example.com" } }
+        },
+        user_root: { [DISCOVERY_USER]: { value: { space_view_pointers: [
+          { id: FIRST_VIEW, table: "space_view", spaceId: FIRST_SPACE },
+          { id: READABLE_VIEW, table: "space_view", spaceId: READABLE_SPACE },
+          { id: OTHER_VIEW, table: "space_view", spaceId: OTHER_SPACE }
+        ] } } },
+        space: {
+          ...(options.firstSpaceRecord ? { [FIRST_SPACE]: { value: options.firstSpaceRecord } } : {}),
+          [READABLE_SPACE]: { value: { id: READABLE_SPACE, name: "Reachable", plan_type: "personal" } },
+          [OTHER_SPACE]: { value: { id: OTHER_SPACE, name: "Other", plan_type: "personal" } }
+        },
+        user_settings: { [DISCOVERY_USER]: { value: { settings: { time_zone: "Asia/Tokyo" } } } }
+      }
+    });
+  };
+  return fakeFetch as typeof fetch;
+}
+
+test("workspace discovery skips pointers whose space record is missing", async () => {
+  const client = new NotionClient({ ...config, account: { tokenV2: "secret-token" } }, discoveryFetch());
+  const current = await client.getCurrentWorkspace();
+  assert.equal(current.spaceId, READABLE_SPACE);
+  assert.equal(current.spaceViewId, READABLE_VIEW);
+  assert.equal(current.spaceName, "Reachable");
+  assert.equal(current.userEmail, "discovered@example.com");
+});
+
+test("workspace discovery skips pointers whose space is deleted", async () => {
+  const client = new NotionClient(
+    { ...config, account: { tokenV2: "secret-token" } },
+    discoveryFetch([], { firstSpaceRecord: { id: FIRST_SPACE, name: "Trashed", plan_type: "personal", deleted: true } })
+  );
+  assert.equal((await client.getCurrentWorkspace()).spaceId, READABLE_SPACE);
+});
+
+test("workspace discovery keeps the first pointer when its space is readable", async () => {
+  const client = new NotionClient(
+    { ...config, account: { tokenV2: "secret-token" } },
+    discoveryFetch([], { firstSpaceRecord: { id: FIRST_SPACE, name: "First", plan_type: "personal" } })
+  );
+  const current = await client.getCurrentWorkspace();
+  assert.equal(current.spaceId, FIRST_SPACE);
+  assert.equal(current.spaceViewId, FIRST_VIEW);
+});
+
+test("an explicitly configured space id is never replaced by discovery", async () => {
+  const client = new NotionClient({ ...config, account: { tokenV2: "secret-token", spaceId: OTHER_SPACE } }, discoveryFetch());
+  const current = await client.getCurrentWorkspace();
+  assert.equal(current.spaceId, OTHER_SPACE);
+  assert.equal(current.spaceViewId, OTHER_VIEW);
+  assert.equal(current.spaceName, "Other");
+});
+
+test("a pinned space id wins over discovery ranking", async () => {
+  const client = new NotionClient({ ...config, account: { tokenV2: "secret-token", pinnedSpaceId: OTHER_SPACE } }, discoveryFetch());
+  assert.equal((await client.getCurrentWorkspace()).spaceId, OTHER_SPACE);
+});
+
+test("display names are backfilled when only ids are configured", async () => {
+  const calls: string[] = [];
+  const client = new NotionClient(
+    { ...config, account: { tokenV2: "secret-token", userId: DISCOVERY_USER, spaceId: READABLE_SPACE, spaceViewId: READABLE_VIEW } },
+    discoveryFetch(calls)
+  );
+  const current = await client.getCurrentWorkspace();
+  assert.equal(current.spaceName, "Reachable");
+  assert.equal(current.userEmail, "discovered@example.com");
+  assert.equal(calls.filter((endpoint) => endpoint === "loadUserContent").length, 1);
+});
+
+test("discovery picks the notion_user that owns the user_root", async () => {
+  const bot = "92000000-0000-4000-8000-0000000000bb";
+  const client = new NotionClient(
+    { ...config, account: { tokenV2: "secret-token" } },
+    discoveryFetch([], { extraUsers: { [bot]: { value: { id: bot, name: "Bot" } } } })
+  );
+  const current = await client.getCurrentWorkspace();
+  assert.equal(current.spaceId, READABLE_SPACE);
+  assert.equal(current.userEmail, "discovered@example.com");
+});
+
+test("a fully configured account never calls discovery", async () => {
+  const calls: string[] = [];
+  const client = new NotionClient({ ...config, account: { ...account } }, discoveryFetch(calls));
+  assert.equal((await client.getCurrentWorkspace()).spaceId, account.spaceId);
+  assert.equal(calls.length, 0);
+});
+
+test("pagination reports the end of the list when the last page fills the limit exactly", async () => {
+  const transcript = (id: string) => ({ id, title: `Thread ${id}`, type: "workflow", created_at: 1, updated_at: 2 });
+  const requestedCursors: Array<string | undefined> = [];
+  const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const endpoint = String(input).split("/").at(-1) ?? "";
+    if (endpoint !== "getInferenceTranscriptsForUser") return new Response("unexpected", { status: 500 });
+    const body = JSON.parse(String(init?.body ?? "{}")) as { cursor?: string };
+    requestedCursors.push(body.cursor);
+    if (!body.cursor) return jsonResponse({ transcripts: [transcript("a"), transcript("b")], hasMore: true, nextCursor: "page-2", recordMap: { thread: {} } });
+    if (body.cursor === "page-2") return jsonResponse({ transcripts: [transcript("c"), transcript("d")], hasMore: false, nextCursor: null, recordMap: { thread: {} } });
+    return new Response("unexpected cursor", { status: 500 });
+  };
+  const client = new NotionClient({ ...config, account: { ...account } }, fakeFetch as typeof fetch);
+  const listed = await client.listConversations({ limit: 4 });
+  assert.deepEqual(listed.conversations.map((item) => item.id), ["a", "b", "c", "d"]);
+  assert.equal(listed.hasMore, false);
+  assert.equal(listed.nextCursor, null);
+  assert.deepEqual(requestedCursors, [undefined, "page-2"]);
+});
+
+test("pagination still resumes mid-page when more results remain", async () => {
+  const transcript = (id: string) => ({ id, title: `Thread ${id}`, type: "workflow", created_at: 1, updated_at: 2 });
+  const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const endpoint = String(input).split("/").at(-1) ?? "";
+    if (endpoint !== "getInferenceTranscriptsForUser") return new Response("unexpected", { status: 500 });
+    const body = JSON.parse(String(init?.body ?? "{}")) as { cursor?: string };
+    if (!body.cursor) return jsonResponse({ transcripts: [transcript("a"), transcript("b"), transcript("c")], hasMore: true, nextCursor: "page-2", recordMap: { thread: {} } });
+    return jsonResponse({ transcripts: [transcript("d")], hasMore: false, nextCursor: null, recordMap: { thread: {} } });
+  };
+  const client = new NotionClient({ ...config, account: { ...account } }, fakeFetch as typeof fetch);
+  const first = await client.listConversations({ limit: 2 });
+  assert.equal(first.hasMore, true);
+  assert.ok(first.nextCursor);
+  const second = await client.listConversations({ limit: 2, cursor: first.nextCursor ?? undefined });
+  assert.deepEqual(second.conversations.map((item) => item.id), ["c", "d"]);
+  assert.equal(second.hasMore, false);
+  assert.equal(second.nextCursor, null);
+});
