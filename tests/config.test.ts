@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { loadConfig } from "../src/config.js";
 
@@ -31,6 +34,34 @@ test("loadConfig rejects invalid workspace retry counts", () => {
     for (const value of ["-1", "1.5", "NaN", String(Number.MAX_SAFE_INTEGER + 1)]) {
       process.env.NOTION_MAX_WORKSPACE_RETRIES = value;
       assert.throws(() => loadConfig(), /non-negative safe integer/);
+    }
+  });
+});
+
+test("loadConfig tolerates an account file that has not been created yet", () => {
+  withCleanConfigEnvironment(() => {
+    const dir = mkdtempSync(join(tmpdir(), "notion-account-"));
+    try {
+      const path = join(dir, "account.json");
+      process.env.NOTION_ACCOUNT_FILE = path;
+      const config = loadConfig();
+      assert.equal(config.accountFilePath, path);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("loadConfig still rejects an account file it cannot parse", () => {
+  withCleanConfigEnvironment(() => {
+    const dir = mkdtempSync(join(tmpdir(), "notion-account-"));
+    try {
+      const path = join(dir, "account.json");
+      writeFileSync(path, "{ not json");
+      process.env.NOTION_ACCOUNT_FILE = path;
+      assert.throws(() => loadConfig(), /Cannot read NOTION_ACCOUNT_FILE/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
