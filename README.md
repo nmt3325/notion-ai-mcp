@@ -78,7 +78,7 @@ node dist/src/index.js
 | 変数 | 必須 | 説明 |
 |---|---:|---|
 | `NOTION_TOKEN_V2` | 条件付き | `NOTION_ACCOUNT_FILE` に `token_v2` がなければ必須 |
-| `NOTION_ACCOUNT_FILE` | 条件付き | `notion_manager` 互換 JSON。token をリポジトリ外に置くことを推奨 |
+| `NOTION_ACCOUNT_FILE` | 条件付き | `notion_manager` 互換 JSON。token をリポジトリ外に置くことを推奨。未作成のパスを指定してもよく、`switch_workspace`(pin) 実行時に 0600 で作成される |
 | `NOTION_SPACE_ID` | 任意 | workspace UUID。指定時は自動検出より優先。未指定時は自動検出 |
 | `NOTION_SPACE_VIEW_ID` | 任意 | workspace の `space_view` UUID |
 | `NOTION_PINNED_SPACE_ID` | 任意 | 起動時に復元する固定 workspace UUID |
@@ -240,7 +240,7 @@ Agent Service file chatは安全のため`policies.approval_mode="ask"`を明示
 
 ### `list_conversations`
 
-`limit`, `cursor`, `maxPages` を受け取ります。返却された `cursor` は不透明値として次回へそのまま
+`limit`, `cursor`, `maxPages` を受け取ります。返却された `cursor` は不透明値として次回へそのまま 本ツールが発行していないカーソル (`mcpv1.` 以外や壊れた値) はエラーになります。
 渡してください。
 
 ### `get_conversation`

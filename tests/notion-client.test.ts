@@ -266,7 +266,7 @@ test("premium limits do not rotate workspace-bound conversations", async () => {
   const first = await client.chat({ prompt: "Start" });
   await assert.rejects(
     () => client.chat({ prompt: "Continue", conversationId: first.conversationId }),
-    /workspace-bound; switch workspace, then start a new chat and upload again/
+    /AI credit limit reached in the current workspace and this conversation or attachment is workspace-bound; switch workspace, then start a new chat and upload again/
   );
   assert.equal(inferenceCalls, 2);
   assert.equal(workspaceDiscoveryCalls, 0);
@@ -483,4 +483,20 @@ test("pagination still resumes mid-page when more results remain", async () => {
   assert.deepEqual(second.conversations.map((item) => item.id), ["c", "d"]);
   assert.equal(second.hasMore, false);
   assert.equal(second.nextCursor, null);
+});
+
+test("list_conversations rejects a cursor it never issued", async () => {
+  const fakeFetch = async (): Promise<Response> => {
+    throw new Error("fetch must not run for an invalid cursor");
+  };
+  const client = new NotionClient({ ...config, account: { ...account } }, fakeFetch as unknown as typeof fetch);
+  await assert.rejects(client.listConversations({ limit: 2, cursor: "not-a-cursor" }), /Invalid list_conversations cursor/);
+});
+
+test("list_conversations rejects a corrupted cursor payload", async () => {
+  const fakeFetch = async (): Promise<Response> => {
+    throw new Error("fetch must not run for an invalid cursor");
+  };
+  const client = new NotionClient({ ...config, account: { ...account } }, fakeFetch as unknown as typeof fetch);
+  await assert.rejects(client.listConversations({ limit: 2, cursor: "mcpv1.bm90LWpzb24" }), /Invalid list_conversations cursor/);
 });

@@ -310,7 +310,7 @@ function buildConfigValue(model: string, webSearch: boolean, workspaceSearch: bo
 
 interface ConversationCursor { notionCursor?: string; offset: number }
 
-function decodeConversationCursor(cursor?: string): ConversationCursor { if (!cursor) return { offset: 0 }; if (!cursor.startsWith("mcpv1.")) return { notionCursor: cursor, offset: 0 }; try { const value = object(JSON.parse(Buffer.from(cursor.slice(6), "base64url").toString("utf8"))); const offset = typeof value.offset === "number" && Number.isInteger(value.offset) && value.offset >= 0 ? value.offset : 0; const notionCursor = asString(value.notionCursor); return notionCursor ? { notionCursor, offset } : { offset }; } catch { throw new Error("Invalid list_conversations cursor"); } }
+function decodeConversationCursor(cursor?: string): ConversationCursor { if (!cursor) return { offset: 0 }; if (!cursor.startsWith("mcpv1.")) throw new Error("Invalid list_conversations cursor; pass the nextCursor returned by a previous list_conversations call"); try { const value = object(JSON.parse(Buffer.from(cursor.slice(6), "base64url").toString("utf8"))); const offset = typeof value.offset === "number" && Number.isInteger(value.offset) && value.offset >= 0 ? value.offset : 0; const notionCursor = asString(value.notionCursor); return notionCursor ? { notionCursor, offset } : { offset }; } catch { throw new Error("Invalid list_conversations cursor"); } }
 
 function encodeConversationCursor(value: ConversationCursor): string { return `mcpv1.${Buffer.from(JSON.stringify(value)).toString("base64url")}`; }
 
@@ -430,7 +430,7 @@ export class NotionClient {
         this.workspaceManager.markCurrentExhausted();
         const workspaceBound = Boolean(options.conversationId || options.fileIds?.some((id) => id.trim()));
         if (workspaceBound) {
-          throw new Error("This conversation or attachment is workspace-bound; switch workspace, then start a new chat and upload again.");
+          throw new Error("AI credit limit reached in the current workspace and this conversation or attachment is workspace-bound; switch workspace, then start a new chat and upload again.");
         }
         if (attempt <= maxRetries) {
           await this.workspaceManager.handleLimitReached();
