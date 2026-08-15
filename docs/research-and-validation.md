@@ -367,3 +367,41 @@ Notion AI 本体から本 server を呼んだ場合、`gpt-5.6-sol` / `effort: m
 - `npm run check` 0 error、`npm test` 143/143 pass（`tests/chat-jobs.test.ts` 6件と server 側 4件を新規追加）。
 - `npm run build` 成功、`node scripts/stdio-command-smoke.mjs` で 22 tools（`get_chat_result` / `list_chat_jobs` を含む）を確認。
 - `wait()` は timer を `unref` するため、budget 切れを検証する test では ref 付き `setInterval` で event loop を保つ必要があった。
+
+## Resuming a conversation after the stream is gone (2026-08-15)
+
+Re-testing the 60 s timeout work against a live workspace exposed two defects behind the same
+symptom, `Notion AI returned an empty response`.
+
+**1. A rebuilt session replayed invented step ids.** `rehydrateSession` minted fresh UUIDs for the
+`config` and `context` steps while setting `turnCount >= 1`, so the follow-up turn was sent as
+`isPartialTranscript: true` against steps Notion had never stored. Notion accepted the request,
+streamed only bookkeeping events (`agent-instruction-state`, `record-map`), and produced no answer
+text. The real ids are recoverable: `thread.messages` lists every step id in order, and
+`syncRecordValuesMain` returns each `thread_message` with its `step` payload, including the stored
+`{"model": "orange-mousse", "reasoningEffort": "max", "modelFromUser": true}` on the `config` step.
+`recoverThreadSteps` now reads them, so a resumed turn replays the original `config` and `context`
+ids plus every `updated-config` id, inherits the model and effort recorded on the thread when the
+caller names neither, and fails with an explicit `cannot be resumed` message when Notion no longer
+exposes those steps. A session whose first turn never finished in this process (answer collected
+from the thread after a client timeout) is re-synced the same way, instead of asking Notion to
+create a thread that already exists.
+
+**2. The empty-response error hid a credit wall.** All seven spaces on the test account report
+`settings.disable_ai_feature: false`, so no per-space AI flag distinguishes a workspace that can
+answer from one that cannot. The real blocker is per-space credit exhaustion, streamed as
+`{"type": "premium-feature-unavailable", "featureAvailability": {"limit": {"current": 76, "total": 75}}}`.
+`parseInferenceLines` already converts that into `AI credit limit reached: 76/75`, and `chat()`
+rotates to another workspace, but any other text-less stream fell back to a message with no
+diagnostics. The error now names the workspace, counts the stream events that did arrive, and
+points at the likely cause (credits, or a rejected resumed transcript).
+
+Live verification with a personal account, one workspace holding credits and one exhausted:
+
+| Check | Result |
+| --- | --- |
+| First turn in a workspace with credits | `completed`, answer `2です！` |
+| Resume from a new process with an empty state file | `completed`, `rehydrated: true`, answer `4です！` |
+| Thread after the resumed turn | 4 messages (user, assistant, user, assistant) in the same thread |
+| Chat pinned to an exhausted workspace, `NOTION_MAX_WORKSPACE_RETRIES=0` | `Notion AI premium feature unavailable (AI credit limit reached: 120/75)` |
+| `list_workspaces` after the refusal | the exhausted space is flagged |
