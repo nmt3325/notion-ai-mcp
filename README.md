@@ -1,13 +1,14 @@
 # Notion AI MCP Server
 
 Notion AI の非公式な内部 API を MCP サーバーとしてラップする、個人検証用の TypeScript 実装です。
-stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次の 19 ツールを利用できます。
+stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次の 20 ツールを利用できます。
 
 **チャット / 履歴**
 
 - `notion_ai_chat`: Notion AI にプロンプトを送信し、NDJSON/SSE ストリームを集約して返す（モデル指定・添付対応）
 - `list_conversations`: Notion AI の workflow/chat thread をページング取得する
 - `get_conversation`: 指定 thread の user-visible な user/assistant メッセージを取得する
+- `rename_conversation`: active workspace内のthreadを検証してタイトル変更する
 - `upload_attachment` / `download_attachment`: Agent Serviceまたはassistant-transcript transportでファイルを安全にupload/downloadする
 
 **ワークスペース**
@@ -156,7 +157,7 @@ export NOTION_MCP_REMOTE_CALL_READ=1
 npm run smoke:http:remote
 ```
 
-remote smokeは、未認証requestが401になること、TLS越しのMCP initialize、19-tool listing、任意の
+remote smokeは、未認証requestが401になること、TLS越しのMCP initialize、20-tool listing、任意の
 `get_current_workspace` read callを検証します。Bearer tokenやworkspace responseは出力しません。
 
 最小のCaddy例:
@@ -243,10 +244,9 @@ Agent Service file chatは安全のため`policies.approval_mode="ask"`を明示
 `limit`, `cursor`, `maxPages` を受け取ります。返却された `cursor` は不透明値として次回へそのまま 本ツールが発行していないカーソル (`mcpv1.` 以外や壊れた値) はエラーになります。
 渡してください。
 
-### `get_conversation`
+### `get_conversation` / `rename_conversation`
 
-`conversationId` と任意の `maxPages` を受け取ります。hidden thinking、tool call、config/context などの
-運用レコードは返しません。
+`get_conversation` は `conversationId` と任意の `maxPages` を受け取り、hidden thinking、tool call、config/contextなどの運用レコードを返しません。`rename_conversation` は同じworkspace内でthreadの存在を確認後、1行・500 UTF-8 bytes以内の`title`へ変更します。
 
 ### Workspace tools
 
@@ -289,7 +289,7 @@ NOTION_ACCOUNT_FILE=/absolute/path/account.json NOTION_SMOKE_CHAT=1 npm run smok
 | `fast` / `default` | `almond-croissant-low`（Sonnet 4.6 Low） |
 | `standard` / `balanced` | `almond-croissant-high`（Sonnet 4.6 High） |
 | `thinking` / `reasoning` / `deep` | `oatmeal-cookie`（GPT 5.2） |
-| `GPT 5.2` / `gpt-5.4-high` | `oatmeal-cookie` / `oval-kumquat-high` |
+| `GPT 5.2` / `gpt-5.4` / `gpt-5.4-high` | `oatmeal-cookie` / `oval-kumquat-medium` / `oval-kumquat-high` |
 | `Claude Opus 4.5` | `apple-danish` |
 | `Gemini 3.5 Flash` | `vertex-gemini-3.5-flash` |
 | `Grok 4.5` | `strawberry-whoopiepie` |

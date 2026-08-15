@@ -300,11 +300,12 @@ function buildConfigValue(model: string, webSearch: boolean, workspaceSearch: bo
   const integrations = webSearch || workspaceSearch;
   return {
     ...UI_CONFIG_DEFAULTS,
-    modelFromUser: !subsequent,
+    model,
+    modelFromUser: true,
     useWebSearch: webSearch,
     useReadOnlyMode: readOnly,
     ...(integrations ? { searchScopes: [{ type: "everything" }] } : {}),
-    ...(subsequent ? { model, isThreadStartedByAdmin: true } : {})
+    ...(subsequent ? { isThreadStartedByAdmin: true } : {})
   };
 }
 
@@ -379,6 +380,32 @@ export class NotionClient {
   private async fetchThreadMessages(messageIds: string[]): Promise<Record<string, unknown>> { const account = await this.account(); const records: Record<string, unknown> = {}; for (let i = 0; i < messageIds.length; i += 100) { const batch = messageIds.slice(i, i + 100); const resp = await this.fetchJson("syncRecordValuesMain", { requests: batch.map((id) => ({ pointer: { table: "thread_message", id, spaceId: account.spaceId }, version: -1 })) }); Object.assign(records, object(object(resp.recordMap).thread_message)); } return records; }
 
   async getConversation(threadId: string, maxPages = 20): Promise<Conversation> { const found = await this.findThread(threadId, Math.min(Math.max(maxPages, 1), 100)); const messageIds = arrayOfStrings(found.thread.messages); const records = await this.fetchThreadMessages(messageIds); const t = found.transcript ?? {}; return { id: threadId, title: asString(t.title) || asString(object(found.thread.data).title) || "Untitled", type: asString(t.type) || asString(found.thread.type, "workflow"), createdAt: asNumber(t.created_at) ?? asNumber(found.thread.created_time), updatedAt: asNumber(t.updated_at) ?? asNumber(found.thread.updated_time), messages: parseConversationMessages(messageIds, records) }; }
+
+  async renameConversation(threadId: string, title: string, maxPages = 20): Promise<{ conversationId: string; previousTitle: string; title: string; changed: boolean }> {
+    const nextTitle = title.trim();
+    if (!nextTitle || Buffer.byteLength(nextTitle, "utf8") > 500 || /[\0\r\n]/.test(nextTitle)) {
+      throw new Error("Conversation title must be one line and at most 500 UTF-8 bytes");
+    }
+    const found = await this.findThread(threadId, Math.min(Math.max(maxPages, 1), 100));
+    const previousTitle = asString(found.transcript?.title) || asString(object(found.thread.data).title) || "Untitled";
+    if (previousTitle === nextTitle) return { conversationId: threadId, previousTitle, title: nextTitle, changed: false };
+    const account = await this.account();
+    await this.fetchJson("saveTransactionsFanout", {
+      requestId: randomUUID(),
+      transactions: [{
+        id: randomUUID(),
+        spaceId: account.spaceId,
+        debug: { userAction: "renameThread" },
+        operations: [{
+          pointer: { table: "thread", id: threadId, spaceId: account.spaceId },
+          path: ["data"],
+          command: "update",
+          args: { title: nextTitle }
+        }]
+      }]
+    });
+    return { conversationId: threadId, previousTitle, title: nextTitle, changed: true };
+  }
 
   private buildContext(account: AccountContext, datetime: string, hasAttachments = false): JsonObject { return { timezone: account.timezone, userName: account.userName, userId: account.userId, userEmail: account.userEmail, spaceName: account.spaceName, spaceId: account.spaceId, spaceViewId: account.spaceViewId, currentDatetime: datetime, surface: hasAttachments ? "workflows" : "ai_module" }; }
 
