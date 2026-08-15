@@ -585,3 +585,88 @@ test("chat rejects an effort the selected model does not expose", async () => {
   );
   assert.equal(calls, 0);
 });
+
+test("a resumed conversation replays the config and context ids stored on the thread", async () => {
+  const threadId = "77777777-7777-4777-8777-777777777777";
+  const configStepId = "aaaaaaa1-0000-4000-8000-000000000001";
+  const contextStepId = "aaaaaaa1-0000-4000-8000-000000000002";
+  const userStepId = "aaaaaaa1-0000-4000-8000-000000000003";
+  const updatedConfigStepId = "aaaaaaa1-0000-4000-8000-000000000004";
+  let inferenceBody: Record<string, unknown> | undefined;
+  const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const endpoint = String(input).split("/").at(-1) ?? "";
+    if (endpoint === "getInferenceTranscriptsForUser") return jsonResponse({
+      transcripts: [{ id: threadId, title: "Earlier chat" }],
+      hasMore: false,
+      recordMap: { thread: { [threadId]: { value: { value: {
+        id: threadId, created_time: 1_700_000_000_000,
+        messages: [configStepId, contextStepId, userStepId, updatedConfigStepId]
+      } } } } }
+    });
+    if (endpoint === "syncRecordValuesMain") return jsonResponse({ recordMap: { thread_message: {
+      [configStepId]: { value: { value: { step: { id: configStepId, type: "config", value: { model: "orange-mousse", reasoningEffort: "max" } } } } },
+      [contextStepId]: { value: { value: { step: { id: contextStepId, type: "context", value: {} } } } },
+      [userStepId]: { value: { value: { step: { id: userStepId, type: "user", value: [["Earlier question"]] } } } },
+      [updatedConfigStepId]: { value: { value: { step: { id: updatedConfigStepId, type: "updated-config" } } } }
+    } } });
+    if (endpoint === "runInferenceTranscript") {
+      inferenceBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return ndjsonResponse([{ type: "agent-inference", value: [{ type: "text", content: "Resumed answer" }] }]);
+    }
+    return new Response("unexpected", { status: 500 });
+  };
+  const client = new NotionClient(config, fakeFetch as typeof fetch);
+  const resumed = await client.chat({ prompt: "Continue", conversationId: threadId });
+  assert.equal(resumed.text, "Resumed answer");
+  assert.equal(resumed.model, "orange-mousse");
+  assert.equal(resumed.reasoningEffort, "max");
+  const transcript = (inferenceBody?.transcript ?? []) as Array<Record<string, unknown>>;
+  assert.equal(inferenceBody?.isPartialTranscript, true);
+  assert.equal(inferenceBody?.threadId, threadId);
+  assert.equal(transcript[0]?.id, configStepId);
+  assert.equal(transcript[0]?.type, "config");
+  assert.equal(transcript[1]?.id, contextStepId);
+  assert.equal(transcript[1]?.type, "context");
+  assert.deepEqual(
+    transcript.filter((step) => step.type === "updated-config").map((step) => step.id),
+    [updatedConfigStepId]
+  );
+});
+
+test("resuming a thread whose config steps are gone refuses instead of sending an invalid transcript", async () => {
+  const threadId = "88888888-8888-4888-8888-888888888888";
+  const userStepId = "bbbbbbb1-0000-4000-8000-000000000001";
+  let inferenceCalls = 0;
+  const fakeFetch = async (input: string | URL | Request): Promise<Response> => {
+    const endpoint = String(input).split("/").at(-1) ?? "";
+    if (endpoint === "getInferenceTranscriptsForUser") return jsonResponse({
+      transcripts: [{ id: threadId, title: "Broken" }],
+      hasMore: false,
+      recordMap: { thread: { [threadId]: { value: { value: { id: threadId, messages: [userStepId] } } } } }
+    });
+    if (endpoint === "syncRecordValuesMain") return jsonResponse({ recordMap: { thread_message: {
+      [userStepId]: { value: { value: { step: { id: userStepId, type: "user", value: [["Only question"]] } } } }
+    } } });
+    if (endpoint === "runInferenceTranscript") { inferenceCalls += 1; return ndjsonResponse([]); }
+    return new Response("unexpected", { status: 500 });
+  };
+  const client = new NotionClient(config, fakeFetch as typeof fetch);
+  await assert.rejects(() => client.chat({ prompt: "Continue", conversationId: threadId }), /cannot be resumed/);
+  assert.equal(inferenceCalls, 0);
+});
+
+test("a text-less stream reports the workspace and stream events instead of an empty response", async () => {
+  const fakeFetch = async (): Promise<Response> => ndjsonResponse([
+    { type: "agent-instruction-state" },
+    { type: "record-map", recordMap: {} }
+  ]);
+  const client = new NotionClient(config, fakeFetch as typeof fetch);
+  await assert.rejects(() => client.chat({ prompt: "Hello" }), (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    assert.match(message, /streamed no answer text/);
+    assert.match(message, new RegExp(account.spaceId));
+    assert.match(message, /record-map=1/);
+    assert.match(message, /AI credits/);
+    return true;
+  });
+});
