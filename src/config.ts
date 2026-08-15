@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { AccountContext } from "./types.js";
+import { defaultStateFilePath } from "./chat-jobs.js";
 
 export interface NotionConfig {
   apiBase: string;
@@ -12,6 +13,12 @@ export interface NotionConfig {
   mcpRegistryPath?: string | undefined;
   attachmentRoot?: string | undefined;
   maxAttachmentBytes?: number | undefined;
+  /** Resume cache for background chat jobs and chat sessions. Undefined disables persistence. */
+  stateFilePath?: string | undefined;
+  /** How long notion_ai_chat waits inline before it hands back a pending job (MCP clients abandon a call after ~60s). */
+  chatWaitMs?: number | undefined;
+  /** Allow rebuilding a chat session for a conversation this process never started. */
+  allowSessionRehydrate?: boolean | undefined;
 }
 
 function optional(name: string, fallback = ""): string {
@@ -47,6 +54,12 @@ export function loadConfig(): NotionConfig {
   if (!Number.isSafeInteger(maxRetries) || maxRetries < 0) {
     throw new Error("NOTION_MAX_WORKSPACE_RETRIES must be a non-negative safe integer");
   }
+  const chatWaitMs = Number(optional("NOTION_CHAT_WAIT_MS", "45000"));
+  // 60s is the point where MCP clients give up, so the inline wait has to stay below it.
+  if (!Number.isSafeInteger(chatWaitMs) || chatWaitMs < 1000 || chatWaitMs > 55000) throw new Error("NOTION_CHAT_WAIT_MS must be a safe integer between 1000 and 55000");
+  const stateFile = optional("NOTION_STATE_FILE", defaultStateFilePath());
+  const persistState = !["off", "none", "0", "false", "disabled"].includes(stateFile.toLowerCase());
+  const rehydrate = optional("NOTION_SESSION_REHYDRATE", "1").toLowerCase();
   const maxAttachmentBytes = Number(optional("NOTION_MAX_ATTACHMENT_BYTES", String(20 * 1024 * 1024)));
   if (!Number.isSafeInteger(maxAttachmentBytes) || maxAttachmentBytes <= 0) throw new Error("NOTION_MAX_ATTACHMENT_BYTES must be a positive safe integer");
   return {
@@ -58,6 +71,9 @@ export function loadConfig(): NotionConfig {
     attachmentRoot: optional("NOTION_ATTACHMENT_ROOT", process.cwd()),
     maxAttachmentBytes,
     maxWorkspaceRetries: maxRetries,
+    chatWaitMs,
+    allowSessionRehydrate: !["0", "false", "off", "no"].includes(rehydrate),
+    ...(persistState && stateFile ? { stateFilePath: stateFile } : {}),
     account: {
       tokenV2,
       userId: optional("NOTION_USER_ID", fileString(file, "user_id")),
