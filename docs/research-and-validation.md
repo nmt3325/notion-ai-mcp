@@ -336,3 +336,30 @@ reconnect completionはOAuth capabilityをvalidationへ渡す前と、validation
 alive/type/workspace/server URLとPersonal Agent linkage（table/id/spaceId）を再検証する。開始後にunlinkされたtargetは
 capability validation前に拒否し、validation中にserver identityが変化したtargetも永続化前に拒否する。追加5回帰を
 含む全114 tests、TypeScript check、build、19-tool compiled stdio smoke、diff/EOF scanを検証対象とした。
+
+## 2026-08-15 モデル指定・thread rename・reasoningEffortのlive検証
+
+認証済みdisposable Linux environment（Playwright付き）で、MCP呼び出しと永続レコード、
+そしてNotionのUI表示まで確認した。
+
+- **model指定**: `config` stepに`model`を入れるだけではthreadに沏定されず、UIの選択が`自動`のままだった。
+  `modelFromUser:true`を付与し、継続ターンでもsessionのmodelを再送するよう修正した。liveで`gpt-5.4`が
+  `oval-kumquat-medium`として保存され、UIのmodelボタンが「GPT-5.4」になることを確認した。
+- **thread rename**: 既存にはrename機能がなかったので`rename_conversation`を追加した。
+  `saveTransactionsFanout`へ`{pointer:{table:"thread",id,spaceId}, path:["data"], command:"update", args:{title}}`を送る。
+  workspace/userの所有権を確認してから更新し、liveでは新タイトルを確認後に元のタイトルへ戻した。
+- **reasoningEffort**: bundle chunk `63803`のmodel registryから`modelConfiguration.supportedReasoningEfforts`と
+  `defaultReasoningEffort`を採取し、7 literal・24 modelの対応とalias正規化を実装した。liveでは
+  `gpt-5.4` + `high`が成功し、継続ターンも同じeffortを引き継ぎ、`gpt-5.4` + `low`は送信前に拒否した。
+  永続レコードは`{model:"oval-kumquat-medium", modelFromUser:true, reasoningEffort:"high"}`で、
+  UIに「推論レベルを変更（現在高い）」と「GPT-5.4」が表示された。
+- **workspace作成**: `saveTransactionsFanout`は`Space view not found`（HTTP 400）を返す。現行Webと同じ
+  `saveTransactionsMain`へ変更し、`loadUserContent`が返さない`space` recordを`syncRecordValuesMain`でhydrateし、
+  `role`が`editor`/`owner`のprojectionを受理し、`getInferenceTranscriptsForUser`のactivation probeを成功条件に加えた。
+  `createSpace`とtransactionは引き続きretryしない。
+- **attachment**: `createAgentServiceFileUploadURL`はHTTP 500で現行bundleからも消えていたため、明示的な
+  `agent_service`もassistant-transcriptへfallbackする。legacy downloadはNotionが返す`attachment:<uuid>:<name>`
+  URIを受理し、`file.notion.so` / `file.notion.com`へは`file_token`だけを送るようにした（以前はHTTP 403）。
+
+全135 tests、TypeScript check、build、compiled stdio smoke（20 tools）が成功した。cookie、`token_v2`、`file_token`、
+account JSONはdisposable environment内のmode 0600 fileだけに保持し、repositoryへは保存していない。
