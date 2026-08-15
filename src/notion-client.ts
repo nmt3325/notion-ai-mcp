@@ -777,7 +777,7 @@ export class NotionClient {
         sizeBytes: prepared.sizeBytes
       });
     } catch (error) {
-      if (requestedTransport !== "auto" || options.conversationId || !canFallbackToTranscriptUpload(error)) throw error;
+      if (options.conversationId || !canFallbackToTranscriptUpload(error)) throw error;
       return this.uploadInferenceTranscriptAttachment(account, prepared);
     }
     const upload = object(created.upload);
@@ -909,11 +909,14 @@ export class NotionClient {
       const legacy = options.legacy;
       if (!legacy) throw new Error("Legacy download input was missing");
       const sourceUrl = legacy.url.trim();
-      let sourceUrlAllowed = sourceUrl.length <= 8_192 && !/[\r\n]/.test(sourceUrl) && sourceUrl.startsWith("/") && !sourceUrl.startsWith("//");
-      if (!sourceUrlAllowed && sourceUrl.length <= 8_192 && !/[\r\n]/.test(sourceUrl)) {
-        try { sourceUrlAllowed = new URL(sourceUrl).protocol === "https:"; } catch { sourceUrlAllowed = false; }
+      const safeLength = sourceUrl.length <= 8_192 && !/[\0\r\n]/.test(sourceUrl);
+      const rootRelative = safeLength && sourceUrl.startsWith("/") && !sourceUrl.startsWith("//");
+      const notionAttachment = safeLength && /^attachment:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:[^/\\]{1,2048}$/i.test(sourceUrl);
+      let https = false;
+      if (safeLength) {
+        try { https = new URL(sourceUrl).protocol === "https:"; } catch { https = false; }
       }
-      if (!sourceUrlAllowed) throw new Error("Legacy attachment URL must be HTTPS or a root-relative Notion URL");
+      if (!rootRelative && !notionAttachment && !https) throw new Error("Legacy attachment URL must be HTTPS, root-relative, or a Notion attachment: URI");
 
       const fileName = legacy.fileName.trim();
       if (!fileName || Buffer.byteLength(fileName, "utf8") > 255 || fileName === "." || fileName === ".." || fileName.includes("/") || fileName.includes("\\") || /[\0\r\n]/.test(fileName)) {
@@ -946,7 +949,21 @@ export class NotionClient {
       }
       const signedUrl = asString(signedUrls[0]).trim();
       if (!signedUrl) throw new Error("getSignedFileUrls returned an invalid signed URL");
-      const response = await this.signedRequest(signedUrl, { method: "GET" }, "Legacy attachment download");
+      const signedDownloadUrl = new URL(validateSignedUrl(signedUrl, "Legacy attachment download"));
+      const signedHost = signedDownloadUrl.hostname.toLowerCase();
+      let downloadHeaders: HeadersInit | undefined;
+      if (signedHost === "file.notion.so" || signedHost === "file.notion.com") {
+        const fileToken = cookieValue(account.fullCookie, "file_token");
+        if (!fileToken) {
+          throw new Error("Legacy attachment download requires file_token in the account full_cookie or NOTION_FULL_COOKIE");
+        }
+        downloadHeaders = { cookie: `file_token=${fileToken}` };
+      }
+      const response = await this.signedRequest(
+        signedDownloadUrl.toString(),
+        { method: "GET", ...(downloadHeaders ? { headers: downloadHeaders } : {}) },
+        "Legacy attachment download"
+      );
       const data = await readResponseBuffer(response, maxBytes);
       const sha256 = createHash("sha256").update(data).digest("hex");
       const mediaType = requestedMimeType || response.headers.get("content-type")?.split(";", 1)[0]?.trim() || "application/octet-stream";
