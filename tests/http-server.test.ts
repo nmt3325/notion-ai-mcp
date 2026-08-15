@@ -16,6 +16,19 @@ function fakeClient(): NotionClient {
       model: "mock-model",
       usage: { inputTokens: 1, outputTokens: 2 }
     }),
+    chatWithWait: async () => ({
+      status: "completed",
+      jobId: "job-1",
+      conversationId: "11111111-1111-4111-8111-111111111111",
+      text: "Remote mock answer",
+      model: "mock-model",
+      usage: { inputTokens: 1, outputTokens: 2 }
+    }),
+    startChat: async () => ({ status: "running", jobId: "job-1", conversationId: "11111111-1111-4111-8111-111111111111", model: "mock-model", startedAt: 1, hint: "Collect it with get_chat_result." }),
+    chatResult: async () => ({ status: "completed", source: "job", conversationId: "11111111-1111-4111-8111-111111111111", text: "Remote mock answer", startedAt: 1, elapsedMs: 2 }),
+    listChatJobs: () => [],
+    chatStatePath: () => null,
+    chatStateError: () => null,
     listConversations: async () => ({ conversations: [], nextCursor: null, hasMore: false }),
     renameConversation: async (id: string, title: string) => ({ conversationId: id, previousTitle: "Remote mock", title, changed: true }),
     getConversation: async (id: string) => ({
@@ -77,9 +90,11 @@ test("Streamable HTTP server requires bearer auth and executes MCP tools", async
       "connect_preconfigured_mcp_server",
       "create_workspace",
       "download_attachment",
+      "get_chat_result",
       "get_conversation",
       "get_current_workspace",
       "get_mcp_connection_status",
+      "list_chat_jobs",
       "list_conversations",
       "list_mcp_connections",
       "list_preconfigured_mcp_servers",

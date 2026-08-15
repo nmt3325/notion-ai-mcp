@@ -12,9 +12,11 @@ export const EXPECTED_TOOLS = [
   "connect_preconfigured_mcp_server",
   "create_workspace",
   "download_attachment",
+  "get_chat_result",
   "get_conversation",
   "get_current_workspace",
   "get_mcp_connection_status",
+  "list_chat_jobs",
   "list_conversations",
   "list_mcp_connections",
   "list_preconfigured_mcp_servers",
@@ -28,16 +30,37 @@ export const EXPECTED_TOOLS = [
   "upload_attachment"
 ];
 
-function fakeClient(): { client: NotionClient; chatCalls: Array<Record<string, unknown>>; added: Array<Record<string, unknown>>; uploaded: Array<Record<string, unknown>>; downloaded: Array<Record<string, unknown>> } {
+function fakeClient(): { client: NotionClient; chatCalls: Array<Record<string, unknown>>; added: Array<Record<string, unknown>>; uploaded: Array<Record<string, unknown>>; downloaded: Array<Record<string, unknown>>; lookups: Array<Record<string, unknown>>; waits: Array<number | undefined> } {
   const chatCalls: Array<Record<string, unknown>> = [];
   const added: Array<Record<string, unknown>> = [];
   const uploaded: Array<Record<string, unknown>> = [];
   const downloaded: Array<Record<string, unknown>> = [];
+  const lookups: Array<Record<string, unknown>> = [];
+  const waits: Array<number | undefined> = [];
   const client = {
     chat: async (options: Record<string, unknown>) => {
       chatCalls.push(options);
       return { conversationId: "11111111-1111-4111-8111-111111111111", text: "Mock answer", model: "mock-model", usage: { inputTokens: 1, outputTokens: 2 } };
     },
+    startChat: async (options: Record<string, unknown>) => {
+      chatCalls.push(options);
+      return { status: "running", jobId: "job-1", conversationId: "11111111-1111-4111-8111-111111111111", model: "mock-model", startedAt: 1, hint: "Collect it with get_chat_result." };
+    },
+    chatWithWait: async (options: Record<string, unknown>, waitMs?: number) => {
+      chatCalls.push(options);
+      waits.push(waitMs);
+      return { status: "completed", jobId: "job-1", conversationId: "11111111-1111-4111-8111-111111111111", text: "Mock answer", model: "mock-model", usage: { inputTokens: 1, outputTokens: 2 } };
+    },
+    chatResult: async (options: Record<string, unknown>) => {
+      lookups.push(options);
+      return { status: "completed", source: "thread", conversationId: "11111111-1111-4111-8111-111111111111", text: "Recovered answer", startedAt: 1, elapsedMs: 2 };
+    },
+    listChatJobs: (options: Record<string, unknown>) => {
+      lookups.push(options);
+      return [{ jobId: "job-1", conversationId: "11111111-1111-4111-8111-111111111111", status: "running", model: "mock-model", prompt: "Hello", turn: 1, transport: "inference_transcript", startedAt: 1 }];
+    },
+    chatStatePath: () => "/tmp/notion-ai-mcp-state.json",
+    chatStateError: () => null,
     listConversations: async () => ({ conversations: [], nextCursor: null, hasMore: false }),
     getConversation: async (id: string) => ({ id, title: "Mock", type: "workflow", createdAt: null, updatedAt: null, messages: [] }),
     renameConversation: async (id: string, title: string) => ({ conversationId: id, previousTitle: "Mock", title, changed: true }),
@@ -65,7 +88,7 @@ function fakeClient(): { client: NotionClient; chatCalls: Array<Record<string, u
       connectPreconfigured: async () => ({ id: "preconfigured-1", connected: true })
     })
   } as unknown as NotionClient;
-  return { client, chatCalls, added, uploaded, downloaded };
+  return { client, chatCalls, added, uploaded, downloaded, lookups, waits };
 }
 
 async function connect(client: NotionClient): Promise<{ mcpClient: Client; close: () => Promise<void> }> {
@@ -147,4 +170,61 @@ test("toMcpAuth rejects incomplete credentials", () => {
   assert.deepEqual(toMcpAuth({ type: "bearer", token: " b " }), { type: "bearer", token: "b" });
   assert.deepEqual(toMcpAuth({ type: "token", token: " t " }), { type: "token", token: "t" });
   assert.equal(toMcpAuth(undefined), undefined);
+});
+
+test("notion_ai_chat keeps the client under the 60s limit and hands back a pending job", async () => {
+  const conversationId = "22222222-2222-4222-8222-222222222222";
+  const client = {
+    chatWithWait: async () => ({
+      status: "pending", jobId: "job-slow", conversationId, model: "mock-model", startedAt: 1, elapsedMs: 45_000,
+      hint: "Still generating after 45s. Nothing is lost: call get_chat_result with jobId job-slow."
+    })
+  } as unknown as NotionClient;
+  const { mcpClient, close } = await connect(client);
+  try {
+    const response = await mcpClient.callTool({ name: "notion_ai_chat", arguments: { prompt: "Slow question", waitSeconds: 45 } });
+    assert.equal(response.isError, undefined);
+    const structured = response.structuredContent as { status: string; jobId: string; conversationId: string };
+    assert.equal(structured.status, "pending");
+    assert.equal(structured.jobId, "job-slow");
+    assert.equal(structured.conversationId, conversationId);
+    assert.match(Array.isArray(response.content) && response.content[0]?.type === "text" ? response.content[0].text : "", /get_chat_result/);
+  } finally { await close(); }
+});
+
+test("notion_ai_chat background mode returns the conversation ID without waiting", async () => {
+  const { client, chatCalls, waits } = fakeClient();
+  const { mcpClient, close } = await connect(client);
+  try {
+    const response = await mcpClient.callTool({ name: "notion_ai_chat", arguments: { prompt: "Hello", background: true } });
+    const structured = response.structuredContent as { status: string; jobId: string };
+    assert.equal(structured.status, "running");
+    assert.equal(structured.jobId, "job-1");
+    assert.equal(chatCalls.length, 1);
+    assert.equal(waits.length, 0);
+  } finally { await close(); }
+});
+
+test("notion_ai_chat forwards waitSeconds as milliseconds", async () => {
+  const { client, waits } = fakeClient();
+  const { mcpClient, close } = await connect(client);
+  try {
+    await mcpClient.callTool({ name: "notion_ai_chat", arguments: { prompt: "Hello", waitSeconds: 30 } });
+    assert.deepEqual(waits, [30_000]);
+  } finally { await close(); }
+});
+
+test("get_chat_result and list_chat_jobs recover answers after a timed out call", async () => {
+  const { client, lookups } = fakeClient();
+  const { mcpClient, close } = await connect(client);
+  try {
+    const recovered = await mcpClient.callTool({ name: "get_chat_result", arguments: { jobId: "job-1", waitSeconds: 5 } });
+    assert.equal(Array.isArray(recovered.content) && recovered.content[0]?.type === "text" ? recovered.content[0].text : "", "Recovered answer");
+    assert.deepEqual(lookups[0], { jobId: "job-1", waitMs: 5000 });
+    const jobs = await mcpClient.callTool({ name: "list_chat_jobs", arguments: { status: "running" } });
+    const structured = jobs.structuredContent as { jobs: Array<{ jobId: string }>; statePath: string };
+    assert.equal(structured.jobs[0]?.jobId, "job-1");
+    assert.equal(structured.statePath, "/tmp/notion-ai-mcp-state.json");
+    assert.deepEqual(lookups[1], { status: "running", limit: 20 });
+  } finally { await close(); }
 });

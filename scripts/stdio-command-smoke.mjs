@@ -21,10 +21,10 @@ try {
   await client.connect(transport);
   const response = await client.listTools();
   const names = response.tools.map((tool) => tool.name).sort();
-  for (const required of ["notion_ai_chat", "upload_attachment", "download_attachment", "add_mcp_connection", "remove_mcp_connection", "start_mcp_oauth", "complete_mcp_oauth", "rename_conversation"]) {
+  for (const required of ["notion_ai_chat", "upload_attachment", "download_attachment", "add_mcp_connection", "remove_mcp_connection", "start_mcp_oauth", "complete_mcp_oauth", "rename_conversation", "get_chat_result", "list_chat_jobs"]) {
     assert.ok(names.includes(required), `missing required tool: ${required}`);
   }
-  assert.equal(names.length, 20, `expected 20 tools, got ${names.length}`);
+  assert.equal(names.length, 22, `expected 22 tools, got ${names.length}`);
   process.stdout.write(`${JSON.stringify({ started: true, transport: "stdio", toolCount: names.length, tools: names }, null, 2)}\n`);
 } finally {
   await client.close().catch(() => undefined);
