@@ -241,26 +241,30 @@ test("transcript download rejects unsafe signed-proxy redirects before connectin
   }
 });
 
-test("explicit Agent Service mode does not silently fall back", async () => {
-  const root = await mkdtemp(join(tmpdir(), "notion-ai-no-fallback-"));
+test("explicit Agent Service mode falls back when Notion has retired the endpoint", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-explicit-fallback-"));
   const endpoints: string[] = [];
   try {
-    const fakeFetch = async (input: string | URL | Request): Promise<Response> => {
-      const endpoint = urlOf(input).pathname.split("/").at(-1) ?? "";
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "upload.example") return new Response(null, { status: 204 });
+      const endpoint = url.pathname.split("/").at(-1) ?? "";
       endpoints.push(endpoint);
-      return json({ message: "unsupported" }, 500);
+      if (endpoint === "createAgentServiceFileUploadURL") return json({ message: "unsupported" }, 500);
+      if (endpoint === "getUploadFileUrlForAssistantChatTranscriptUpload") {
+        const pointer = requestBody(init).assistantChatTranscriptSessionPointer as Record<string, unknown>;
+        return json({ url: `${SPACE_ID}:fallback.txt`, signedGetUrl: "https://download.example/preview", signedUploadPostUrl: "https://upload.example/post", postHeaders: [], fields: { key: "safe/fallback.txt" }, chatId: pointer.id });
+      }
+      return new Response("unexpected", { status: 500 });
     };
     const client = new NotionClient(config(root), fakeFetch as typeof fetch);
-    await assert.rejects(
-      () => client.uploadAttachment({ base64: "YQ==", fileName: "a.txt", transport: "agent_service" }),
-      /createAgentServiceFileUploadURL returned HTTP 500/
-    );
-    assert.deepEqual(endpoints, ["createAgentServiceFileUploadURL"]);
+    const uploaded = await client.uploadAttachment({ base64: "YQ==", fileName: "a.txt", transport: "agent_service" });
+    assert.equal(uploaded.transport, "inference_transcript");
+    assert.deepEqual(endpoints, ["createAgentServiceFileUploadURL", "getUploadFileUrlForAssistantChatTranscriptUpload"]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
-
 test("transcript upload rejects malformed signed descriptors before storage", async () => {
   const root = await mkdtemp(join(tmpdir(), "notion-ai-invalid-transcript-upload-"));
   const scenarios: Array<{ name: string; patch: Record<string, unknown>; pattern: RegExp }> = [

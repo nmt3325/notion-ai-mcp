@@ -319,7 +319,7 @@ thread か分かるエラーを返します。添付 handle は復元対象で�
   `space` record が存在する workspace だけを返します。
 - `switch_workspace`: IDまたは名前で選択し、AI probe成功後にだけ切り替えます。`pin:true` なら
   account JSONにも永続化します。
-- `create_workspace`: `/createSpace` を1回だけ呼び、公式の3-operation transactionをcommitします。
+- `create_workspace`: `/createSpace` を1回だけ呼び、現行Webと同じ`saveTransactionsMain`の3-operation transactionをcommitします。
   `user_root.space_views` と `space_view_pointers` に生成IDがそれぞれちょうど1件あり、さらに
   `syncRecordValuesMain` で完全な `space_view` recordを確認できた場合だけ成功とします。
 
@@ -501,7 +501,7 @@ Personal Agent moduleには`workflowId`がないため、`get_mcp_connection_sta
 3. chat 後は `download_attachment` に `conversationId` と `fileId` を渡して再取得できる。
 
 `upload_attachment.transport`は`auto`（省略時）、`agent_service`、`inference_transcript`を選べます。
-`auto`はAgent Serviceを優先し、既知の400/404/500/501 generation failureだけをassistant-transcriptへfallbackします。
+`auto`はAgent Serviceを試し、既知の400/404/500/501 generation failureではassistant-transcriptへfallbackします。現行Web bundleからAgent Service upload APIが消えているため、新規uploadで明示した`agent_service`も同じfallbackを行います。
 戻り値の`transport`で実際の経路を確認でき、fallback時は同時に返る`conversationId`をchat/downloadへ使用します。
 
 `processForInference:true`は`transport:"inference_transcript"`との組み合わせだけを許可します。
@@ -559,7 +559,7 @@ legacy artifact download例（`conversationId` / `fileId`とは排他的）:
 }
 ```
 
-legacy modeは公式Web clientと同じ `getSignedFileUrls` request（`download:true`）を使います。
+legacy modeはHTTPS/root-relative URLに加えてNotionが返す`attachment:<UUID>:<name>` URIを受理し、公式Web clientと同じ `getSignedFileUrls` request（`download:true`）を使います。
 permission recordのworkspaceはactive workspaceと一致する必要があり、返されたsigned URLにもtimeout、
 redirect拒否、byte上限、安全な出力pathを適用します。downloadしたbytesのSHA-256を常に返します。
 

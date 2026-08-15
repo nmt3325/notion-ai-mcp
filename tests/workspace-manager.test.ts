@@ -44,7 +44,7 @@ function makeFetch(calls: string[], options: { probeOk?: boolean } = {}) {
     const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
     if (url.endsWith("/loadUserContent")) return new Response(JSON.stringify(userContent()), { status: 200 });
     if (url.endsWith("/createSpace")) return new Response(JSON.stringify({ spaceId: SPACE_B }), { status: 200 });
-    if (url.endsWith("/saveTransactionsFanout")) {
+    if (url.endsWith("/saveTransactionsMain")) {
       const transactions = body.transactions as Array<Record<string, unknown>>;
       const operations = transactions[0]?.operations as Array<Record<string, unknown>>;
       const setOperation = operations.find((operation) => (operation.pointer as Record<string, unknown>)?.table === "space_view");
@@ -189,7 +189,7 @@ test("workspace creation uses the official body and commits a discoverable space
     const headers = (init?.headers ?? {}) as Record<string, string>;
     requests.push({ endpoint, body, headers });
     if (endpoint === "createSpace") return new Response(JSON.stringify({ spaceId: SPACE_B }), { status: 200 });
-    if (endpoint === "saveTransactionsFanout") {
+    if (endpoint === "saveTransactionsMain") {
       const transactions = body.transactions as Array<Record<string, unknown>>;
       const operations = transactions[0]?.operations as Array<Record<string, unknown>>;
       const setOperation = operations.find((operation) => (operation.pointer as Record<string, unknown>)?.table === "space_view");
@@ -217,6 +217,7 @@ test("workspace creation uses the official body and commits a discoverable space
         [createdViewId]: { value: { id: createdViewId, version: 1, space_id: SPACE_B, parent_id: "user-1", parent_table: "user_root", alive: true, joined: true } }
       } } }), { status: 200 });
     }
+    if (endpoint === "getInferenceTranscriptsForUser") return new Response("{}", { status: 200 });
     return new Response("{}", { status: 404 });
   };
   const manager = new WorkspaceManager(account, BASE, fakeFetch as typeof fetch, undefined, { discoveryAttempts: 2, discoveryDelayMs: 0 });
@@ -231,14 +232,15 @@ test("workspace creation uses the official body and commits a discoverable space
   const createRequest = requests.find((request) => request.endpoint === "createSpace");
   assert.deepEqual(createRequest?.body, {
     name: "Scratch Space",
+    icon: "🏠",
     planType: "personal",
     planSelection: "personal",
-    initialPersona: "other",
+    initialPersona: "unfilled",
     deviceId: "device-1",
     deviceType: "web-desktop",
-    source: "sidebar_switcher"
+    source: "handle_root_redirect"
   });
-  const saveRequest = requests.find((request) => request.endpoint === "saveTransactionsFanout");
+  const saveRequest = requests.find((request) => request.endpoint === "saveTransactionsMain");
   const transaction = (saveRequest?.body.transactions as Array<Record<string, unknown>>)[0];
   const operations = transaction.operations as Array<Record<string, unknown>>;
   assert.equal(transaction.spaceId, SPACE_B);
@@ -259,7 +261,7 @@ test("workspace creation refuses success without a discoverable space_view", asy
     const endpoint = String(input).split("/").at(-1) ?? "";
     calls.push(endpoint);
     if (endpoint === "createSpace") return new Response(JSON.stringify({ spaceId: SPACE_B }), { status: 200 });
-    if (endpoint === "saveTransactionsFanout") return new Response("{}", { status: 200 });
+    if (endpoint === "saveTransactionsMain") return new Response("{}", { status: 200 });
     if (endpoint === "loadUserContent") return new Response(JSON.stringify({ recordMap: {
       user_root: { "user-1": { value: { space_view_pointers: [{ id: "sv-a", spaceId: SPACE_A }] } } },
       space: { [SPACE_A]: { value: { name: "Alpha Space", plan_type: "personal" } } }
@@ -269,7 +271,7 @@ test("workspace creation refuses success without a discoverable space_view", asy
   const manager = new WorkspaceManager(makeAccount(), BASE, fakeFetch as typeof fetch, undefined, { discoveryAttempts: 2, discoveryDelayMs: 0 });
   await assert.rejects(() => manager.createWorkspace("Missing View"), /space_view .* was not fully discoverable/);
   assert.equal(calls.filter((endpoint) => endpoint === "createSpace").length, 1);
-  assert.equal(calls.filter((endpoint) => endpoint === "saveTransactionsFanout").length, 1);
+  assert.equal(calls.filter((endpoint) => endpoint === "saveTransactionsMain").length, 1);
   assert.equal(calls.filter((endpoint) => endpoint === "loadUserContent").length, 2);
 });
 
@@ -282,7 +284,7 @@ test("workspace creation rejects a pointer-only partial commit", async () => {
     calls.push(endpoint);
     const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
     if (endpoint === "createSpace") return new Response(JSON.stringify({ spaceId: SPACE_B }), { status: 200 });
-    if (endpoint === "saveTransactionsFanout") {
+    if (endpoint === "saveTransactionsMain") {
       const transaction = (body.transactions as Array<Record<string, unknown>>)[0];
       const operations = transaction.operations as Array<Record<string, unknown>>;
       createdViewId = String((operations[0]?.pointer as Record<string, unknown>)?.id ?? "");
@@ -301,7 +303,7 @@ test("workspace creation rejects a pointer-only partial commit", async () => {
   const manager = new WorkspaceManager(makeAccount(), BASE, fakeFetch as typeof fetch, undefined, { discoveryAttempts: 2, discoveryDelayMs: 0 });
   await assert.rejects(() => manager.createWorkspace("Pointer Only"), /root pointer was visible but the space_view record was missing or invalid/);
   assert.equal(calls.filter((endpoint) => endpoint === "createSpace").length, 1);
-  assert.equal(calls.filter((endpoint) => endpoint === "saveTransactionsFanout").length, 1);
+  assert.equal(calls.filter((endpoint) => endpoint === "saveTransactionsMain").length, 1);
   assert.equal(calls.filter((endpoint) => endpoint === "syncRecordValuesMain").length, 2);
 });
 
@@ -313,7 +315,7 @@ test("workspace creation waits for both pointer and record visibility", async ()
     const endpoint = String(input).split("/").at(-1) ?? "";
     const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
     if (endpoint === "createSpace") return new Response(JSON.stringify({ spaceId: SPACE_B }), { status: 200 });
-    if (endpoint === "saveTransactionsFanout") {
+    if (endpoint === "saveTransactionsMain") {
       const transaction = (body.transactions as Array<Record<string, unknown>>)[0];
       const operations = transaction.operations as Array<Record<string, unknown>>;
       createdViewId = String((operations[0]?.pointer as Record<string, unknown>)?.id ?? "");
@@ -337,6 +339,7 @@ test("workspace creation waits for both pointer and record visibility", async ()
         [createdViewId]: { value: { id: createdViewId, version: 1, space_id: SPACE_B, parent_id: "user-1", parent_table: "user_root", alive: true, joined: true } }
       } : {} } }), { status: 200 });
     }
+    if (endpoint === "getInferenceTranscriptsForUser") return new Response("{}", { status: 200 });
     return new Response("{}", { status: 404 });
   };
   const manager = new WorkspaceManager(makeAccount(), BASE, fakeFetch as typeof fetch, undefined, { discoveryAttempts: 3, discoveryDelayMs: 0 });
@@ -344,6 +347,47 @@ test("workspace creation waits for both pointer and record visibility", async ()
   assert.equal(created.spaceViewId, createdViewId);
   assert.equal(loadCount, 3);
   assert.equal(recordCount, 2);
+});
+
+test("workspace creation accepts hydrated space rows and role-only space_view projections", async () => {
+  let createdViewId = "";
+  let activeHeader = "";
+  const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const endpoint = String(input).split("/").at(-1) ?? "";
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    const headers = new Headers(init?.headers);
+    if (endpoint === "createSpace") return new Response(JSON.stringify({ spaceId: SPACE_B }), { status: 200 });
+    if (endpoint === "saveTransactionsMain") {
+      const transaction = (body.transactions as Array<Record<string, unknown>>)[0];
+      createdViewId = String((((transaction.operations as Array<Record<string, unknown>>)[0]?.pointer) as Record<string, unknown>)?.id ?? "");
+      return new Response("{}", { status: 200 });
+    }
+    if (endpoint === "loadUserContent") return new Response(JSON.stringify({ recordMap: {
+      user_root: { "user-1": { value: {
+        space_views: [createdViewId],
+        space_view_pointers: [{ id: createdViewId, table: "space_view", spaceId: SPACE_B }]
+      } } },
+      space: {}
+    } }), { status: 200 });
+    if (endpoint === "syncRecordValuesMain") {
+      const requests = body.requests as Array<Record<string, unknown>>;
+      const pointer = requests[0]?.pointer as Record<string, unknown>;
+      if (pointer?.table === "space") return new Response(JSON.stringify({ recordMap: { space: {
+        [SPACE_B]: { value: { id: SPACE_B, name: "Hydrated", plan_type: "personal", created_time: 123 } }
+      } } }), { status: 200 });
+      activeHeader = headers.get("x-notion-space-id") ?? "";
+      return new Response(JSON.stringify({ recordMap: { space_view: {
+        [createdViewId]: { value: { role: "editor" } }
+      } } }), { status: 200 });
+    }
+    if (endpoint === "getInferenceTranscriptsForUser") return new Response("{}", { status: 200 });
+    return new Response("{}", { status: 404 });
+  };
+  const manager = new WorkspaceManager(makeAccount(), BASE, fakeFetch as typeof fetch, undefined, { discoveryAttempts: 1, discoveryDelayMs: 0 });
+  const created = await manager.createWorkspace("Hydrated");
+  assert.equal(created.spaceId, SPACE_B);
+  assert.equal(created.spaceName, "Hydrated");
+  assert.equal(activeHeader, SPACE_B);
 });
 
 test("workspace creation reports Retry-After and never retries createSpace", async () => {
@@ -365,13 +409,13 @@ test("workspace transaction failures are not retried", async () => {
     const endpoint = String(input).split("/").at(-1) ?? "";
     calls.push(endpoint);
     if (endpoint === "createSpace") return new Response(JSON.stringify({ spaceId: SPACE_B }), { status: 200 });
-    if (endpoint === "saveTransactionsFanout") return new Response("Bad gateway", { status: 502 });
+    if (endpoint === "saveTransactionsMain") return new Response("Bad gateway", { status: 502 });
     return new Response("{}", { status: 404 });
   };
   const manager = new WorkspaceManager(makeAccount(), BASE, fakeFetch as typeof fetch, undefined, { discoveryAttempts: 2, discoveryDelayMs: 0 });
-  await assert.rejects(() => manager.createWorkspace("Broken Cell"), /transaction failed and was not retried: saveTransactionsFanout returned HTTP 502/);
+  await assert.rejects(() => manager.createWorkspace("Broken Cell"), /transaction failed and was not retried: saveTransactionsMain returned HTTP 502/);
   assert.equal(calls.filter((endpoint) => endpoint === "createSpace").length, 1);
-  assert.equal(calls.filter((endpoint) => endpoint === "saveTransactionsFanout").length, 1);
+  assert.equal(calls.filter((endpoint) => endpoint === "saveTransactionsMain").length, 1);
   assert.equal(calls.includes("loadUserContent"), false);
 });
 
