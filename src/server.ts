@@ -20,6 +20,32 @@ const authShape = z.object({
 
 type AuthInput = z.infer<typeof authShape>;
 
+type ProgressExtra = {
+  _meta?: { progressToken?: string | number | undefined } | undefined;
+  sendNotification?: ((notification: { method: string; params: Record<string, unknown> }) => Promise<void>) | undefined;
+};
+
+/**
+ * Emits periodic progress notifications while a slow call runs.
+ *
+ * MCP clients abandon a tool call after roughly 60 seconds; clients that honour progress keep waiting,
+ * and for the rest the work still continues in a background job.
+ */
+async function withHeartbeat<T>(extra: unknown, run: () => Promise<T>): Promise<T> {
+  const progress = extra as ProgressExtra | undefined;
+  const progressToken = progress?._meta?.progressToken;
+  const send = progress?.sendNotification;
+  if (progressToken === undefined || typeof send !== "function") return run();
+  let ticks = 0;
+  const timer = setInterval(() => {
+    ticks += 1;
+    void send({ method: "notifications/progress", params: { progressToken, progress: ticks, message: `Notion AI is still generating (${ticks * 10}s)` } }).catch(() => { /* progress is best effort */ });
+  }, 10_000);
+  timer.unref?.();
+  try { return await run(); }
+  finally { clearInterval(timer); }
+}
+
 export function toMcpAuth(input: AuthInput | undefined): McpAuth | undefined {
   if (!input) return undefined;
   switch (input.type) {
@@ -78,12 +104,12 @@ export function createServer(client: NotionClient): McpServer {
 
   server.registerTool("notion_ai_chat", {
     title: "Chat with Notion AI",
-    description: "Send a prompt to Notion AI and return the fully aggregated streamed answer. Accepts friendly model names as well as internal IDs.",
+    description: "Send a prompt to Notion AI and return the fully aggregated streamed answer. Waits up to waitSeconds (default 45s, below the ~60s point where MCP clients abandon a call) and otherwise returns status \"pending\" with jobId and conversationId so get_chat_result can collect the answer instead of losing it. Accepts friendly model names as well as internal IDs.",
     inputSchema: {
       prompt: z.string().min(1).describe("Prompt to send to Notion AI"),
       model: z.string().min(1).optional().describe(`Model name or internal ID. Known: ${modelHint}`),
       reasoningEffort: z.enum(REASONING_EFFORTS).optional().describe(`Thinking effort, sent as the same reasoningEffort field the Notion web client persists. Only models with an effort picker accept it. Per model: ${effortHint}`),
-      conversationId: z.string().uuid().optional().describe("ID returned by a previous notion_ai_chat call in this server process; omit reasoningEffort to keep the effort already chosen for that conversation"),
+      conversationId: z.string().uuid().optional().describe("ID returned by a previous notion_ai_chat call, including one whose call timed out or ran before a restart; omit reasoningEffort to keep the effort already chosen for that conversation"),
       webSearch: z.boolean().default(false).describe("Allow Notion AI web search"),
       workspaceSearch: z.boolean().default(false).describe("Allow Notion workspace search"),
       readOnly: z.boolean().default(true).describe("Use Notion Ask/read-only mode"),
@@ -93,10 +119,12 @@ export function createServer(client: NotionClient): McpServer {
         text: z.string().optional(),
         mimeType: z.string().optional()
       })).optional().describe("Legacy inline text/link context. Use upload_attachment plus fileIds for real files."),
-      fileIds: z.array(z.string().min(1)).max(19).optional().describe("File IDs returned by upload_attachment. A new file chat uses the current Agent Service content-block format.")
+      fileIds: z.array(z.string().min(1)).max(19).optional().describe("File IDs returned by upload_attachment. A new file chat uses the current Agent Service content-block format."),
+      waitSeconds: z.number().int().min(1).max(55).optional().describe("Seconds to wait inline for the answer (default NOTION_CHAT_WAIT_MS, 45s). The cap stays under the ~60s client limit; when it passes, a pending job is returned instead of an error."),
+      background: z.boolean().default(false).describe("Return jobId and conversationId immediately without waiting, then collect the answer with get_chat_result. Use this for prompts that need minutes of thinking.")
     }
-  }, async (input) => {
-    const chat = await client.chat({
+  }, async (input, extra) => {
+    const options = {
       prompt: input.prompt,
       webSearch: input.webSearch,
       workspaceSearch: input.workspaceSearch,
@@ -106,8 +134,46 @@ export function createServer(client: NotionClient): McpServer {
       ...(input.conversationId ? { conversationId: input.conversationId } : {}),
       ...(input.attachments ? { attachments: input.attachments } : {}),
       ...(input.fileIds ? { fileIds: input.fileIds } : {})
+    };
+    if (input.background) {
+      const started = await client.startChat(options);
+      return result(started, started.hint);
+    }
+    const chat = await withHeartbeat(extra, () => client.chatWithWait(options, input.waitSeconds === undefined ? undefined : input.waitSeconds * 1000));
+    return result(chat, chat.status === "completed" ? chat.text : chat.hint);
+  });
+
+  server.registerTool("get_chat_result", {
+    title: "Collect a chat answer",
+    description: "Collect the answer of a chat that is still generating or whose call already timed out. Reads the background job and falls back to the conversation thread, so an answer is never lost at the client 60s limit.",
+    inputSchema: {
+      jobId: z.string().min(1).optional().describe("jobId returned by notion_ai_chat"),
+      conversationId: z.string().uuid().optional().describe("Conversation to read the newest answer from; works for jobs from an earlier server process too"),
+      waitSeconds: z.number().int().min(0).max(55).default(20).describe("Seconds to wait for the answer before returning the current status")
+    }
+  }, async (input, extra) => {
+    const lookup = await withHeartbeat(extra, () => client.chatResult({
+      ...(input.jobId ? { jobId: input.jobId } : {}),
+      ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+      waitMs: input.waitSeconds * 1000
+    }));
+    return result(lookup, lookup.text ?? lookup.error ?? lookup.hint ?? lookup.status);
+  });
+
+  server.registerTool("list_chat_jobs", {
+    title: "List chat jobs",
+    description: "List the background Notion AI chats tracked by this server, newest first, with status, conversation ID and prompt preview.",
+    inputSchema: {
+      status: z.enum(["running", "completed", "failed", "orphaned"]).optional().describe("Only jobs in this state. orphaned means the job was still running when the server restarted, so read it with get_chat_result."),
+      limit: z.number().int().min(1).max(100).default(20)
+    }
+  }, async (input) => {
+    const warning = client.chatStateError();
+    return result({
+      jobs: client.listChatJobs({ ...(input.status ? { status: input.status } : {}), limit: input.limit }),
+      statePath: client.chatStatePath(),
+      ...(warning ? { stateWarning: warning } : {})
     });
-    return result(chat, chat.text);
   });
 
   server.registerTool("upload_attachment", {
