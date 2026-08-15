@@ -89,10 +89,11 @@ test("notion_ai_chat forwards model and uploaded file IDs and returns the answer
   const { client, chatCalls } = fakeClient();
   const { mcpClient, close } = await connect(client);
   try {
-    const response = await mcpClient.callTool({ name: "notion_ai_chat", arguments: { prompt: "Hello", model: "thinking", fileIds: ["file-1"] } });
+    const response = await mcpClient.callTool({ name: "notion_ai_chat", arguments: { prompt: "Hello", model: "thinking", reasoningEffort: "high", fileIds: ["file-1"] } });
     assert.equal(response.isError, undefined);
     assert.equal(Array.isArray(response.content) && response.content[0]?.type === "text" ? response.content[0].text : "", "Mock answer");
     assert.equal(chatCalls[0]?.model, "thinking");
+    assert.equal(chatCalls[0]?.reasoningEffort, "high");
     assert.deepEqual(chatCalls[0]?.fileIds, ["file-1"]);
   } finally { await close(); }
 });

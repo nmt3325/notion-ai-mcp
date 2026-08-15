@@ -4,7 +4,7 @@ import { z } from "zod";
 import { loadConfig } from "./config.js";
 import { NotionClient } from "./notion-client.js";
 import type { McpAuth } from "./mcp-connections.js";
-import { BUILTIN_ALIASES, listModels } from "./models.js";
+import { BUILTIN_ALIASES, listModels, modelReasoningEfforts, REASONING_EFFORTS } from "./models.js";
 
 export const SERVER_VERSION = "0.8.0";
 
@@ -68,6 +68,13 @@ export function createServer(client: NotionClient): McpServer {
   const server = new McpServer({ name: "notion-ai-mcp", version: SERVER_VERSION });
   const canonicalModelIds = new Set(Object.values(BUILTIN_ALIASES));
   const modelHint = listModels().filter((entry) => entry.pickable || canonicalModelIds.has(entry.modelId)).map((entry) => `${entry.modelId} (${entry.aliases.join(", ")})`).join("; ");
+  const effortHint = listModels()
+    .filter((entry) => entry.pickable && modelReasoningEfforts(entry.modelId) !== undefined)
+    .map((entry) => {
+      const config = modelReasoningEfforts(entry.modelId);
+      return config ? `${entry.modelId}: ${config.supported.join("|")} (default ${config.default})` : entry.modelId;
+    })
+    .join("; ");
 
   server.registerTool("notion_ai_chat", {
     title: "Chat with Notion AI",
@@ -75,7 +82,8 @@ export function createServer(client: NotionClient): McpServer {
     inputSchema: {
       prompt: z.string().min(1).describe("Prompt to send to Notion AI"),
       model: z.string().min(1).optional().describe(`Model name or internal ID. Known: ${modelHint}`),
-      conversationId: z.string().uuid().optional().describe("ID returned by a previous notion_ai_chat call in this server process"),
+      reasoningEffort: z.enum(REASONING_EFFORTS).optional().describe(`Thinking effort, sent as the same reasoningEffort field the Notion web client persists. Only models with an effort picker accept it. Per model: ${effortHint}`),
+      conversationId: z.string().uuid().optional().describe("ID returned by a previous notion_ai_chat call in this server process; omit reasoningEffort to keep the effort already chosen for that conversation"),
       webSearch: z.boolean().default(false).describe("Allow Notion AI web search"),
       workspaceSearch: z.boolean().default(false).describe("Allow Notion workspace search"),
       readOnly: z.boolean().default(true).describe("Use Notion Ask/read-only mode"),
@@ -94,6 +102,7 @@ export function createServer(client: NotionClient): McpServer {
       workspaceSearch: input.workspaceSearch,
       readOnly: input.readOnly,
       ...(input.model ? { model: input.model } : {}),
+      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
       ...(input.conversationId ? { conversationId: input.conversationId } : {}),
       ...(input.attachments ? { attachments: input.attachments } : {}),
       ...(input.fileIds ? { fileIds: input.fileIds } : {})
