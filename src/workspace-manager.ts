@@ -146,7 +146,7 @@ export class WorkspaceManager {
     return results;
   }
 
-  private buildSpaceViewTransaction(spaceId: string, spaceViewId: string, teamId: string, now: number): Record<string, unknown> {
+  private buildSpaceViewTransaction(spaceId: string, spaceViewId: string, now: number): Record<string, unknown> {
     const spaceViewPointer = { table: "space_view", id: spaceViewId, spaceId };
     const spaceView: Record<string, unknown> = {
       id: spaceViewId,
@@ -165,13 +165,12 @@ export class WorkspaceManager {
       },
       first_joined_space_time: now
     };
-    if (teamId) spaceView.joined_teams = [teamId];
     return {
       requestId: randomUUID(),
       transactions: [{
         id: randomUUID(),
         spaceId,
-        debug: { userAction: "spaceActions.createSpace", clientCommitTimeMs: now },
+        debug: { userAction: "spaceActions.createSpace" },
         operations: [
           {
             pointer: spaceViewPointer,
@@ -222,19 +221,51 @@ export class WorkspaceManager {
     return { workspace, viewCount, pointerCount, spacePresent };
   }
 
+  private async hydrateWorkspaceSpaces(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const recordMap = object(payload.recordMap);
+    const roots = object(recordMap.user_root);
+    const root = unwrapRecord(roots[this.account.userId]);
+    const pointers = Array.isArray(root.space_view_pointers) ? root.space_view_pointers : [];
+    const spaces = { ...object(recordMap.space) };
+    const missing = [...new Set(pointers.map((rawPointer) => asString(object(rawPointer).spaceId))
+      .filter((spaceId) => spaceId && spaces[spaceId] === undefined))];
+    for (let index = 0; index < missing.length; index += 100) {
+      const ids = missing.slice(index, index + 100);
+      const loaded = await this.postJson("syncRecordValuesMain", {
+        requests: ids.map((spaceId) => ({ pointer: { table: "space", id: spaceId, spaceId }, version: -1 }))
+      });
+      Object.assign(spaces, object(object(loaded.recordMap).space));
+    }
+    return { ...payload, recordMap: { ...recordMap, space: spaces } };
+  }
+
   private async hasValidSpaceViewRecord(spaceId: string, spaceViewId: string): Promise<boolean> {
     const payload = await this.postJson("syncRecordValuesMain", {
-      requests: [{ pointer: { table: "space_view", id: spaceViewId }, version: -1 }],
-      spacePointer: { table: "space", id: this.account.spaceId }
-    });
+      requests: [{ pointer: { table: "space_view", id: spaceViewId, spaceId }, version: -1 }],
+      spacePointer: { table: "space", id: spaceId, spaceId }
+    }, spaceId);
     const recordMap = object(payload.recordMap);
     const record = unwrapRecord(object(recordMap.space_view)[spaceViewId]);
-    return asString(record.id) === spaceViewId
+    const fullRecord = asString(record.id) === spaceViewId
       && asString(record.space_id) === spaceId
       && asString(record.parent_id) === this.account.userId
       && asString(record.parent_table) === "user_root"
       && record.alive === true
       && record.joined === true;
+    // Current multi-space accounts may receive a permission projection instead of the full space_view row.
+    const projectedRole = asString(record.role);
+    return fullRecord || projectedRole === "editor" || projectedRole === "owner";
+  }
+
+  private async canActivateWorkspace(spaceId: string): Promise<boolean> {
+    try {
+      await this.postJson("getInferenceTranscriptsForUser", {
+        threadParentPointer: { table: "space", id: spaceId, spaceId },
+        includeWorkflowThreads: true,
+        includeWriterChats: false
+      }, spaceId);
+      return true;
+    } catch { return false; }
   }
 
   async createWorkspace(name?: string): Promise<WorkspaceInfo> {
@@ -243,20 +274,21 @@ export class WorkspaceManager {
     const spaceName = name?.trim() || `auto-${now.toString(36)}`;
     const created = await this.postJson("createSpace", {
       name: spaceName,
+      icon: "🏠",
       planType: "personal",
       planSelection: "personal",
-      initialPersona: "other",
+      initialPersona: "unfilled",
       deviceId: this.account.deviceId,
       deviceType: "web-desktop",
-      source: "sidebar_switcher"
+      source: "handle_root_redirect"
     });
     const spaceId = asString(created.spaceId);
     if (!spaceId) throw new Error("createSpace did not return a spaceId");
-    const teamId = asString(created.teamId);
+    const createdSpaceRecords = object(object(created.recordMap).space);
     const spaceViewId = createSpaceScopedId(spaceId);
     try {
       // Keep the active workspace in the HTTP routing header. The transaction itself targets the new cell.
-      await this.postJson("saveTransactionsFanout", this.buildSpaceViewTransaction(spaceId, spaceViewId, teamId, now));
+      await this.postJson("saveTransactionsMain", this.buildSpaceViewTransaction(spaceId, spaceViewId, now));
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new Error(`Workspace ${spaceId} was created, but its space_view transaction failed and was not retried: ${detail}`);
@@ -265,10 +297,23 @@ export class WorkspaceManager {
     let lastError: unknown;
     for (let attempt = 0; attempt < this.discoveryAttempts; attempt += 1) {
       try {
-        const payload = await this.postJson("loadUserContent", {});
+        const rawPayload = await this.postJson("loadUserContent", {});
+        const rawRecordMap = object(rawPayload.recordMap);
+        const payloadWithCreatedSpace = {
+          ...rawPayload,
+          recordMap: {
+            ...rawRecordMap,
+            space: { ...object(rawRecordMap.space), ...createdSpaceRecords }
+          }
+        };
+        const payload = await this.hydrateWorkspaceSpaces(payloadWithCreatedSpace);
         const state = this.inspectWorkspaceDiscovery(payload, spaceId, spaceViewId);
         if (state.viewCount === 1 && state.pointerCount === 1 && state.spacePresent && state.workspace) {
-          if (await this.hasValidSpaceViewRecord(spaceId, spaceViewId)) {
+          if (!await this.hasValidSpaceViewRecord(spaceId, spaceViewId)) {
+            lastError = new Error("the root pointer was visible but the space_view record was missing or invalid");
+          } else if (!await this.canActivateWorkspace(spaceId)) {
+            lastError = new Error("the workspace records were visible but the workspace could not be activated");
+          } else {
             const match = state.workspace;
             return {
               ...match,
@@ -277,7 +322,6 @@ export class WorkspaceManager {
               createdTime: match.createdTime ?? now
             };
           }
-          lastError = new Error("the root pointer was visible but the space_view record was missing or invalid");
         } else {
           lastError = new Error(`root state was incomplete (space_views=${state.viewCount}, space_view_pointers=${state.pointerCount}, space=${state.spacePresent})`);
         }
@@ -291,7 +335,8 @@ export class WorkspaceManager {
   }
 
   async discoverWorkspaces(): Promise<WorkspaceInfo[]> {
-    return this.parseWorkspaces(await this.postJson("loadUserContent", {}));
+    const payload = await this.postJson("loadUserContent", {});
+    return this.parseWorkspaces(await this.hydrateWorkspaceSpaces(payload));
   }
 
   async rotate(): Promise<boolean> {

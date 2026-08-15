@@ -316,7 +316,7 @@ test("workspace switching and creation stay active in the same client process", 
     }
     if (endpoint === "getInferenceTranscriptsForUser") return jsonResponse({});
     if (endpoint === "createSpace") return jsonResponse({ spaceId: spaceC });
-    if (endpoint === "saveTransactionsFanout") {
+    if (endpoint === "saveTransactionsMain") {
       const transaction = (body.transactions as Array<Record<string, unknown>>)[0];
       const operations = transaction.operations as Array<Record<string, unknown>>;
       const operation = operations.find((candidate) => (candidate.pointer as Record<string, unknown>)?.table === "space_view");

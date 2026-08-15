@@ -11,16 +11,17 @@
 |---|---|---|---|---|---|
 | アカウント/ワークスペース検出 | POST | `/api/v3/loadUserContent` | `token_v2` Cookie | `{}` | JSON `recordMap` (`notion_user`, `user_root`, `space`, `user_settings`) |
 | workspace base作成 | POST | `/api/v3/createSpace` | 同上 | name, plan, persona, device, source | JSON `spaceId` |
-| workspace join transaction | POST | `/api/v3/saveTransactionsFanout` | 同上 | `space_view`作成 + user root 2 list更新 | JSON `{}` |
+| workspace join transaction | POST | `/api/v3/saveTransactionsMain` | 同上 | `space_view`作成 + user root 2 list更新 | JSON `{}` |
 | Notion AI 送信 | POST | `/api/v3/runInferenceTranscript` | `token_v2` Cookie + user/space headers | workflow transcript | `application/x-ndjson`。環境差に備えて SSE `data:` 形式も許容 |
 | 会話一覧 | POST | `/api/v3/getInferenceTranscriptsForUser` | 同上 | space pointer、種別、cursor | JSON `transcripts`, `recordMap.thread`, `nextCursor`, `hasMore` |
 | メッセージ本体 | POST | `/api/v3/syncRecordValuesMain` | 同上 | `thread_message` pointer 配列 | JSON `recordMap.thread_message` |
+| thread rename | POST | `/api/v3/saveTransactionsFanout` | 同上 | `{pointer:{table:"thread",id,spaceId}, path:["data"], command:"update", args:{title}}` | JSON `{}` |
 | Agent Service thread作成 | POST | `/api/v3/createAgentThread` | 同上 | `type`, `threadId`, `content`, model等 | JSON `thread` |
 | Agent Service継続送信 | POST | `/api/v3/sendEventToAgentThread` | 同上 | `event:{type:"user.message",content}` | JSON |
 | Agent Service transcript | POST | `/api/v3/getThreadTranscript` | 同上 | `threadId`, direction, cursor, limit | patch page |
-| upload URL作成 | POST | `/api/v3/createAgentServiceFileUploadURL` | 同上 | target, filename, mediaType, sizeBytes | file ID + transfer descriptor |
-| upload完了 | POST | `/api/v3/completeAgentServiceFileUpload` | 同上 | target, fileId, multipart parts? | uploaded-file object |
-| thread file URL | POST | `/api/v3/getFileContentURLForAgentThread` | 同上 | threadId, fileId, metadata flag | signed URL + metadata |
+| upload URL作成（廃止、fallback必須） | POST | `/api/v3/createAgentServiceFileUploadURL` | 同上 | target, filename, mediaType, sizeBytes | file ID + transfer descriptor |
+| upload完了（廃止） | POST | `/api/v3/completeAgentServiceFileUpload` | 同上 | target, fileId, multipart parts? | uploaded-file object |
+| thread file URL（廃止） | POST | `/api/v3/getFileContentURLForAgentThread` | 同上 | threadId, fileId, metadata flag | signed URL + metadata |
 | assistant-transcript upload URL | POST | `/api/v3/getUploadFileUrlForAssistantChatTranscriptUpload` | 同上 | thread pointer, name, MIME, length, createThread | S3 POST descriptor + relative file URL + chatId |
 | file URL署名 | POST | `/api/v3/getSignedFileUrls` | 同上 | original URL, download flag/name, permissionRecord | ordered signed URL array |
 | assistant-transcript download proxy | GET | `https://app.notion.com/signed/<encoded-source-url>` | session Cookie | table, id, spaceId, name, download, userId, cache, imgBuildSrc | 200または302 |
@@ -57,7 +58,7 @@
   "spaceId": "<space-id>",
   "threadId": "<uuid>",
   "transcript": [
-    { "id": "<uuid>", "type": "config", "value": { "type": "workflow", "useReadOnlyMode": true } },
+    { "id": "<uuid>", "type": "config", "value": { "type": "workflow", "useReadOnlyMode": true, "model": "<internal-model-id>", "modelFromUser": true, "reasoningEffort": "high" } },
     { "id": "<uuid>", "type": "context", "value": { "userId": "...", "spaceId": "...", "surface": "ai_module" } },
     { "id": "<uuid>", "type": "user", "value": [["prompt"]], "userId": "...", "createdAt": "<ISO-8601>" }
   ],
@@ -96,22 +97,23 @@ tool use は回答本文へ混ぜない。`inputTokens` / `outputTokens` は完�
   "name": "New workspace",
   "planType": "personal",
   "planSelection": "personal",
-  "initialPersona": "other",
+  "icon": "🏠",
+  "initialPersona": "unfilled",
   "deviceId": "<device-id>",
   "deviceType": "web-desktop",
-  "source": "sidebar_switcher"
+  "source": "handle_root_redirect"
 }
 ```
 
 `/createSpace` が返した `spaceId` のspace short IDを埋め込んだversion-8 UUIDを
-`space_view` IDとして生成する。続く `/saveTransactionsFanout` は新しいworkspaceを
+`space_view` IDとして生成する。続く `/saveTransactionsMain` は新しいworkspaceを
 transaction bodyの`spaceId`と`cellTarget.spaceWithId`に指定し、次の3 operationを1 transactionで送る。
 
 1. `space_view` recordを`set` (`parent_table:"user_root"`, `alive:true`, `joined:true`)
 2. `user_root.space_views`へ`listAfter`
 3. `user_root.space_view_pointers`へ`keyedObjectListAfter`
 
-このfanout requestのHTTP `x-notion-space-id`は、まだ有効な**現在のworkspace**に維持する。
+このtransaction requestのHTTP `x-notion-space-id`は、まだ有効な**現在のworkspace**に維持する。
 新しいworkspaceをrouting headerへ先に設定すると、cell provisioning前のrequestを誤ったcellへ送る可能性がある。
 
 作成後はbounded pollingで次をすべて確認する。
@@ -471,6 +473,29 @@ Web バンドルの chunk に、全モデルの定義がインラインで含ま
 
 179 エントリ中 74 が `isProductionCallable`。`src/models.ts` はこれを取り込んだカタログです。
 
+## モデルと推論レベル（`reasoningEffort`）
+
+Web clientはworkflow transcriptの`config` stepと、Agent Serviceの`createAgentThread` /
+`sendEventToAgentThread` bodyのいずれでも、`model`と並んで次の2 fieldを送る。
+
+- `modelFromUser: true` — これがないとUIは選択を`自動`のまま扱い、threadにモデルが永続化されない。
+- `reasoningEffort` — `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` のliteral。
+  省略時はfield自体を送らない。`debugOverrides`はmodelのみでeffortを含めない。
+
+effortはmodel registryの`modelConfiguration`を持つmodelだけが受け付ける。
+
+| `supportedReasoningEfforts` | 対象model | `defaultReasoningEffort` |
+|---|---|---|
+| `medium`, `high` | `oatmeal-cookie*`, `oval-kumquat*`, `opal-quince*` | model名のtier（無印/`-medium`は`medium`、`-high`は`high`） |
+| `low`, `medium`, `high`, `max` | `almond-croissant-*`, `ambrosia-tart-*`, `acai-budino-high`, `agave-flan` | model名のtier |
+| `none`, `low`, `medium`, `high`, `xhigh`, `max` | `orange-mousse`, `orchid-muffin`, `olive-jellyroll` | `medium` |
+| `low`, `medium`, `high` | `vertex-gemini-3.5-flash`, `grapefruit-zeppole` | `low` / `medium` |
+
+実機確認では`oval-kumquat-medium` + `reasoningEffort:"high"`を送信した後、
+`syncRecordValuesMain`で取得したthread_messageのconfigに
+`{model:"oval-kumquat-medium", modelFromUser:true, reasoningEffort:"high"}`が保存され、
+UIの推論レベルボタンが「現在高い」、modelボタンが「GPT-5.4」になることを確認した。
+
 ## Attachment lifecycle invariants
 
 - `conversationId`を指定した`auto` uploadは、Agent Service upload生成が失敗しても新しいassistant-transcript threadへretargetしない。
@@ -480,6 +505,9 @@ Web バンドルの chunk に、全モデルの定義がインラインで含ま
 - explicit inference uploadの未知`conversationId`はaccount/API access前に拒否する。`file.notion.com`へ必要な`file_token`がなければredirect先へ接続しない。
 - `processForInference`はexplicit inference transportだけに限定し、`processAgentAttachment`のoutput key/workspace、task status、result union、MIME別metadataを検証してからprocessed stepを保存する。
 - temporary storage completionはHTTP 200または204だけを受理し、201を含む他の2xxを成功扱いしない。
+- Agent Service uploadは現行bundleから削除され、liveでもHTTP 500を返す。新規uploadでは明示的な`agent_service`もassistant-transcriptへfallbackする。既存`conversationId`を指定したuploadはretargetしない。
+- legacy downloadはNotionが返す`attachment:<uuid>:<name>` URIを受理し、`getSignedFileUrls`の結果が`file.notion.so` / `file.notion.com`のときは`file_token`だけをCookieとして送る。`token_v2`はfile hostへ送らない。
+
 
 ## MCP client の60秒制限と job 回収
 
