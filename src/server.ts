@@ -4,7 +4,7 @@ import { z } from "zod";
 import { loadConfig } from "./config.js";
 import { NotionClient } from "./notion-client.js";
 import type { McpAuth } from "./mcp-connections.js";
-import { listModels } from "./models.js";
+import { BUILTIN_ALIASES, listModels } from "./models.js";
 
 export const SERVER_VERSION = "0.8.0";
 
@@ -66,7 +66,8 @@ function result(value: unknown, text?: string): { content: Array<{ type: "text";
 
 export function createServer(client: NotionClient): McpServer {
   const server = new McpServer({ name: "notion-ai-mcp", version: SERVER_VERSION });
-  const modelHint = listModels().map((entry) => `${entry.modelId} (${entry.aliases.join(", ")})`).join("; ");
+  const canonicalModelIds = new Set(Object.values(BUILTIN_ALIASES));
+  const modelHint = listModels().filter((entry) => entry.pickable || canonicalModelIds.has(entry.modelId)).map((entry) => `${entry.modelId} (${entry.aliases.join(", ")})`).join("; ");
 
   server.registerTool("notion_ai_chat", {
     title: "Chat with Notion AI",
@@ -169,6 +170,16 @@ export function createServer(client: NotionClient): McpServer {
       maxPages: z.number().int().min(1).max(100).default(20)
     }
   }, async ({ conversationId, maxPages }) => result(await client.getConversation(conversationId, maxPages)));
+
+  server.registerTool("rename_conversation", {
+    title: "Rename a Notion AI conversation",
+    description: "Rename an existing Notion AI thread after verifying that it belongs to the active workspace.",
+    inputSchema: {
+      conversationId: z.string().uuid(),
+      title: z.string().trim().min(1).max(500),
+      maxPages: z.number().int().min(1).max(100).default(20)
+    }
+  }, async ({ conversationId, title, maxPages }) => result(await client.renameConversation(conversationId, title, maxPages)));
 
   server.registerTool("list_workspaces", {
     title: "List Notion workspaces",

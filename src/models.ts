@@ -11,8 +11,8 @@ export interface ModelInfo {
 }
 
 export const MODEL_CATALOG: ModelInfo[] = [
-  { modelId: "openai-gpt-4o", displayName: "GPT-4o", displayNameWithProvider: "OpenAI GPT-4o", family: "openai", group: "fast", pickable: true },
-  { modelId: "openai-gpt-4o-mini", displayName: "GPT-4o mini", displayNameWithProvider: "OpenAI GPT-4o mini", family: "openai", group: "fast", pickable: true },
+  { modelId: "openai-gpt-4o", displayName: "GPT-4o", displayNameWithProvider: "OpenAI GPT-4o", family: "openai", group: "fast", pickable: false },
+  { modelId: "openai-gpt-4o-mini", displayName: "GPT-4o mini", displayNameWithProvider: "OpenAI GPT-4o mini", family: "openai", group: "fast", pickable: false },
   { modelId: "openai-turbo", displayName: "GPT-5", displayNameWithProvider: "OpenAI GPT-5", family: "openai", group: "fast", pickable: false },
   { modelId: "openai-gpt-4.1", displayName: "GPT-4.1", displayNameWithProvider: "OpenAI GPT-4.1", family: "openai", group: "fast", pickable: false },
   { modelId: "openai-gpt-4.1-mini", displayName: "GPT-4.1 Mini", displayNameWithProvider: "OpenAI GPT-4.1 Mini", family: "openai", group: "fast", pickable: false },
@@ -100,7 +100,15 @@ export const BUILTIN_ALIASES: Record<string, string> = {
   thinking: "oatmeal-cookie",
   reasoning: "oatmeal-cookie",
   deep: "oatmeal-cookie",
-  "notion-thinking": "oatmeal-cookie"
+  "notion-thinking": "oatmeal-cookie",
+  "opus-4.6": "avocado-froyo-medium",
+  "claude-opus-4.6": "avocado-froyo-medium",
+  "sonnet-4.6": "almond-croissant-low",
+  "claude-sonnet-4.6": "almond-croissant-low",
+  "gpt-5.2": "oatmeal-cookie",
+  "gpt-5.4": "oval-kumquat-medium",
+  "gemini-2.5-flash": "vertex-gemini-2.5-flash",
+  "gemini-3-flash": "gingerbread"
 };
 
 export function normalizeKey(value: string): string {

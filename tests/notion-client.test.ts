@@ -239,10 +239,18 @@ test("chat creates a workflow thread and continues it with a partial transcript"
   assert.equal(second.text, "Answer 2");
   assert.equal(inferenceBodies[0]?.createThread, true);
   assert.equal(inferenceBodies[0]?.isPartialTranscript, false);
+  const firstConfig = ((inferenceBodies[0]?.transcript as Array<Record<string, unknown>>)[0]?.value ?? {}) as Record<string, unknown>;
+  assert.equal(firstConfig.model, "test-model");
+  assert.equal(firstConfig.modelFromUser, true);
+  assert.equal(firstConfig.isThreadStartedByAdmin, undefined);
   assert.equal(inferenceBodies[1]?.createThread, false);
   assert.equal(inferenceBodies[1]?.isPartialTranscript, true);
   const secondTranscript = inferenceBodies[1]?.transcript as Array<Record<string, unknown>>;
   assert.equal(secondTranscript.filter((entry) => entry.type === "updated-config").length, 1);
+  const secondConfig = (secondTranscript[0]?.value ?? {}) as Record<string, unknown>;
+  assert.equal(secondConfig.model, "test-model");
+  assert.equal(secondConfig.modelFromUser, true);
+  assert.equal(secondConfig.isThreadStartedByAdmin, true);
 });
 
 
@@ -499,4 +507,34 @@ test("list_conversations rejects a corrupted cursor payload", async () => {
   };
   const client = new NotionClient({ ...config, account: { ...account } }, fakeFetch as unknown as typeof fetch);
   await assert.rejects(client.listConversations({ limit: 2, cursor: "mcpv1.bm90LWpzb24" }), /Invalid list_conversations cursor/);
+});
+
+test("renameConversation verifies ownership and updates thread data", async () => {
+  const threadId = "66666666-6666-4666-8666-666666666666";
+  let saveBody: Record<string, unknown> | undefined;
+  const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const endpoint = String(input).split("/").at(-1) ?? "";
+    if (endpoint === "getInferenceTranscriptsForUser") return jsonResponse({
+      transcripts: [{ id: threadId, title: "Before" }],
+      hasMore: false,
+      recordMap: { thread: { [threadId]: { value: { value: { data: { title: "Before" }, messages: [] } } } } }
+    });
+    if (endpoint === "saveTransactionsFanout") {
+      saveBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return jsonResponse({});
+    }
+    return new Response("unexpected", { status: 500 });
+  };
+  const client = new NotionClient(config, fakeFetch as typeof fetch);
+  const renamed = await client.renameConversation(threadId, " After ");
+  assert.deepEqual(renamed, { conversationId: threadId, previousTitle: "Before", title: "After", changed: true });
+  const transaction = (saveBody?.transactions as Array<Record<string, unknown>>)[0];
+  const operation = (transaction.operations as Array<Record<string, unknown>>)[0];
+  assert.deepEqual(operation, {
+    pointer: { table: "thread", id: threadId, spaceId: account.spaceId },
+    path: ["data"],
+    command: "update",
+    args: { title: "After" }
+  });
+  await assert.rejects(() => client.renameConversation(threadId, "bad\nname"), /one line/);
 });
