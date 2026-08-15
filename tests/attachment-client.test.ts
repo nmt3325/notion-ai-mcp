@@ -440,12 +440,12 @@ test("NotionClient downloads legacy artifacts through getSignedFileUrls", async 
     const client = new NotionClient(config(root), fakeFetch as typeof fetch);
     const permissionRecord = { table: "thread", id: "11111111-1111-4111-8111-111111111111", spaceId: SPACE_ID };
     const downloaded = await client.downloadAttachment({
-      legacy: { url: "https://secure.example/original", fileName: "artifact.md", permissionRecord },
+      legacy: { url: "attachment:11111111-1111-4111-8111-111111111111:artifact.md", fileName: "artifact.md", permissionRecord },
       returnBase64: true
     });
     assert.deepEqual(signerBody, {
       urls: [{
-        url: "https://secure.example/original",
+        url: "attachment:11111111-1111-4111-8111-111111111111:artifact.md",
         download: true,
         downloadName: "artifact.md",
         permissionRecord
@@ -458,6 +458,36 @@ test("NotionClient downloads legacy artifacts through getSignedFileUrls", async 
     assert.equal(downloaded.sizeBytes, data.byteLength);
     assert.equal(downloaded.base64, data.toString("base64"));
     assert.equal(downloaded.sha256, createHash("sha256").update(data).digest("hex"));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("NotionClient sends only file_token to Notion file hosts for legacy downloads", async () => {
+  const root = await mkdtemp(join(tmpdir(), "notion-ai-client-legacy-file-token-"));
+  const data = Buffer.from("legacy file token artifact");
+  try {
+    const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = urlOf(input);
+      if (url.hostname === "file.notion.so") {
+        assert.equal(init?.method, "GET");
+        assert.equal(new Headers(init?.headers).get("cookie"), "file_token=file-cookie");
+        assert.equal(new Headers(init?.headers).get("x-notion-space-id"), null);
+        return new Response(data, { status: 200, headers: { "content-type": "text/plain" } });
+      }
+      if (url.pathname.endsWith("getSignedFileUrls")) {
+        return json({ signedUrls: ["https://file.notion.so/f/f/space/file.txt?signature=signed"] });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+    const liveConfig = config(root);
+    liveConfig.account.fullCookie = "token_v2=account-secret; file_token=file-cookie";
+    const client = new NotionClient(liveConfig, fakeFetch as typeof fetch);
+    const permissionRecord = { table: "thread", id: "11111111-1111-4111-8111-111111111111", spaceId: SPACE_ID };
+    const downloaded = await client.downloadAttachment({
+      legacy: { url: "attachment:11111111-1111-4111-8111-111111111111:file.txt", fileName: "file.txt", permissionRecord },
+      returnBase64: true
+    });
+    assert.equal(downloaded.source, "legacy_signed_url");
+    assert.equal(downloaded.base64, data.toString("base64"));
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -479,7 +509,7 @@ test("NotionClient rejects ambiguous or unsafe legacy download inputs", async ()
     await assert.rejects(() => client.downloadAttachment({
       legacy: { url: "http://insecure.example/file", fileName: "file.txt", permissionRecord },
       returnBase64: true
-    }), /must be HTTPS/);
+    }), /must be HTTPS, root-relative, or a Notion attachment/);
     await assert.rejects(() => client.downloadAttachment({
       legacy: { url: "https://secure.example/file", fileName: "../file.txt", permissionRecord },
       returnBase64: true

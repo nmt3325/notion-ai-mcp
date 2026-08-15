@@ -112,7 +112,7 @@ export function createServer(client: NotionClient): McpServer {
 
   server.registerTool("upload_attachment", {
     title: "Upload an attachment",
-    description: "Upload a local or base64 file for Notion AI. Auto mode prefers Agent Service and safely falls back to the assistant-transcript transport. Paths and sizes remain restricted.",
+    description: "Upload a local or base64 file for Notion AI. Auto mode safely falls back to the current assistant-transcript transport; explicit Agent Service upload does the same when Notion reports that the retired endpoint is unavailable. Paths and sizes remain restricted.",
     inputSchema: {
       path: z.string().min(1).optional().describe("File path, absolute or relative to NOTION_ATTACHMENT_ROOT"),
       base64: z.string().min(1).optional().describe("Standard base64 file data"),
@@ -139,7 +139,7 @@ export function createServer(client: NotionClient): McpServer {
       conversationId: z.string().uuid().optional().describe("Agent Service conversation ID; provide together with fileId"),
       fileId: z.string().min(1).optional().describe("File ID or opaque upload handle; provide together with conversationId"),
       legacy: z.object({
-        url: z.string().min(1).max(8192).describe("Original HTTPS or root-relative Notion file URL"),
+        url: z.string().min(1).max(8192).describe("Original HTTPS, root-relative, or attachment: Notion file URL"),
         fileName: z.string().min(1).max(255).describe("Plain output/download file name"),
         mimeType: z.string().min(1).max(255).optional(),
         permissionRecord: z.object({
