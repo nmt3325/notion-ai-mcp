@@ -8,7 +8,7 @@ import type {
 } from "./types.js";
 import type { NotionConfig } from "./config.js";
 import { WorkspaceManager } from "./workspace-manager.js";
-import { normalizeModelName } from "./models.js";
+import { normalizeModelName, normalizeReasoningEffort } from "./models.js";
 import { McpConnectionManager } from "./mcp-connections.js";
 import { prepareAttachmentInput, readResponseBuffer, writeAttachmentOutput, type AttachmentInput, type PreparedAttachment } from "./attachments.js";
 import { agentTranscriptError, applyAgentTranscriptPatches, createAgentTranscriptState, isAgentTranscriptTurnComplete, latestAgentTranscriptText } from "./agent-transcript.js";
@@ -27,6 +27,7 @@ interface ThreadLookup { page: TranscriptPage; transcript: Record<string, unknow
 interface ChatOptions {
   prompt: string;
   model?: string | undefined;
+  reasoningEffort?: string | undefined;
   conversationId?: string | undefined;
   webSearch?: boolean | undefined;
   workspaceSearch?: boolean | undefined;
@@ -296,12 +297,13 @@ export const UI_CONFIG_DEFAULTS: JsonObject = {
   writerMode: false
 };
 
-function buildConfigValue(model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, subsequent: boolean): JsonObject {
+function buildConfigValue(model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, subsequent: boolean, reasoningEffort?: string | undefined): JsonObject {
   const integrations = webSearch || workspaceSearch;
   return {
     ...UI_CONFIG_DEFAULTS,
     model,
     modelFromUser: true,
+    ...(reasoningEffort ? { reasoningEffort } : {}),
     useWebSearch: webSearch,
     useReadOnlyMode: readOnly,
     ...(integrations ? { searchScopes: [{ type: "everything" }] } : {}),
@@ -409,7 +411,7 @@ export class NotionClient {
 
   private buildContext(account: AccountContext, datetime: string, hasAttachments = false): JsonObject { return { timezone: account.timezone, userName: account.userName, userId: account.userId, userEmail: account.userEmail, spaceName: account.spaceName, spaceId: account.spaceId, spaceViewId: account.spaceViewId, currentDatetime: datetime, surface: hasAttachments ? "workflows" : "ai_module" }; }
 
-  private buildInferenceBody(account: AccountContext, prompt: string, model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, session: ChatSession, attachments: TranscriptUploadRecord[] = []): JsonObject {
+  private buildInferenceBody(account: AccountContext, prompt: string, model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, session: ChatSession, attachments: TranscriptUploadRecord[] = [], reasoningEffort?: string | undefined): JsonObject {
     const sub = session.turnCount > 0;
     const now = new Date().toISOString();
     const userStep: JsonObject = { id: randomUUID(), type: "user", value: [[prompt]], userId: account.userId, createdAt: now };
@@ -437,7 +439,7 @@ export class NotionClient {
       };
     });
     const transcript: JsonObject[] = [
-      { id: session.configId, type: "config", value: buildConfigValue(model, webSearch, workspaceSearch, readOnly, sub) },
+      { id: session.configId, type: "config", value: buildConfigValue(model, webSearch, workspaceSearch, readOnly, sub, reasoningEffort) },
       { id: session.contextId, type: "context", value: this.buildContext(account, session.originalDatetime, attachments.length > 0) },
       ...session.updatedConfigIds.map((id) => ({ id, type: "updated-config" })),
       ...attachmentSteps,
@@ -472,6 +474,7 @@ export class NotionClient {
   private async _chatInternal(options: ChatOptions): Promise<ChatResult> {
     const account = await this.account();
     const model = normalizeModelName(options.model, this.config.defaultModel);
+    const requestedEffort = normalizeReasoningEffort(model, options.reasoningEffort);
     const fileIds = normalizedFileIds(options.fileIds);
     const resolvedTranscriptFiles = fileIds.map((id) => this.transcriptUploads.get(id));
     const transcriptFileCount = resolvedTranscriptFiles.filter((file): file is TranscriptUploadRecord => file !== undefined).length;
@@ -499,24 +502,26 @@ export class NotionClient {
       session = {
         threadId: randomUUID(), configId: randomUUID(), contextId: randomUUID(), originalDatetime: new Date().toISOString(),
         model, updatedConfigIds: [], turnCount: 0,
+        ...(requestedEffort ? { reasoningEffort: requestedEffort } : {}),
         transport: fileIds.length > 0 ? "agent_service" : "inference_transcript"
       };
     }
+    const reasoningEffort = requestedEffort ?? session.reasoningEffort;
     if (session.transport === "agent_service") {
       if (transcriptFiles.length > 0) throw new Error("Inference-transcript attachment handles cannot be used in an Agent Service conversation");
-      return this.agentServiceChat(account, model, session, options, fileIds);
+      return this.agentServiceChat(account, model, session, options, fileIds, reasoningEffort);
     }
     if (fileIds.length > 0 && transcriptFiles.length === 0) throw new Error("Uploaded file IDs cannot be added to a legacy chat unless they are inference-transcript attachment handles. Start a new chat without conversationId.");
     if (transcriptFiles.some((file) => file.usedInChat)) throw new Error("An inference-transcript attachment handle can only be attached once");
     const prompt = promptWithLegacyAttachments(options.prompt, options.attachments ?? []);
-    const body = this.buildInferenceBody(account, prompt, model, options.webSearch ?? false, options.workspaceSearch ?? false, options.readOnly ?? true, session, transcriptFiles);
+    const body = this.buildInferenceBody(account, prompt, model, options.webSearch ?? false, options.workspaceSearch ?? false, options.readOnly ?? true, session, transcriptFiles, reasoningEffort);
     const response = await this.request("runInferenceTranscript", body, true);
     if (!response.body) throw new Error("runInferenceTranscript returned no response stream");
     const parsed = await parseInferenceStream(response.body);
     if (!parsed.text.trim()) throw new Error("Notion AI returned an empty response");
     for (const file of transcriptFiles) file.usedInChat = true;
-    session.turnCount += 1; session.updatedConfigIds.push(randomUUID()); session.model = model; this.sessions.set(session.threadId, session);
-    return { conversationId: session.threadId, text: parsed.text, model, usage: { inputTokens: parsed.inputTokens, outputTokens: parsed.outputTokens } };
+    session.turnCount += 1; session.updatedConfigIds.push(randomUUID()); session.model = model; session.reasoningEffort = reasoningEffort; this.sessions.set(session.threadId, session);
+    return { conversationId: session.threadId, text: parsed.text, model, ...(reasoningEffort ? { reasoningEffort } : {}), usage: { inputTokens: parsed.inputTokens, outputTokens: parsed.outputTokens } };
   }
 
   private async signedRequest(url: string, init: RequestInit, label: string): Promise<Response> {
@@ -1050,7 +1055,7 @@ export class NotionClient {
     throw new Error("Timed out waiting for the Notion Agent Service response");
   }
 
-  private async agentServiceChat(account: AccountContext, model: string, session: ChatSession, options: ChatOptions, fileIds: string[]): Promise<ChatResult> {
+  private async agentServiceChat(account: AccountContext, model: string, session: ChatSession, options: ChatOptions, fileIds: string[], reasoningEffort?: string | undefined): Promise<ChatResult> {
     if (options.attachments?.length) throw new Error("For real file attachments, use upload_attachment and pass the returned IDs as fileIds");
     const content: JsonObject[] = [
       { type: "text", text: options.prompt },
@@ -1065,6 +1070,7 @@ export class NotionClient {
         threadId: session.threadId,
         event: { type: "user.message", content },
         model,
+        ...(reasoningEffort ? { reasoningEffort } : {}),
         policies: { approval_mode: "ask" },
         browserEnabled: options.webSearch ?? false,
         clientEventId: clientMessageId
@@ -1076,6 +1082,7 @@ export class NotionClient {
         threadId: session.threadId,
         content,
         model,
+        ...(reasoningEffort ? { reasoningEffort } : {}),
         policies: { approval_mode: "ask" },
         browserEnabled: options.webSearch ?? false,
         clientMessageId
@@ -1085,9 +1092,10 @@ export class NotionClient {
     if (!text.trim()) throw new Error("Notion Agent Service returned an empty response");
     session.turnCount += 1;
     session.model = model;
+    session.reasoningEffort = reasoningEffort;
     session.transport = "agent_service";
     this.sessions.set(session.threadId, session);
-    return { conversationId: session.threadId, text, model, usage: { inputTokens: 0, outputTokens: 0 } };
+    return { conversationId: session.threadId, text, model, ...(reasoningEffort ? { reasoningEffort } : {}), usage: { inputTokens: 0, outputTokens: 0 } };
   }
 
   /** Raw internal-API POST used by the management tools. */
