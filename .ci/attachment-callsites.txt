@@ -1,4 +1,4 @@
-researched_at=2026-08-15T05:30:34Z
+researched_at=2026-08-15T06:44:43Z
 method=wget full chunk map plus module-export callsite tracing
 chunks_downloaded=2110 chunks_total=2111
 owner_module_found=true owner_source=chunk:43097:43097-54870a34e78cbfb8.js owner_module_id=858704 owner_module_bytes=31600
