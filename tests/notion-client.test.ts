@@ -242,6 +242,7 @@ test("chat creates a workflow thread and continues it with a partial transcript"
   const firstConfig = ((inferenceBodies[0]?.transcript as Array<Record<string, unknown>>)[0]?.value ?? {}) as Record<string, unknown>;
   assert.equal(firstConfig.model, "test-model");
   assert.equal(firstConfig.modelFromUser, true);
+  assert.equal(firstConfig.reasoningEffort, undefined);
   assert.equal(firstConfig.isThreadStartedByAdmin, undefined);
   assert.equal(inferenceBodies[1]?.createThread, false);
   assert.equal(inferenceBodies[1]?.isPartialTranscript, true);
@@ -537,4 +538,50 @@ test("renameConversation verifies ownership and updates thread data", async () =
     args: { title: "After" }
   });
   await assert.rejects(() => client.renameConversation(threadId, "bad\nname"), /one line/);
+});
+
+test("chat persists the requested reasoning effort and reuses it for later turns", async () => {
+  const inferenceBodies: Record<string, unknown>[] = [];
+  const fakeFetch = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    inferenceBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    return ndjsonResponse([
+      { type: "agent-inference", id: "step", value: [{ type: "text", content: "Answer" }], finishedAt: Date.now(), inputTokens: 1, outputTokens: 1 }
+    ]);
+  };
+  const client = new NotionClient(config, fakeFetch as typeof fetch);
+  const first = await client.chat({ prompt: "First", model: "gpt-5.4", reasoningEffort: "high" });
+  assert.equal(first.model, "oval-kumquat-medium");
+  assert.equal(first.reasoningEffort, "high");
+  const firstConfig = ((inferenceBodies[0]?.transcript as Array<Record<string, unknown>>)[0]?.value ?? {}) as Record<string, unknown>;
+  assert.equal(firstConfig.model, "oval-kumquat-medium");
+  assert.equal(firstConfig.modelFromUser, true);
+  assert.equal(firstConfig.reasoningEffort, "high");
+
+  const second = await client.chat({ prompt: "Second", model: "gpt-5.4", conversationId: first.conversationId });
+  assert.equal(second.reasoningEffort, "high");
+  const secondConfig = ((inferenceBodies[1]?.transcript as Array<Record<string, unknown>>)[0]?.value ?? {}) as Record<string, unknown>;
+  assert.equal(secondConfig.reasoningEffort, "high");
+
+  const third = await client.chat({ prompt: "Third", model: "gpt-5.4", reasoningEffort: "medium", conversationId: first.conversationId });
+  assert.equal(third.reasoningEffort, "medium");
+  const thirdConfig = ((inferenceBodies[2]?.transcript as Array<Record<string, unknown>>)[0]?.value ?? {}) as Record<string, unknown>;
+  assert.equal(thirdConfig.reasoningEffort, "medium");
+});
+
+test("chat rejects an effort the selected model does not expose", async () => {
+  let calls = 0;
+  const fakeFetch = async (): Promise<Response> => {
+    calls += 1;
+    return ndjsonResponse([{ type: "agent-inference", value: [{ type: "text", content: "unexpected" }] }]);
+  };
+  const client = new NotionClient(config, fakeFetch as typeof fetch);
+  await assert.rejects(
+    () => client.chat({ prompt: "Hello", model: "gpt-5.4", reasoningEffort: "low" }),
+    /does not support reasoningEffort "low"/
+  );
+  await assert.rejects(
+    () => client.chat({ prompt: "Hello", model: "Claude Opus 4.5", reasoningEffort: "high" }),
+    /has no reasoningEffort picker/
+  );
+  assert.equal(calls, 0);
 });

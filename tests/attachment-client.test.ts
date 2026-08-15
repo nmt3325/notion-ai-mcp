@@ -207,8 +207,10 @@ test("file-ID chat uses current Agent Service create and send event content", as
       return new Response("unexpected", { status: 500 });
     };
     const client = new NotionClient(config(root), fakeFetch as typeof fetch);
-    const first = await client.chat({ prompt: "Read this file", model: "fast", fileIds: ["file-1"] });
+    const first = await client.chat({ prompt: "Read this file", model: "fast", reasoningEffort: "high", fileIds: ["file-1"] });
     assert.equal(first.text, "First answer");
+    assert.equal(first.reasoningEffort, "high");
+    assert.equal(createBody?.reasoningEffort, "high");
     assert.deepEqual(createBody?.content, [
       { type: "text", text: "Read this file" },
       { type: "file", file_id: "file-1" }
@@ -219,6 +221,7 @@ test("file-ID chat uses current Agent Service create and send event content", as
     assert.equal(second.text, "Second answer");
     assert.deepEqual(sendBody?.event, { type: "user.message", content: [{ type: "text", text: "Continue" }] });
     assert.deepEqual(sendBody?.policies, { approval_mode: "ask" });
+    assert.equal(sendBody?.reasoningEffort, "high");
     assert.equal(sendBody?.clientEventId === undefined, false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

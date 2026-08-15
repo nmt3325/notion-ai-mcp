@@ -219,6 +219,7 @@ notion-ai-mcp.example.com {
 
 - `prompt` (必須)
 - `model` (任意、Notion 内部 model ID)
+- `reasoningEffort` (任意、`none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`)
 - `conversationId` (任意、このサーバープロセスが直前に返した ID)
 - `webSearch` / `workspaceSearch` (既定 `false`)
 - `readOnly` (既定 `true`、legacy text chat の Notion Ask mode)
@@ -296,6 +297,29 @@ NOTION_ACCOUNT_FILE=/absolute/path/account.json NOTION_SMOKE_CHAT=1 npm run smok
 
 別名は大文字小文字・空白・`_`・`()` を無視して照合します。未知の値はそのまま Notion に渡します。
 `NOTION_MODEL_ALIASES` の JSON で別名を上書きできます。レジストリの再抽出は `scripts/extract-models.cjs` を使います。
+
+## 思考の深さ（reasoningEffort）
+
+`notion_ai_chat` の `reasoningEffort` は、Notion Web client が thread config に保存するのと同じ
+`reasoningEffort` フィールドを、`model` / `modelFromUser` と並べて送信します（Agent Service 経由の
+添付 chat では `createAgentThread` / `sendEventToAgentThread` の body に同名フィールドとして付与）。
+値を省略した場合はフィールド自体を送らず、Notion 側の既定 effort が使われます。
+
+effort を持つのは Notion の model registry で `modelConfiguration` が定義されたモデルだけです。
+
+| モデル | 指定できる effort | 既定 |
+|---|---|---|
+| `oatmeal-cookie` (GPT-5.2) / `oval-kumquat` / `oval-kumquat-medium` / `opal-quince` / `opal-quince-medium` | `medium`, `high` | `medium` |
+| `oatmeal-cookie-high-thinking` / `oval-kumquat-high` / `opal-quince-high` | `medium`, `high` | `high` |
+| `almond-croissant-*` (Sonnet 4.6) / `ambrosia-tart-*` / `acai-budino-high` / `agave-flan` | `low`, `medium`, `high`, `max` | モデル名の tier |
+| `orange-mousse` / `orchid-muffin` / `olive-jellyroll` | `none`, `low`, `medium`, `high`, `xhigh`, `max` | `medium` |
+| `vertex-gemini-3.5-flash` | `low`, `medium`, `high` | `low` |
+| `grapefruit-zeppole` | `low`, `medium`, `high` | `medium` |
+
+- `High` / `X-High` / `no thinking` / `maximum` などの表記ゆれは正規化して照合します。
+- モデルが受け付けない effort（例: `gpt-5.4` へ `low`）や effort picker を持たないモデル（例: `Claude Opus 4.5`）は
+  送信前にエラーにし、使える値を提示します。
+- 同じ `conversationId` を継続する際に `reasoningEffort` を省略すると、初回に選んだ effort をそのまま引き継ぎます。
 
 ## ワークスペース切り替えとクレジット対策
 
