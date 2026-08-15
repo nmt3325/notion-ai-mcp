@@ -24,6 +24,7 @@ const NOTION_FILE_PROXY_ORIGIN = ["https:", "", "app.notion.com"].join("/");
 type JsonObject = Record<string, unknown>;
 
 interface TranscriptPage { transcripts?: Array<Record<string, unknown>>; threadIds?: string[]; unreadThreadIds?: string[]; nextCursor?: string | null; hasMore?: boolean; recordMap?: { thread?: Record<string, unknown> } }
+interface RecoveredThreadSteps { configId?: string; contextId?: string; updatedConfigIds: string[]; model?: string; reasoningEffort?: string }
 interface ThreadLookup { page: TranscriptPage; transcript: Record<string, unknown> | null; thread: Record<string, unknown> }
 
 interface ChatOptions {
@@ -340,6 +341,15 @@ export function parseInferenceLines(lines: string[]): ParsedInferenceStream {
   return { text: cleanLangTags(text), inputTokens, outputTokens, eventTypes };
 }
 
+/** Explains a text-less inference stream instead of reporting a bare "empty response". */
+export function emptyAnswerMessage(spaceId: string, session: { rehydrated?: boolean | undefined }, eventTypes: Record<string, number>): string {
+  const seen = Object.entries(eventTypes).map(([type, count]) => `${type}=${count}`).join(", ") || "no events";
+  const hint = session.rehydrated
+    ? "Notion rejected the resumed thread state, so start a new chat without conversationId."
+    : "The workspace may be out of AI credits or the turn was dropped before generation; check list_workspaces, switch_workspace, then retry.";
+  return `Notion AI streamed no answer text (workspace ${spaceId}; stream events: ${seen}). ${hint}`;
+}
+
 function applyPatchReplacement(current: string, replacement: string): string { const langIndex = current.lastIndexOf("<lang"); return langIndex >= 0 ? current.slice(0, langIndex) + replacement : current + replacement; }
 
 export async function parseInferenceStream(stream: ReadableStream<Uint8Array>): Promise<ParsedInferenceStream> { const reader = stream.getReader(); const decoder = new TextDecoder(); let buffer = ""; const lines: string[] = []; while (true) { const { value, done } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true }); let newline = buffer.indexOf("\n"); while (newline >= 0) { lines.push(buffer.slice(0, newline).trimEnd()); buffer = buffer.slice(newline + 1); newline = buffer.indexOf("\n"); } } buffer += decoder.decode(); if (buffer.trim()) lines.push(buffer.trim()); return parseInferenceLines(lines); }
@@ -454,6 +464,37 @@ export class NotionClient {
   private async findThread(threadId: string, maxPages: number): Promise<ThreadLookup> { let cursor: string | undefined; for (let pi = 0; pi < maxPages; pi += 1) { const page = await this.transcriptPage(cursor); const rawThread = page.recordMap?.thread?.[threadId]; if (rawThread) { const t = (page.transcripts ?? []).find((item) => asString(object(item).id) === threadId) ?? null; return { page, transcript: t, thread: unwrapRecord(rawThread) }; } if (!page.hasMore || !page.nextCursor) break; cursor = page.nextCursor; } throw new Error(`Conversation ${threadId} was not found`); }
 
   private async fetchThreadMessages(messageIds: string[]): Promise<Record<string, unknown>> { const account = await this.account(); const records: Record<string, unknown> = {}; for (let i = 0; i < messageIds.length; i += 100) { const batch = messageIds.slice(i, i + 100); const resp = await this.fetchJson("syncRecordValuesMain", { requests: batch.map((id) => ({ pointer: { table: "thread_message", id, spaceId: account.spaceId }, version: -1 })) }); Object.assign(records, object(object(resp.recordMap).thread_message)); } return records; }
+
+  /**
+   * Reads back the config/context/updated-config steps Notion already stored for a thread.
+   *
+   * Notion validates a partial transcript against the step ids it has on record, so resuming a
+   * conversation has to replay those ids. Inventing fresh ones makes the server accept the request
+   * and then stream no assistant text at all.
+   */
+  private async recoverThreadSteps(messageIds: string[]): Promise<RecoveredThreadSteps> {
+    const records = await this.fetchThreadMessages(messageIds);
+    const recovered: RecoveredThreadSteps = { updatedConfigIds: [] };
+    for (const id of messageIds) {
+      const step = object(unwrapRecord(records[id]).step);
+      const type = asString(step.type);
+      const stepId = asString(step.id) || id;
+      if (type === "config") {
+        if (recovered.configId) continue;
+        recovered.configId = stepId;
+        const value = object(step.value);
+        const storedModel = asString(value.model);
+        const storedEffort = asString(value.reasoningEffort);
+        if (storedModel) recovered.model = storedModel;
+        if (storedEffort) recovered.reasoningEffort = storedEffort;
+      } else if (type === "context") {
+        if (!recovered.contextId) recovered.contextId = stepId;
+      } else if (type === "updated-config") {
+        recovered.updatedConfigIds.push(stepId);
+      }
+    }
+    return recovered;
+  }
 
   async getConversation(threadId: string, maxPages = 20): Promise<Conversation> { const found = await this.findThread(threadId, Math.min(Math.max(maxPages, 1), 100)); const messageIds = arrayOfStrings(found.thread.messages); const records = await this.fetchThreadMessages(messageIds); const t = found.transcript ?? {}; return { id: threadId, title: asString(t.title) || asString(object(found.thread.data).title) || "Untitled", type: asString(t.type) || asString(found.thread.type, "workflow"), createdAt: asNumber(t.created_at) ?? asNumber(found.thread.created_time), updatedAt: asNumber(t.updated_at) ?? asNumber(found.thread.updated_time), messages: parseConversationMessages(messageIds, records) }; }
 
@@ -669,16 +710,27 @@ export class NotionClient {
    * Without this, a conversation whose call timed out (or that was started before a restart) could
    * never be continued, because the session lived only in the memory of the previous process.
    */
-  private async rehydrateSession(conversationId: string, model: string, reasoningEffort: string | undefined): Promise<ChatSession | null> {
+  private async rehydrateSession(conversationId: string, model: string, reasoningEffort: string | undefined, modelRequested = false): Promise<ChatSession | null> {
     if (this.config.allowSessionRehydrate === false) return null;
     const found = await this.findThread(conversationId, 20).catch(() => null);
     if (!found) return null;
+    const messageIds = arrayOfStrings(found.thread.messages);
+    const stored = await this.recoverThreadSteps(messageIds).catch(() => null);
+    // Without the original config and context ids Notion answers a partial transcript with an empty
+    // stream, so refuse to resume instead of burning credits on a request that cannot produce text.
+    if (!stored?.configId || !stored.contextId) {
+      throw new Error(`Conversation ${conversationId} cannot be resumed because Notion no longer exposes the config and context steps it was started with. Start a new chat without conversationId.`);
+    }
+    const resumedModel = modelRequested ? model : stored.model ?? model;
+    // Only inherit the stored effort when the stored model comes with it; mixing a caller-picked
+    // model with a foreign effort would fail validation.
+    const resumedEffort = reasoningEffort ?? (resumedModel === stored.model ? stored.reasoningEffort : undefined);
     const session: ChatSession = {
-      threadId: conversationId, configId: randomUUID(), contextId: randomUUID(),
+      threadId: conversationId, configId: stored.configId, contextId: stored.contextId,
       originalDatetime: new Date(asNumber(found.thread.created_time) ?? Date.now()).toISOString(),
-      model, ...(reasoningEffort ? { reasoningEffort } : {}), updatedConfigIds: [],
+      model: resumedModel, ...(resumedEffort ? { reasoningEffort: resumedEffort } : {}), updatedConfigIds: stored.updatedConfigIds,
       // A non-zero turn count keeps the request a partial transcript, so Notion appends to the existing thread.
-      turnCount: Math.max(1, arrayOfStrings(found.thread.messages).length), transport: "inference_transcript", rehydrated: true
+      turnCount: Math.max(1, messageIds.length), transport: "inference_transcript", rehydrated: true
     };
     this.rememberSession(session);
     return session;
@@ -707,7 +759,14 @@ export class NotionClient {
 
     let session: ChatSession;
     if (options.conversationId) {
-      const known = this.sessions.get(options.conversationId) ?? await this.rehydrateSession(options.conversationId, model, requestedEffort);
+      const cached = this.sessions.get(options.conversationId);
+      // A session whose first turn never finished locally (timed-out stream, answer recovered from the
+      // thread) still looks brand new, and sending it as-is would ask Notion to create the thread twice.
+      const stale = cached !== undefined && cached.turnCount === 0 && cached.transport === "inference_transcript" && fileIds.length === 0;
+      const refreshed = stale
+        ? await this.rehydrateSession(options.conversationId, model, requestedEffort, Boolean(options.model)).catch(() => null)
+        : null;
+      const known = refreshed ?? cached ?? await this.rehydrateSession(options.conversationId, model, requestedEffort, Boolean(options.model));
       if (!known) throw new Error(`Conversation ${options.conversationId} was not found in this workspace, so it cannot be continued. Start a new chat without conversationId, or switch to the workspace that owns it.`);
       session = known;
       if (transcriptFiles.length > 0 && transcriptFiles[0]?.threadId !== session.threadId) throw new Error("Attachment handle belongs to another conversation");
@@ -725,21 +784,24 @@ export class NotionClient {
       };
     }
     const reasoningEffort = requestedEffort ?? session.reasoningEffort;
+    // A rehydrated session carries the model Notion recorded on the thread, so a resumed turn keeps
+    // answering with that model unless the caller names a different one.
+    const effectiveModel = session.rehydrated === true && !options.model ? session.model || model : model;
     if (session.transport === "agent_service") {
       if (transcriptFiles.length > 0) throw new Error("Inference-transcript attachment handles cannot be used in an Agent Service conversation");
-      return this.agentServiceChat(account, model, session, options, fileIds, reasoningEffort);
+      return this.agentServiceChat(account, effectiveModel, session, options, fileIds, reasoningEffort);
     }
     if (fileIds.length > 0 && transcriptFiles.length === 0) throw new Error("Uploaded file IDs cannot be added to a legacy chat unless they are inference-transcript attachment handles. Start a new chat without conversationId.");
     if (transcriptFiles.some((file) => file.usedInChat)) throw new Error("An inference-transcript attachment handle can only be attached once");
     const prompt = promptWithLegacyAttachments(options.prompt, options.attachments ?? []);
-    const body = this.buildInferenceBody(account, prompt, model, options.webSearch ?? false, options.workspaceSearch ?? false, options.readOnly ?? true, session, transcriptFiles, reasoningEffort);
+    const body = this.buildInferenceBody(account, prompt, effectiveModel, options.webSearch ?? false, options.workspaceSearch ?? false, options.readOnly ?? true, session, transcriptFiles, reasoningEffort);
     const response = await this.request("runInferenceTranscript", body, true);
     if (!response.body) throw new Error("runInferenceTranscript returned no response stream");
     const parsed = await parseInferenceStream(response.body);
-    if (!parsed.text.trim()) throw new Error("Notion AI returned an empty response");
+    if (!parsed.text.trim()) throw new Error(emptyAnswerMessage(account.spaceId, session, parsed.eventTypes));
     for (const file of transcriptFiles) file.usedInChat = true;
-    session.turnCount += 1; session.updatedConfigIds.push(randomUUID()); session.model = model; session.reasoningEffort = reasoningEffort; this.rememberSession(session);
-    return { conversationId: session.threadId, text: parsed.text, model, ...(reasoningEffort ? { reasoningEffort } : {}), usage: { inputTokens: parsed.inputTokens, outputTokens: parsed.outputTokens } };
+    session.turnCount += 1; session.updatedConfigIds.push(randomUUID()); session.model = effectiveModel; session.reasoningEffort = reasoningEffort; this.rememberSession(session);
+    return { conversationId: session.threadId, text: parsed.text, model: effectiveModel, ...(reasoningEffort ? { reasoningEffort } : {}), usage: { inputTokens: parsed.inputTokens, outputTokens: parsed.outputTokens } };
   }
 
   private async signedRequest(url: string, init: RequestInit, label: string): Promise<Response> {
