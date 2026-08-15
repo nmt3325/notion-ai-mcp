@@ -1,0 +1,69 @@
+# docker compose v2.24 以降が必要 (env_file の required: false を使用)
+# 使い方:
+#   cp .env.example .env   # NOTION_TOKEN_V2 と NOTION_MCP_HTTP_BEARER_TOKEN を設定
+#   docker compose up -d
+#   docker compose run --rm -T mcp-stdio      # stdio モード
+name: notion-ai-mcp
+
+x-base: &base
+  image: ${NOTION_AI_MCP_IMAGE:-ghcr.io/nmt3325/notion-ai-mcp:latest}
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      NODE_VERSION: "22"
+  env_file:
+    - path: .env
+      required: false
+  volumes:
+    - notion-ai-mcp-data:/data
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  # Remote Streamable HTTP (既定)
+  mcp-http:
+    <<: *base
+    container_name: notion-ai-mcp-http
+    command: ["node", "dist/src/http.js"]
+    restart: unless-stopped
+    environment:
+      NOTION_ATTACHMENT_ROOT: /data
+      NOTION_MCP_REGISTRY_FILE: ${NOTION_MCP_REGISTRY_FILE:-/data/mcp-connections.json}
+      NOTION_MCP_HTTP_HOST: 0.0.0.0
+      NOTION_MCP_HTTP_PORT: "3000"
+      NOTION_MCP_HTTP_PATH: ${NOTION_MCP_HTTP_PATH:-/mcp}
+    ports:
+      # 既定では loopback のみに公開。外部公開は TLS リバースプロキシ経由で。
+      - "${NOTION_MCP_HTTP_BIND_ADDRESS:-127.0.0.1}:${NOTION_MCP_HTTP_PUBLISH_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 10s
+
+  # stdio (Claude Code / Cursor などから直接起動する場合)
+  mcp-stdio:
+    <<: *base
+    profiles: ["stdio"]
+    container_name: notion-ai-mcp-stdio
+    command: ["node", "dist/src/index.js"]
+    environment:
+      NOTION_ATTACHMENT_ROOT: /data
+      NOTION_MCP_REGISTRY_FILE: ${NOTION_MCP_REGISTRY_FILE:-/data/mcp-connections.json}
+    stdin_open: true
+    tty: false
+    restart: "no"
+
+volumes:
+  notion-ai-mcp-data:

@@ -163,6 +163,61 @@ notion-ai-mcp.example.com {
 }
 ```
 
+## Docker
+
+### イメージの取得
+
+`main` への push と `v*` タグで GHCR に自動ビルド・自動 push されます
+(`.github/workflows/docker-image.yml`、linux/amd64 + linux/arm64)。
+
+```bash
+docker pull ghcr.io/nmt3325/notion-ai-mcp:latest
+```
+
+タグは `latest` / `main` / `sha-<commit>` / `v1.2.3` / `1.2` が付きます。
+リポジトリが private の間は package も private なので、pull 前に
+`echo $GHCR_PAT | docker login ghcr.io -u nmt3325 --password-stdin` が必要です。
+
+### docker compose で HTTP モードを起動
+
+```bash
+cp .env.example .env      # NOTION_TOKEN_V2 と NOTION_MCP_HTTP_BEARER_TOKEN(32文字以上) を設定
+docker compose up -d
+curl -fsS http://127.0.0.1:3000/healthz   # {"status":"ok"}
+docker compose logs -f mcp-http
+```
+
+- コンテナ内では `NOTION_MCP_HTTP_HOST=0.0.0.0` 固定、公開側は既定で `127.0.0.1:3000` のみ。
+  LAN に出すなら `NOTION_MCP_HTTP_BIND_ADDRESS=0.0.0.0`、インターネット公開は TLS リバースプロキシ経由で。
+- 添付ファイルの入出力は named volume `notion-ai-mcp-data` を `/data` にマウントし
+  `NOTION_ATTACHMENT_ROOT=/data` / `NOTION_MCP_REGISTRY_FILE=/data/mcp-connections.json` としています。
+  ホストのファイルを渡したい場合は `- ./work:/data` などに差し替えてください。
+- コンテナは `read_only` + `no-new-privileges` + 非 root (`node`) 実行。書き込みは `/data` と `/tmp` のみ。
+
+### stdio モード
+
+```bash
+docker compose run --rm -T mcp-stdio
+# または compose なしで
+docker run -i --rm --env-file .env -v notion-ai-mcp-data:/data \
+  ghcr.io/nmt3325/notion-ai-mcp:latest node dist/src/index.js
+```
+
+Claude Code / Cursor に登録する場合は `command` を `docker`、`args` を
+`["run","-i","--rm","--env-file","/abs/path/.env","ghcr.io/nmt3325/notion-ai-mcp:latest","node","dist/src/index.js"]`
+にします。
+
+### ローカルビルド
+
+```bash
+docker compose build            # compose 経由
+docker build -t notion-ai-mcp:dev .
+docker build --build-arg NODE_VERSION=24 -t notion-ai-mcp:node24 .
+```
+
+multi-stage なので最終イメージには `dist/` と本番依存のみが入ります
+(tsc / devDependencies / tests は含まれません)。
+
 ## MCP クライアント登録
 
 先に `npm run build` を実行し、以下のパスを絶対パスへ置き換えます。
