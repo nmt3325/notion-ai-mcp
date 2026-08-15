@@ -176,3 +176,95 @@ export function listModels(): Array<{ modelId: string; displayName: string; fami
     ...extra.map((modelId) => ({ modelId, displayName: modelId, displayNameWithProvider: modelId, family: "unknown", group: "unknown", pickable: false, aliases: (byModel.get(modelId) ?? []).sort() }))
   ];
 }
+
+/** Effort tiers accepted by the current Notion thread config (`reasoningEffort`). */
+export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+export interface ModelReasoningEfforts {
+  supported: ReasoningEffort[];
+  default: ReasoningEffort;
+}
+
+const MEDIUM_HIGH: ReasoningEffort[] = ["medium", "high"];
+const LOW_TO_MAX: ReasoningEffort[] = ["low", "medium", "high", "max"];
+const LOW_TO_HIGH: ReasoningEffort[] = ["low", "medium", "high"];
+const NONE_TO_MAX: ReasoningEffort[] = ["none", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * `modelConfiguration.supportedReasoningEfforts` / `defaultReasoningEffort` taken from the Notion
+ * web bundle model registry. Models missing here render no effort picker in the Notion UI.
+ */
+export const MODEL_REASONING_EFFORTS: Record<string, ModelReasoningEfforts> = {
+  "opal-quince": { supported: MEDIUM_HIGH, default: "medium" },
+  "opal-quince-medium": { supported: MEDIUM_HIGH, default: "medium" },
+  "opal-quince-high": { supported: MEDIUM_HIGH, default: "high" },
+  "oatmeal-cookie": { supported: MEDIUM_HIGH, default: "medium" },
+  "oatmeal-cookie-medium-thinking": { supported: MEDIUM_HIGH, default: "medium" },
+  "oatmeal-cookie-high-thinking": { supported: MEDIUM_HIGH, default: "high" },
+  "oval-kumquat": { supported: MEDIUM_HIGH, default: "medium" },
+  "oval-kumquat-medium": { supported: MEDIUM_HIGH, default: "medium" },
+  "oval-kumquat-high": { supported: MEDIUM_HIGH, default: "high" },
+  "orange-mousse": { supported: NONE_TO_MAX, default: "medium" },
+  "orchid-muffin": { supported: NONE_TO_MAX, default: "medium" },
+  "olive-jellyroll": { supported: NONE_TO_MAX, default: "medium" },
+  "almond-croissant-max": { supported: LOW_TO_MAX, default: "max" },
+  "almond-croissant-high": { supported: LOW_TO_MAX, default: "high" },
+  "almond-croissant-medium": { supported: LOW_TO_MAX, default: "medium" },
+  "almond-croissant-low": { supported: LOW_TO_MAX, default: "low" },
+  "ambrosia-tart-max": { supported: LOW_TO_MAX, default: "max" },
+  "ambrosia-tart-high": { supported: LOW_TO_MAX, default: "high" },
+  "ambrosia-tart-medium": { supported: LOW_TO_MAX, default: "medium" },
+  "ambrosia-tart-low": { supported: LOW_TO_MAX, default: "low" },
+  "acai-budino-high": { supported: LOW_TO_MAX, default: "high" },
+  "agave-flan": { supported: LOW_TO_MAX, default: "medium" },
+  "vertex-gemini-3.5-flash": { supported: LOW_TO_HIGH, default: "low" },
+  "grapefruit-zeppole": { supported: LOW_TO_HIGH, default: "medium" }
+};
+
+const EFFORT_ALIASES: Record<string, ReasoningEffort> = {
+  none: "none",
+  off: "none",
+  disabled: "none",
+  "no-thinking": "none",
+  minimal: "minimal",
+  min: "minimal",
+  low: "low",
+  medium: "medium",
+  med: "medium",
+  high: "high",
+  xhigh: "xhigh",
+  "x-high": "xhigh",
+  "extra-high": "xhigh",
+  "very-high": "xhigh",
+  max: "max",
+  maximum: "max"
+};
+
+/** Registry effort configuration for one internal model ID, when Notion exposes an effort picker. */
+export function modelReasoningEfforts(modelId: string): ModelReasoningEfforts | undefined {
+  return MODEL_REASONING_EFFORTS[modelId];
+}
+
+/**
+ * Resolves a requested effort against the model registry. Returns undefined when no effort was
+ * requested so the transcript config stays byte-identical to the current Notion web client.
+ */
+export function normalizeReasoningEffort(modelId: string, value: string | undefined): ReasoningEffort | undefined {
+  const raw = (value ?? "").trim();
+  if (!raw) return undefined;
+  const effort = EFFORT_ALIASES[normalizeKey(raw)];
+  if (!effort) throw new Error(`Unknown reasoningEffort "${raw}". Supported values: ${REASONING_EFFORTS.join(", ")}`);
+  const config = MODEL_REASONING_EFFORTS[modelId];
+  if (!config) {
+    if (KNOWN_MODEL_IDS.includes(modelId)) {
+      throw new Error(`Model ${modelId} has no reasoningEffort picker in the Notion model registry; omit reasoningEffort or pick a model that has one, such as oatmeal-cookie, oval-kumquat-medium, or almond-croissant-low`);
+    }
+    return effort;
+  }
+  if (!config.supported.includes(effort)) {
+    throw new Error(`Model ${modelId} does not support reasoningEffort "${effort}". Supported: ${config.supported.join(", ")} (default ${config.default})`);
+  }
+  return effort;
+}

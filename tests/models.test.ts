@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MODEL_CATALOG, listModels, normalizeKey, normalizeModelName } from "../src/models.js";
+import { MODEL_CATALOG, listModels, modelReasoningEfforts, normalizeKey, normalizeModelName, normalizeReasoningEffort } from "../src/models.js";
 
 test("tier aliases map to internal model IDs", () => {
   assert.equal(normalizeModelName("fast", "almond-croissant-low"), "almond-croissant-low");
@@ -40,4 +40,26 @@ test("listModels groups aliases per model", () => {
   assert.equal(normalizeKey(" Deep Think "), "deep-think");
   assert.equal(listModels().find((entry) => entry.modelId === "openai-gpt-4o-mini")?.pickable, false);
   assert.equal(listModels().find((entry) => entry.modelId === "anthropic-haiku-4.5")?.pickable, false);
+});
+
+test("reasoning efforts follow the Notion model registry", () => {
+  assert.deepEqual(modelReasoningEfforts("oatmeal-cookie"), { supported: ["medium", "high"], default: "medium" });
+  assert.deepEqual(modelReasoningEfforts("oval-kumquat-high"), { supported: ["medium", "high"], default: "high" });
+  assert.deepEqual(modelReasoningEfforts("almond-croissant-low"), { supported: ["low", "medium", "high", "max"], default: "low" });
+  assert.deepEqual(modelReasoningEfforts("olive-jellyroll")?.supported, ["none", "low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(modelReasoningEfforts("vertex-gemini-3.5-flash"), { supported: ["low", "medium", "high"], default: "low" });
+  assert.equal(modelReasoningEfforts("apple-danish"), undefined);
+});
+
+test("reasoning effort aliases resolve and unsupported values are rejected", () => {
+  assert.equal(normalizeReasoningEffort("oatmeal-cookie", "High"), "high");
+  assert.equal(normalizeReasoningEffort("olive-jellyroll", " X-High "), "xhigh");
+  assert.equal(normalizeReasoningEffort("olive-jellyroll", "no thinking"), "none");
+  assert.equal(normalizeReasoningEffort("almond-croissant-low", "maximum"), "max");
+  assert.equal(normalizeReasoningEffort("oatmeal-cookie", undefined), undefined);
+  assert.equal(normalizeReasoningEffort("oatmeal-cookie", "   "), undefined);
+  assert.equal(normalizeReasoningEffort("brand-new-model", "high"), "high");
+  assert.throws(() => normalizeReasoningEffort("oatmeal-cookie", "turbo"), /Unknown reasoningEffort "turbo"/);
+  assert.throws(() => normalizeReasoningEffort("oval-kumquat-medium", "low"), /does not support reasoningEffort "low". Supported: medium, high \(default medium\)/);
+  assert.throws(() => normalizeReasoningEffort("apple-danish", "high"), /has no reasoningEffort picker/);
 });
