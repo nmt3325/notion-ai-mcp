@@ -1,13 +1,14 @@
 # Notion AI MCP Server
 
 Notion AI の非公式な内部 API を MCP サーバーとしてラップする、個人検証用の TypeScript 実装です。
-stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次の 19 ツールを利用できます。
+stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次の 20 ツールを利用できます。
 
 **チャット / 履歴**
 
 - `notion_ai_chat`: Notion AI にプロンプトを送信し、NDJSON/SSE ストリームを集約して返す（モデル指定・添付対応）
 - `list_conversations`: Notion AI の workflow/chat thread をページング取得する
 - `get_conversation`: 指定 thread の user-visible な user/assistant メッセージを取得する
+- `rename_conversation`: active workspace内のthreadを検証してタイトル変更する
 - `upload_attachment` / `download_attachment`: Agent Serviceまたはassistant-transcript transportでファイルを安全にupload/downloadする
 
 **ワークスペース**
@@ -53,7 +54,11 @@ node dist/src/index.js
 ```
 
 `NOTION_SPACE_ID` と `NOTION_USER_ID` を省略すると、起動後の最初の tool call で
-`loadUserContent` を使って account/workspace を解決します。
+`loadUserContent` を使って account/workspace を解決します。自動検出は space レコードを
+参照できない pointer（退会済み・削除済み workspace など）を候補から除外し、
+`NOTION_PINNED_SPACE_ID`、次に AI 有効・有料 plan の順で選びます。
+`NOTION_SPACE_ID` だけを指定した場合、自動検出はその workspace を上書きせず、
+不足している `space_view_id` や表示名だけを補完します。
 
 `notion_manager` 互換の account JSON がある場合:
 
@@ -74,8 +79,8 @@ node dist/src/index.js
 | 変数 | 必須 | 説明 |
 |---|---:|---|
 | `NOTION_TOKEN_V2` | 条件付き | `NOTION_ACCOUNT_FILE` に `token_v2` がなければ必須 |
-| `NOTION_ACCOUNT_FILE` | 条件付き | `notion_manager` 互換 JSON。token をリポジトリ外に置くことを推奨 |
-| `NOTION_SPACE_ID` | 任意 | workspace UUID。未指定時は自動検出 |
+| `NOTION_ACCOUNT_FILE` | 条件付き | `notion_manager` 互換 JSON。token をリポジトリ外に置くことを推奨。未作成のパスを指定してもよく、`switch_workspace`(pin) 実行時に 0600 で作成される |
+| `NOTION_SPACE_ID` | 任意 | workspace UUID。指定時は自動検出より優先。未指定時は自動検出 |
 | `NOTION_SPACE_VIEW_ID` | 任意 | workspace の `space_view` UUID |
 | `NOTION_PINNED_SPACE_ID` | 任意 | 起動時に復元する固定 workspace UUID |
 | `NOTION_USER_ID` | 任意 | user UUID。未指定時は自動検出 |
@@ -152,7 +157,7 @@ export NOTION_MCP_REMOTE_CALL_READ=1
 npm run smoke:http:remote
 ```
 
-remote smokeは、未認証requestが401になること、TLS越しのMCP initialize、19-tool listing、任意の
+remote smokeは、未認証requestが401になること、TLS越しのMCP initialize、20-tool listing、任意の
 `get_current_workspace` read callを検証します。Bearer tokenやworkspace responseは出力しません。
 
 最小のCaddy例:
@@ -291,13 +296,12 @@ Agent Service file chatは安全のため`policies.approval_mode="ask"`を明示
 
 ### `list_conversations`
 
-`limit`, `cursor`, `maxPages` を受け取ります。返却された `cursor` は不透明値として次回へそのまま
+`limit`, `cursor`, `maxPages` を受け取ります。返却された `cursor` は不透明値として次回へそのまま 本ツールが発行していないカーソル (`mcpv1.` 以外や壊れた値) はエラーになります。
 渡してください。
 
-### `get_conversation`
+### `get_conversation` / `rename_conversation`
 
-`conversationId` と任意の `maxPages` を受け取ります。hidden thinking、tool call、config/context などの
-運用レコードは返しません。
+`get_conversation` は `conversationId` と任意の `maxPages` を受け取り、hidden thinking、tool call、config/contextなどの運用レコードを返しません。`rename_conversation` は同じworkspace内でthreadの存在を確認後、1行・500 UTF-8 bytes以内の`title`へ変更します。
 
 ### Workspace tools
 
@@ -340,7 +344,7 @@ NOTION_ACCOUNT_FILE=/absolute/path/account.json NOTION_SMOKE_CHAT=1 npm run smok
 | `fast` / `default` | `almond-croissant-low`（Sonnet 4.6 Low） |
 | `standard` / `balanced` | `almond-croissant-high`（Sonnet 4.6 High） |
 | `thinking` / `reasoning` / `deep` | `oatmeal-cookie`（GPT 5.2） |
-| `GPT 5.2` / `gpt-5.4-high` | `oatmeal-cookie` / `oval-kumquat-high` |
+| `GPT 5.2` / `gpt-5.4` / `gpt-5.4-high` | `oatmeal-cookie` / `oval-kumquat-medium` / `oval-kumquat-high` |
 | `Claude Opus 4.5` | `apple-danish` |
 | `Gemini 3.5 Flash` | `vertex-gemini-3.5-flash` |
 | `Grok 4.5` | `strawberry-whoopiepie` |

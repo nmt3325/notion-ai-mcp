@@ -11,6 +11,9 @@ test("tier aliases map to internal model IDs", () => {
 test("vendor names from the Notion model registry resolve to internal IDs", () => {
   assert.equal(normalizeModelName("GPT 5.2", "almond-croissant-low"), "oatmeal-cookie");
   assert.equal(normalizeModelName("gpt-5.4-high", "almond-croissant-low"), "oval-kumquat-high");
+  assert.equal(normalizeModelName("gpt-5.4", "almond-croissant-low"), "oval-kumquat-medium");
+  assert.equal(normalizeModelName("opus-4.6", "almond-croissant-low"), "avocado-froyo-medium");
+  assert.equal(normalizeModelName("sonnet-4.6", "oatmeal-cookie"), "almond-croissant-low");
   assert.equal(normalizeModelName("Sonnet 4.6 (Low)", "oatmeal-cookie"), "almond-croissant-low");
   assert.equal(normalizeModelName("Claude Opus 4.5", "oatmeal-cookie"), "apple-danish");
   assert.equal(normalizeModelName("Gemini 3.5 Flash", "oatmeal-cookie"), "vertex-gemini-3.5-flash");
@@ -35,4 +38,6 @@ test("listModels groups aliases per model", () => {
   assert.ok(thinking.aliases.includes("thinking"));
   assert.equal(thinking.displayName, "GPT 5.2");
   assert.equal(normalizeKey(" Deep Think "), "deep-think");
+  assert.equal(listModels().find((entry) => entry.modelId === "openai-gpt-4o-mini")?.pickable, false);
+  assert.equal(listModels().find((entry) => entry.modelId === "anthropic-haiku-4.5")?.pickable, false);
 });

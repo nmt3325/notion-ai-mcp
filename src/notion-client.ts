@@ -300,17 +300,18 @@ function buildConfigValue(model: string, webSearch: boolean, workspaceSearch: bo
   const integrations = webSearch || workspaceSearch;
   return {
     ...UI_CONFIG_DEFAULTS,
-    modelFromUser: !subsequent,
+    model,
+    modelFromUser: true,
     useWebSearch: webSearch,
     useReadOnlyMode: readOnly,
     ...(integrations ? { searchScopes: [{ type: "everything" }] } : {}),
-    ...(subsequent ? { model, isThreadStartedByAdmin: true } : {})
+    ...(subsequent ? { isThreadStartedByAdmin: true } : {})
   };
 }
 
 interface ConversationCursor { notionCursor?: string; offset: number }
 
-function decodeConversationCursor(cursor?: string): ConversationCursor { if (!cursor) return { offset: 0 }; if (!cursor.startsWith("mcpv1.")) return { notionCursor: cursor, offset: 0 }; try { const value = object(JSON.parse(Buffer.from(cursor.slice(6), "base64url").toString("utf8"))); const offset = typeof value.offset === "number" && Number.isInteger(value.offset) && value.offset >= 0 ? value.offset : 0; const notionCursor = asString(value.notionCursor); return notionCursor ? { notionCursor, offset } : { offset }; } catch { throw new Error("Invalid list_conversations cursor"); } }
+function decodeConversationCursor(cursor?: string): ConversationCursor { if (!cursor) return { offset: 0 }; if (!cursor.startsWith("mcpv1.")) throw new Error("Invalid list_conversations cursor; pass the nextCursor returned by a previous list_conversations call"); try { const value = object(JSON.parse(Buffer.from(cursor.slice(6), "base64url").toString("utf8"))); const offset = typeof value.offset === "number" && Number.isInteger(value.offset) && value.offset >= 0 ? value.offset : 0; const notionCursor = asString(value.notionCursor); return notionCursor ? { notionCursor, offset } : { offset }; } catch { throw new Error("Invalid list_conversations cursor"); } }
 
 function encodeConversationCursor(value: ConversationCursor): string { return `mcpv1.${Buffer.from(JSON.stringify(value)).toString("base64url")}`; }
 
@@ -349,11 +350,16 @@ export class NotionClient {
   async account(): Promise<AccountContext> { this.accountPromise ??= this.resolveAccount(); return this.accountPromise; }
 
   private async resolveAccount(): Promise<AccountContext> {
-    const configured = this.config.account; if (configured.userId && configured.spaceId) return configured as AccountContext;
-    const response = await this.fetchJson("loadUserContent", {}); const recordMap = object(response.recordMap); const users = object(recordMap.notion_user); const userId = Object.keys(users)[0]; if (!userId) throw new Error("loadUserContent did not return a Notion user");
+    const configured = this.config.account; if (configured.userId && configured.spaceId && configured.spaceViewId && configured.userName && configured.userEmail && configured.spaceName) return configured as AccountContext;
+    const response = await this.fetchJson("loadUserContent", {}); const recordMap = object(response.recordMap); const users = object(recordMap.notion_user); const roots = object(recordMap.user_root); const userIds = Object.keys(users); const configuredUserId = asString(configured.userId); const userId = (configuredUserId && (users[configuredUserId] !== undefined || roots[configuredUserId] !== undefined) ? configuredUserId : undefined) ?? userIds.find((id) => roots[id] !== undefined) ?? userIds[0] ?? ""; if (!userId) throw new Error("loadUserContent did not return a Notion user");
     const user = unwrapRecord(users[userId]); const userRoot = unwrapRecord(object(recordMap.user_root)[userId]); const pointers = Array.isArray(userRoot.space_view_pointers) ? userRoot.space_view_pointers : []; if (pointers.length === 0) throw new Error("loadUserContent did not return a workspace");
-    const spaces = object(recordMap.space); const pointer = pointers.map((p) => object(p)).sort((a, b) => { const sc = (c: JsonObject): number => { const cs = unwrapRecord(spaces[asString(c.spaceId)]); const csS = object(cs.settings); return (csS.disable_ai_feature !== true ? 2 : 0) + (asString(cs.plan_type) !== "free" ? 1 : 0); }; return sc(b) - sc(a); })[0] ?? {};
-    const spaceId = asString(pointer.spaceId); const space = unwrapRecord(spaces[spaceId]); const settings = unwrapRecord(object(recordMap.user_settings)[userId]); const userSettings = object(settings.settings);
+    const spaces = object(recordMap.space);
+    const reachable = (candidate: JsonObject): boolean => { const record = spaces[asString(candidate.spaceId)]; if (record === undefined || record === null) return false; const cs = unwrapRecord(record); if (cs.deleted === true || cs.alive === false) return false; return asString(cs.name) !== "" || asString(cs.plan_type) !== "" || asString(cs.id) !== ""; };
+    const candidates = pointers.map((p) => object(p)).filter((c) => asString(c.spaceId) !== ""); const joinable = candidates.filter(reachable);
+    const ranked = (joinable.length > 0 ? joinable : candidates).sort((a, b) => { const sc = (c: JsonObject): number => { const cs = unwrapRecord(spaces[asString(c.spaceId)]); const csS = object(cs.settings); return (csS.disable_ai_feature !== true ? 2 : 0) + (asString(cs.plan_type) !== "free" ? 1 : 0); }; return sc(b) - sc(a); });
+    const preferredSpaceId = asString(configured.spaceId); const pinnedSpaceId = asString(configured.pinnedSpaceId); const pointerFor = (target: string): JsonObject | undefined => target ? ranked.find((c) => asString(c.spaceId) === target) : undefined;
+    const pointer = preferredSpaceId ? (pointerFor(preferredSpaceId) ?? {}) : (pointerFor(pinnedSpaceId) ?? ranked[0] ?? {});
+    const spaceId = preferredSpaceId || asString(pointer.spaceId); const space = unwrapRecord(spaces[spaceId]); const settings = unwrapRecord(object(recordMap.user_settings)[userId]); const userSettings = object(settings.settings);
     const resolved: AccountContext = { tokenV2: configured.tokenV2, userId, userName: configured.userName || asString(user.name), userEmail: configured.userEmail || asString(user.email), spaceId, spaceName: configured.spaceName || asString(space.name), spaceViewId: configured.spaceViewId || asString(pointer.id), timezone: configured.timezone || asString(userSettings.time_zone, "UTC"), clientVersion: configured.clientVersion || "23.13.20260313.1423", browserId: configured.browserId || randomUUID(), deviceId: configured.deviceId || randomUUID(), ...(configured.fullCookie ? { fullCookie: configured.fullCookie } : {}), ...(configured.pinnedSpaceId ? { pinnedSpaceId: configured.pinnedSpaceId } : {}) };
     Object.assign(configured, resolved);
     return configured as AccountContext;
@@ -367,13 +373,39 @@ export class NotionClient {
 
   private async transcriptPage(cursor?: string): Promise<TranscriptPage> { const account = await this.account(); const body: JsonObject = { threadParentPointer: { table: "space", id: account.spaceId, spaceId: account.spaceId }, includeWorkflowThreads: true, includeWriterChats: false, ...(cursor ? { cursor } : {}) }; return (await this.fetchJson("getInferenceTranscriptsForUser", body)) as TranscriptPage; }
 
-  async listConversations(options: { limit?: number; cursor?: string; maxPages?: number } = {}): Promise<ListConversationsResult> { const limit = Math.min(Math.max(options.limit ?? 20, 1), 100); const maxPages = Math.min(Math.max(options.maxPages ?? 10, 1), 50); const state = decodeConversationCursor(options.cursor); const conversations: ConversationSummary[] = []; let notionCursor = state.notionCursor; let offset = state.offset; let nextCursor: string | null = null; let hasMore = false; for (let pi = 0; pi < maxPages && conversations.length < limit; pi += 1) { const page = await this.transcriptPage(notionCursor); const unread = new Set(page.unreadThreadIds ?? []); const threads = page.recordMap?.thread ?? {}; const pts = page.transcripts ?? []; let idx = offset; for (; idx < pts.length; idx += 1) { const r = pts[idx]; const t = object(r); const id = asString(t.id); if (!id) continue; const th = unwrapRecord(threads[id]); conversations.push({ id, title: asString(t.title) || asString(object(th.data).title) || "Untitled", type: asString(t.type) || asString(th.type, "workflow"), createdAt: asNumber(t.created_at) ?? asNumber(th.created_time), updatedAt: asNumber(t.updated_at) ?? asNumber(th.updated_time), messageCount: arrayOfStrings(th.messages).length, unread: unread.has(id) }); if (conversations.length >= limit) { const no = idx + 1; if (no < pts.length) { nextCursor = encodeConversationCursor({ ...(notionCursor ? { notionCursor } : {}), offset: no }); hasMore = true; } else if (page.hasMore && page.nextCursor) { nextCursor = encodeConversationCursor({ notionCursor: page.nextCursor, offset: 0 }); hasMore = true; } break; } } if (conversations.length >= limit) break; if (!page.hasMore || !page.nextCursor) { nextCursor = null; hasMore = false; break; } notionCursor = page.nextCursor; offset = 0; nextCursor = encodeConversationCursor({ notionCursor, offset: 0 }); hasMore = true; } return { conversations, nextCursor, hasMore }; }
+  async listConversations(options: { limit?: number; cursor?: string; maxPages?: number } = {}): Promise<ListConversationsResult> { const limit = Math.min(Math.max(options.limit ?? 20, 1), 100); const maxPages = Math.min(Math.max(options.maxPages ?? 10, 1), 50); const state = decodeConversationCursor(options.cursor); const conversations: ConversationSummary[] = []; let notionCursor = state.notionCursor; let offset = state.offset; let nextCursor: string | null = null; let hasMore = false; for (let pi = 0; pi < maxPages && conversations.length < limit; pi += 1) { const page = await this.transcriptPage(notionCursor); const unread = new Set(page.unreadThreadIds ?? []); const threads = page.recordMap?.thread ?? {}; const pts = page.transcripts ?? []; let idx = offset; for (; idx < pts.length; idx += 1) { const r = pts[idx]; const t = object(r); const id = asString(t.id); if (!id) continue; const th = unwrapRecord(threads[id]); conversations.push({ id, title: asString(t.title) || asString(object(th.data).title) || "Untitled", type: asString(t.type) || asString(th.type, "workflow"), createdAt: asNumber(t.created_at) ?? asNumber(th.created_time), updatedAt: asNumber(t.updated_at) ?? asNumber(th.updated_time), messageCount: arrayOfStrings(th.messages).length, unread: unread.has(id) }); if (conversations.length >= limit) { const no = idx + 1; if (no < pts.length) { nextCursor = encodeConversationCursor({ ...(notionCursor ? { notionCursor } : {}), offset: no }); hasMore = true; } else if (page.hasMore && page.nextCursor) { nextCursor = encodeConversationCursor({ notionCursor: page.nextCursor, offset: 0 }); hasMore = true; } else { nextCursor = null; hasMore = false; } break; } } if (conversations.length >= limit) break; if (!page.hasMore || !page.nextCursor) { nextCursor = null; hasMore = false; break; } notionCursor = page.nextCursor; offset = 0; nextCursor = encodeConversationCursor({ notionCursor, offset: 0 }); hasMore = true; } return { conversations, nextCursor, hasMore }; }
 
   private async findThread(threadId: string, maxPages: number): Promise<ThreadLookup> { let cursor: string | undefined; for (let pi = 0; pi < maxPages; pi += 1) { const page = await this.transcriptPage(cursor); const rawThread = page.recordMap?.thread?.[threadId]; if (rawThread) { const t = (page.transcripts ?? []).find((item) => asString(object(item).id) === threadId) ?? null; return { page, transcript: t, thread: unwrapRecord(rawThread) }; } if (!page.hasMore || !page.nextCursor) break; cursor = page.nextCursor; } throw new Error(`Conversation ${threadId} was not found`); }
 
   private async fetchThreadMessages(messageIds: string[]): Promise<Record<string, unknown>> { const account = await this.account(); const records: Record<string, unknown> = {}; for (let i = 0; i < messageIds.length; i += 100) { const batch = messageIds.slice(i, i + 100); const resp = await this.fetchJson("syncRecordValuesMain", { requests: batch.map((id) => ({ pointer: { table: "thread_message", id, spaceId: account.spaceId }, version: -1 })) }); Object.assign(records, object(object(resp.recordMap).thread_message)); } return records; }
 
   async getConversation(threadId: string, maxPages = 20): Promise<Conversation> { const found = await this.findThread(threadId, Math.min(Math.max(maxPages, 1), 100)); const messageIds = arrayOfStrings(found.thread.messages); const records = await this.fetchThreadMessages(messageIds); const t = found.transcript ?? {}; return { id: threadId, title: asString(t.title) || asString(object(found.thread.data).title) || "Untitled", type: asString(t.type) || asString(found.thread.type, "workflow"), createdAt: asNumber(t.created_at) ?? asNumber(found.thread.created_time), updatedAt: asNumber(t.updated_at) ?? asNumber(found.thread.updated_time), messages: parseConversationMessages(messageIds, records) }; }
+
+  async renameConversation(threadId: string, title: string, maxPages = 20): Promise<{ conversationId: string; previousTitle: string; title: string; changed: boolean }> {
+    const nextTitle = title.trim();
+    if (!nextTitle || Buffer.byteLength(nextTitle, "utf8") > 500 || /[\0\r\n]/.test(nextTitle)) {
+      throw new Error("Conversation title must be one line and at most 500 UTF-8 bytes");
+    }
+    const found = await this.findThread(threadId, Math.min(Math.max(maxPages, 1), 100));
+    const previousTitle = asString(found.transcript?.title) || asString(object(found.thread.data).title) || "Untitled";
+    if (previousTitle === nextTitle) return { conversationId: threadId, previousTitle, title: nextTitle, changed: false };
+    const account = await this.account();
+    await this.fetchJson("saveTransactionsFanout", {
+      requestId: randomUUID(),
+      transactions: [{
+        id: randomUUID(),
+        spaceId: account.spaceId,
+        debug: { userAction: "renameThread" },
+        operations: [{
+          pointer: { table: "thread", id: threadId, spaceId: account.spaceId },
+          path: ["data"],
+          command: "update",
+          args: { title: nextTitle }
+        }]
+      }]
+    });
+    return { conversationId: threadId, previousTitle, title: nextTitle, changed: true };
+  }
 
   private buildContext(account: AccountContext, datetime: string, hasAttachments = false): JsonObject { return { timezone: account.timezone, userName: account.userName, userId: account.userId, userEmail: account.userEmail, spaceName: account.spaceName, spaceId: account.spaceId, spaceViewId: account.spaceViewId, currentDatetime: datetime, surface: hasAttachments ? "workflows" : "ai_module" }; }
 
@@ -425,7 +457,7 @@ export class NotionClient {
         this.workspaceManager.markCurrentExhausted();
         const workspaceBound = Boolean(options.conversationId || options.fileIds?.some((id) => id.trim()));
         if (workspaceBound) {
-          throw new Error("This conversation or attachment is workspace-bound; switch workspace, then start a new chat and upload again.");
+          throw new Error("AI credit limit reached in the current workspace and this conversation or attachment is workspace-bound; switch workspace, then start a new chat and upload again.");
         }
         if (attempt <= maxRetries) {
           await this.workspaceManager.handleLimitReached();

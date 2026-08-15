@@ -23,7 +23,12 @@ function accountFile(): { path: string; data: Record<string, unknown> } {
   if (!path) return { path: "", data: {} };
   let parsed: unknown;
   try { parsed = JSON.parse(readFileSync(path, "utf8")); }
-  catch (error) { const message = error instanceof Error ? error.message : String(error); throw new Error(`Cannot read NOTION_ACCOUNT_FILE: ${message}`); }
+  catch (error) {
+    // switch_workspace(pin) creates this file lazily, so a path that does not exist yet is not a startup failure.
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { path, data: {} };
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Cannot read NOTION_ACCOUNT_FILE: ${message}`);
+  }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("NOTION_ACCOUNT_FILE must contain a JSON object");
   return { path, data: parsed as Record<string, unknown> };
 }
