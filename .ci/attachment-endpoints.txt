@@ -1,4 +1,4 @@
-researched_at=2026-08-15T07:36:45Z
+researched_at=2026-08-15T07:52:38Z
 method=wget full current webpack chunk map plus bounded endpoint extraction
 initial_asset_count=14
 runtime_found=true
