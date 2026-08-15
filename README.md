@@ -255,7 +255,7 @@ Agent Service file chatは安全のため`policies.approval_mode="ask"`を明示
   `space` record が存在する workspace だけを返します。
 - `switch_workspace`: IDまたは名前で選択し、AI probe成功後にだけ切り替えます。`pin:true` なら
   account JSONにも永続化します。
-- `create_workspace`: `/createSpace` を1回だけ呼び、公式の3-operation transactionをcommitします。
+- `create_workspace`: `/createSpace` を1回だけ呼び、現行Webと同じ`saveTransactionsMain`の3-operation transactionをcommitします。
   `user_root.space_views` と `space_view_pointers` に生成IDがそれぞれちょうど1件あり、さらに
   `syncRecordValuesMain` で完全な `space_view` recordを確認できた場合だけ成功とします。
 
