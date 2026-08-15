@@ -4,10 +4,11 @@ import { isIP } from "node:net";
 import type {
   AccountContext, AgentUploadedFile, AttachmentDownloadResult, AttachmentUploadResult, ChatAttachment, LegacyAttachmentDownloadInput,
   ChatResult, ChatSession, Conversation, ConversationMessage, ConversationSummary, ListConversationsResult,
-  ParsedInferenceStream
+  ParsedInferenceStream, ChatJob, ChatJobLookup, ChatJobStatus, ChatStartResult, ChatWaitResult
 } from "./types.js";
 import type { NotionConfig } from "./config.js";
 import { WorkspaceManager } from "./workspace-manager.js";
+import { ChatStateStore } from "./chat-jobs.js";
 import { normalizeModelName, normalizeReasoningEffort } from "./models.js";
 import { McpConnectionManager } from "./mcp-connections.js";
 import { prepareAttachmentInput, readResponseBuffer, writeAttachmentOutput, type AttachmentInput, type PreparedAttachment } from "./attachments.js";
@@ -16,6 +17,7 @@ import { agentTranscriptError, applyAgentTranscriptPatches, createAgentTranscrip
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 const SEC_CH_UA = '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"';
 
+const DEFAULT_CHAT_WAIT_MS = 45000;
 const NOTION_ORIGIN = ["https:", "", "www.notion.so"].join("/");
 const NOTION_FILE_PROXY_ORIGIN = ["https:", "", "app.notion.com"].join("/");
 
@@ -29,6 +31,8 @@ interface ChatOptions {
   model?: string | undefined;
   reasoningEffort?: string | undefined;
   conversationId?: string | undefined;
+  /** Thread UUID for a brand new conversation so the caller can learn the ID before generation finishes. */
+  newConversationId?: string | undefined;
   webSearch?: boolean | undefined;
   workspaceSearch?: boolean | undefined;
   readOnly?: boolean | undefined;
@@ -254,9 +258,75 @@ function agentInferenceText(value: unknown): string {
   return value.map((item) => object(item)).filter((item) => item.type === "text" && typeof item.content === "string").map((item) => asString(item.content).trim()).filter(Boolean).join("\n\n").trim();
 }
 
+const ASSISTANT_STEP_TYPES = new Set(["agent-inference", "assistant", "agent", "inference", "agent-response"]);
+
+function conversationMessageRole(step: JsonObject, record: JsonObject): "user" | "assistant" | null {
+  const type = asString(step.type) || asString(record.type);
+  if (type === "user" || type === "human") return "user";
+  if (ASSISTANT_STEP_TYPES.has(type)) return "assistant";
+  const role = asString(step.role) || asString(record.role);
+  if (role === "user") return "user";
+  if (role === "assistant" || role === "agent") return "assistant";
+  return null;
+}
+
+// Answers are stored as rich text, as a typed content array, or nested inside inference steps, and an
+// answer whose tool call timed out has to stay readable whichever shape the thread kept.
+function conversationStepText(step: JsonObject): string {
+  const inference = agentInferenceText(step.value);
+  if (inference) return inference;
+  // Genuine Notion rich text is an array of [text, annotations] tuples; other shapes must not be run through it.
+  const value = step.value;
+  if (Array.isArray(value) && value.length > 0 && value.every((entry) => Array.isArray(entry))) {
+    const rich = notionRichTextToMarkdown(value).trim();
+    if (rich) return rich;
+  }
+  return collectStepText(value ?? step.content ?? step.steps);
+}
+
+// Thinking, tool and search chatter is internal: the Notion UI never shows it, so a recovered answer must not either.
+const HIDDEN_STEP_CONTENT_TYPES = new Set(["thinking", "reasoning", "tool-call", "tool_use", "tool-result", "tool_result", "search", "agent-search", "citation", "status", "progress", "debug"]);
+
+function collectStepText(value: unknown, depth = 0): string {
+  if (depth > 4) return "";
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value)) return value.map((item) => collectStepText(item, depth + 1)).filter(Boolean).join("\n\n").trim();
+  if (!value || typeof value !== "object") return "";
+  const item = object(value);
+  if (typeof item.type === "string" && HIDDEN_STEP_CONTENT_TYPES.has(item.type)) return "";
+  if (item.type === "text" && typeof item.content === "string") return item.content.trim();
+  for (const candidate of [item.content, item.text, item.markdown, item.value, item.steps]) {
+    if (candidate === undefined || candidate === null) continue;
+    const text = collectStepText(candidate, depth + 1);
+    if (text) return text;
+  }
+  return "";
+}
+
+function jobLookupOf(job: ChatJob): ChatJobLookup {
+  return {
+    status: job.status, source: "job", conversationId: job.conversationId, jobId: job.jobId, model: job.model,
+    ...(job.reasoningEffort ? { reasoningEffort: job.reasoningEffort } : {}),
+    ...(job.text ? { text: job.text } : {}), ...(job.error ? { error: job.error } : {}),
+    ...(job.usage ? { usage: job.usage } : {}),
+    startedAt: job.startedAt, ...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
+    elapsedMs: (job.finishedAt ?? Date.now()) - job.startedAt
+  };
+}
+
 export function parseConversationMessages(messageIds: string[], recordMap: Record<string, unknown>): ConversationMessage[] {
   const messages: ConversationMessage[] = [];
-  for (const id of messageIds) { const record = unwrapRecord(recordMap[id]); const step = object(record.step); let role: "user" | "assistant" | null = null; let text = ""; if (step.type === "user") { role = "user"; text = notionRichTextToMarkdown(step.value).trim(); } else if (step.type === "agent-inference") { role = "assistant"; text = agentInferenceText(step.value); } if (!role || !text) continue; const previous = messages.at(-1); if (previous?.role === role) { previous.text = `${previous.text}\n\n${text}`; continue; } messages.push({ id, role, text, createdAt: asNumber(record.created_time) }); }
+  for (const id of messageIds) {
+    const record = unwrapRecord(recordMap[id]);
+    const step = object(record.step ?? object(record.data).step ?? record.data);
+    const role = conversationMessageRole(step, record);
+    if (!role) continue;
+    const text = conversationStepText(step);
+    if (!text) continue;
+    const previous = messages.at(-1);
+    if (previous?.role === role) { previous.text = `${previous.text}\n\n${text}`; continue; }
+    messages.push({ id, role, text, createdAt: asNumber(record.created_time) });
+  }
   return messages;
 }
 
@@ -320,11 +390,15 @@ function encodeConversationCursor(value: ConversationCursor): string { return `m
 export class NotionClient {
   private accountPromise: Promise<AccountContext> | null = null;
   private readonly sessions = new Map<string, ChatSession>();
+  private readonly state: ChatStateStore;
   private readonly transcriptUploads = new Map<string, TranscriptUploadRecord>();
   private workspaceManager: WorkspaceManager | null = null;
   private mcpManager: McpConnectionManager | null = null;
 
   constructor(private readonly config: NotionConfig, private readonly fetchImpl: typeof fetch = fetch) {
+    // Sessions and jobs are cached on disk, so a restart cannot orphan a conversation that is still generating.
+    this.state = new ChatStateStore(config.stateFilePath ?? null);
+    for (const session of this.state.sessions()) this.rememberSession(session);
     if (config.account.tokenV2) {
       const sharedAccount = config.account as AccountContext;
       Object.assign(sharedAccount, {
@@ -471,6 +545,150 @@ export class NotionClient {
     }
   }
 
+  /**
+   * Starts a chat in the background and returns once the conversation ID is known.
+   *
+   * MCP clients abandon a tool call after roughly 60 seconds while Notion AI keeps generating, so the
+   * conversation ID is handed out before the answer exists and the answer is kept in a job for later.
+   */
+  async startChat(options: ChatOptions): Promise<ChatStartResult> {
+    const model = normalizeModelName(options.model, this.config.defaultModel);
+    const reasoningEffort = normalizeReasoningEffort(model, options.reasoningEffort);
+    const requested = options.conversationId?.trim() ?? "";
+    let rehydrated = false;
+    if (requested && !this.sessions.get(requested)) {
+      const restored = await this.rehydrateSession(requested, model, reasoningEffort);
+      if (!restored) throw new Error(`Conversation ${requested} was not found in this workspace, so it cannot be continued. Start a new chat without conversationId, or switch to the workspace that owns it.`);
+      rehydrated = true;
+    }
+    const conversationId = requested || randomUUID();
+    const job = this.state.createJob({
+      conversationId, model, ...(reasoningEffort ? { reasoningEffort } : {}), prompt: options.prompt,
+      turn: (this.sessions.get(conversationId)?.turnCount ?? 0) + 1,
+      transport: normalizedFileIds(options.fileIds).length > 0 ? "agent_service" : "inference_transcript"
+    });
+    void this.runChatJob(job.jobId, requested ? { ...options } : { ...options, newConversationId: conversationId });
+    return {
+      status: "running", jobId: job.jobId, conversationId, model,
+      ...(reasoningEffort ? { reasoningEffort } : {}), startedAt: job.startedAt,
+      ...(rehydrated ? { rehydrated: true } : {}),
+      hint: `Notion AI is generating in the background. Collect the answer with get_chat_result (jobId ${job.jobId} or conversationId ${conversationId}).`
+    };
+  }
+
+  private async runChatJob(jobId: string, options: ChatOptions): Promise<void> {
+    try {
+      const result = await this.chat(options);
+      // An AI-credit retry can move the answer to a freshly created thread, so the job follows the real conversation.
+      this.state.retarget(jobId, result.conversationId);
+      this.state.complete(jobId, {
+        text: result.text, usage: result.usage, conversationId: result.conversationId, model: result.model,
+        ...(result.reasoningEffort ? { reasoningEffort: result.reasoningEffort } : {})
+      });
+    } catch (error) {
+      this.state.fail(jobId, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /** Waits a bounded time for a chat, then hands back a pending job instead of losing the request. */
+  async chatWithWait(options: ChatOptions, waitMs?: number): Promise<ChatWaitResult> {
+    const started = await this.startChat(options);
+    const job = await this.state.wait(started.jobId, Math.max(0, waitMs ?? this.config.chatWaitMs ?? DEFAULT_CHAT_WAIT_MS));
+    if (job?.status === "failed") throw new Error(job.error || "Notion AI chat failed");
+    if (job?.status === "completed") {
+      return {
+        status: "completed", jobId: job.jobId, conversationId: job.conversationId, text: job.text ?? "", model: job.model,
+        ...(job.reasoningEffort ? { reasoningEffort: job.reasoningEffort } : {}),
+        usage: job.usage ?? { inputTokens: 0, outputTokens: 0 },
+        ...(started.rehydrated ? { rehydrated: true } : {})
+      };
+    }
+    const conversationId = job?.conversationId ?? started.conversationId;
+    const elapsedMs = Date.now() - started.startedAt;
+    return {
+      status: "pending", jobId: started.jobId, conversationId, model: started.model,
+      ...(started.reasoningEffort ? { reasoningEffort: started.reasoningEffort } : {}),
+      startedAt: started.startedAt, elapsedMs,
+      ...(started.rehydrated ? { rehydrated: true } : {}),
+      hint: `Still generating after ${Math.round(elapsedMs / 1000)}s. Nothing is lost: call get_chat_result with jobId ${started.jobId} (or conversationId ${conversationId}) to collect the answer.`
+    };
+  }
+
+  listChatJobs(options: { status?: ChatJobStatus | undefined; limit?: number | undefined } = {}): ChatJob[] { return this.state.list(options); }
+
+  chatStatePath(): string | null { return this.state.statePath(); }
+
+  chatStateError(): string | null { return this.state.persistError(); }
+
+  /** Collects a chat answer after the fact, from the job cache or, when the stream is gone, from the thread itself. */
+  async chatResult(options: { jobId?: string | undefined; conversationId?: string | undefined; waitMs?: number | undefined }): Promise<ChatJobLookup> {
+    const waitMs = Math.max(0, options.waitMs ?? 0);
+    const jobId = options.jobId?.trim() ?? "";
+    const conversationId = options.conversationId?.trim() ?? "";
+    if (!jobId && !conversationId) throw new Error("jobId or conversationId is required");
+    let job = jobId ? this.state.job(jobId) : this.state.latestForConversation(conversationId);
+    if (jobId && !job) throw new Error(`Unknown jobId ${jobId}. Call list_chat_jobs, or pass conversationId to read the answer from the thread.`);
+    if (job?.status === "running" && waitMs > 0) job = await this.state.wait(job.jobId, waitMs);
+    if (job && (job.status === "completed" || job.status === "failed")) return jobLookupOf(job);
+    const threadId = job?.conversationId || conversationId;
+    if (!threadId) throw new Error("conversationId is required to read the answer from the thread");
+    // No live stream: the call timed out, the job is from a previous process, or the answer arrived late.
+    const recovered = await this.recoverAnswerFromThread(threadId, job?.startedAt, job ? 0 : waitMs);
+    if (recovered) {
+      if (job) this.state.complete(job.jobId, { text: recovered });
+      return {
+        status: "completed", source: "thread", conversationId: threadId, ...(job ? { jobId: job.jobId } : {}),
+        ...(job?.model ? { model: job.model } : {}), ...(job?.reasoningEffort ? { reasoningEffort: job.reasoningEffort } : {}),
+        text: recovered, ...(job ? { startedAt: job.startedAt, elapsedMs: Date.now() - job.startedAt } : {})
+      };
+    }
+    return {
+      status: job?.status ?? "running", source: job ? "job" : "thread", conversationId: threadId,
+      ...(job ? { jobId: job.jobId, model: job.model, startedAt: job.startedAt, elapsedMs: Date.now() - job.startedAt } : {}),
+      ...(job?.reasoningEffort ? { reasoningEffort: job.reasoningEffort } : {}),
+      hint: `Notion AI has not written the answer to conversation ${threadId} yet. Call get_chat_result again in a few seconds, or read the thread with get_conversation.`
+    };
+  }
+
+  /** Polls the thread until an assistant answer newer than the request shows up. */
+  private async recoverAnswerFromThread(threadId: string, since: number | undefined, budgetMs: number): Promise<string> {
+    const deadline = Date.now() + Math.max(0, budgetMs);
+    for (;;) {
+      const conversation = await this.getConversation(threadId, 5);
+      const answer = [...conversation.messages].reverse().find((message) => message.role === "assistant" && message.text.trim());
+      if (answer && (since === undefined || answer.createdAt === null || answer.createdAt >= since - 5000)) return answer.text;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return "";
+      await sleep(Math.min(5000, Math.max(500, remaining)));
+    }
+  }
+
+  /**
+   * Rebuilds a chat session for a conversation this process never started.
+   *
+   * Without this, a conversation whose call timed out (or that was started before a restart) could
+   * never be continued, because the session lived only in the memory of the previous process.
+   */
+  private async rehydrateSession(conversationId: string, model: string, reasoningEffort: string | undefined): Promise<ChatSession | null> {
+    if (this.config.allowSessionRehydrate === false) return null;
+    const found = await this.findThread(conversationId, 20).catch(() => null);
+    if (!found) return null;
+    const session: ChatSession = {
+      threadId: conversationId, configId: randomUUID(), contextId: randomUUID(),
+      originalDatetime: new Date(asNumber(found.thread.created_time) ?? Date.now()).toISOString(),
+      model, ...(reasoningEffort ? { reasoningEffort } : {}), updatedConfigIds: [],
+      // A non-zero turn count keeps the request a partial transcript, so Notion appends to the existing thread.
+      turnCount: Math.max(1, arrayOfStrings(found.thread.messages).length), transport: "inference_transcript", rehydrated: true
+    };
+    this.rememberSession(session);
+    return session;
+  }
+
+  private rememberSession(session: ChatSession): void {
+    this.sessions.set(session.threadId, session);
+    this.state.saveSession(session);
+  }
+
   private async _chatInternal(options: ChatOptions): Promise<ChatResult> {
     const account = await this.account();
     const model = normalizeModelName(options.model, this.config.defaultModel);
@@ -489,8 +707,8 @@ export class NotionClient {
 
     let session: ChatSession;
     if (options.conversationId) {
-      const known = this.sessions.get(options.conversationId);
-      if (!known) throw new Error(`Conversation ${options.conversationId} is not an active MCP session. Start a new chat without conversationId.`);
+      const known = this.sessions.get(options.conversationId) ?? await this.rehydrateSession(options.conversationId, model, requestedEffort);
+      if (!known) throw new Error(`Conversation ${options.conversationId} was not found in this workspace, so it cannot be continued. Start a new chat without conversationId, or switch to the workspace that owns it.`);
       session = known;
       if (transcriptFiles.length > 0 && transcriptFiles[0]?.threadId !== session.threadId) throw new Error("Attachment handle belongs to another conversation");
     } else if (transcriptFiles.length > 0) {
@@ -500,7 +718,7 @@ export class NotionClient {
       session = known;
     } else {
       session = {
-        threadId: randomUUID(), configId: randomUUID(), contextId: randomUUID(), originalDatetime: new Date().toISOString(),
+        threadId: options.newConversationId || randomUUID(), configId: randomUUID(), contextId: randomUUID(), originalDatetime: new Date().toISOString(),
         model, updatedConfigIds: [], turnCount: 0,
         ...(requestedEffort ? { reasoningEffort: requestedEffort } : {}),
         transport: fileIds.length > 0 ? "agent_service" : "inference_transcript"
@@ -520,7 +738,7 @@ export class NotionClient {
     const parsed = await parseInferenceStream(response.body);
     if (!parsed.text.trim()) throw new Error("Notion AI returned an empty response");
     for (const file of transcriptFiles) file.usedInChat = true;
-    session.turnCount += 1; session.updatedConfigIds.push(randomUUID()); session.model = model; session.reasoningEffort = reasoningEffort; this.sessions.set(session.threadId, session);
+    session.turnCount += 1; session.updatedConfigIds.push(randomUUID()); session.model = model; session.reasoningEffort = reasoningEffort; this.rememberSession(session);
     return { conversationId: session.threadId, text: parsed.text, model, ...(reasoningEffort ? { reasoningEffort } : {}), usage: { inputTokens: parsed.inputTokens, outputTokens: parsed.outputTokens } };
   }
 
@@ -730,7 +948,7 @@ export class NotionClient {
       ...(processed ? { processed } : {})
     };
     this.transcriptUploads.set(handleId, record);
-    this.sessions.set(threadId, session);
+    this.rememberSession(session);
     const file: AgentUploadedFile = { id: handleId, filename: prepared.fileName, media_type: prepared.mediaType, size_bytes: prepared.sizeBytes, sha256 };
     return {
       transport: "inference_transcript", fileId: handleId, conversationId: threadId, fileName: prepared.fileName,
@@ -1111,7 +1329,7 @@ export class NotionClient {
     session.model = model;
     session.reasoningEffort = reasoningEffort;
     session.transport = "agent_service";
-    this.sessions.set(session.threadId, session);
+    this.rememberSession(session);
     return { conversationId: session.threadId, text, model, ...(reasoningEffort ? { reasoningEffort } : {}), usage: { inputTokens: 0, outputTokens: 0 } };
   }
 
