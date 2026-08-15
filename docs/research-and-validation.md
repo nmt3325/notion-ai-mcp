@@ -363,3 +363,34 @@ capability validation前に拒否し、validation中にserver identityが変化�
 
 全135 tests、TypeScript check、build、compiled stdio smoke（20 tools）が成功した。cookie、`token_v2`、`file_token`、
 account JSONはdisposable environment内のmode 0600 fileだけに保持し、repositoryへは保存していない。
+
+## 2026-08-15 MCP 60秒制限への対応（job・回収・session復元）
+
+### 事象
+
+Notion AI 本体から本 server を呼んだ場合、`gpt-5.6-sol` / `effort: max` で重い数学問題3問を投げると
+`MCP error -32001: Request timed out` となり、`conversationId` も返らない。一方 Notion 側では thread
+「数学の詳細問題3問」が 14:43:48 に作成され、14:46:06 まで更新が続いた（約2分20秒）。
+タイムアウト直後の `get_conversation` では user 発言のみ、既存 thread への再投入は
+`not an active MCP session` となり、課金だけ発生して回答を回収できない状態だった。
+
+### 対応
+
+- `src/chat-jobs.ts` を新規追加。`ChatStateStore` が job / session を原子的に 0600 保存し、24時間で prune、
+  再起動時の `running` job を `orphaned` に降格し、waiter で `wait(jobId, timeoutMs)` を提供する。
+- `notion_ai_chat` は既定45秒（`waitSeconds` 1〜55 / `NOTION_CHAT_WAIT_MS`）で切り上げて `pending` + `jobId` を返し、
+  生成はバックグラウンドで継続する。`background: true` なら待たずに ID を返す。
+- 新ツール `get_chat_result`（job → thread 本文の順で回収）と `list_chat_jobs` を追加し、MCP は22ツールになった。
+- `threadId` を呼び出し前に生成して job に記録することで、timeout してもどの thread が課金対象かを失わない。
+- 未知の `conversationId` は `getInferenceTranscriptsForUser` で thread を確認して session を復元し、
+  `isPartialTranscript: true` で継続する（`NOTION_SESSION_REHYDRATE=0` で無効）。
+  復元できない場合は workspace 違いを含む説明を返すメッセージに差し替えた。
+- `progressToken` がある場合は10秒ごとに `notifications/progress` を送出（timer は `unref`、例外は無視）。
+- 回収本文は `HIDDEN_STEP_CONTENT_TYPES`（thinking / reasoning / tool-call / tool-result / search / agent-search / citation / status / progress / debug）を
+  除外し、rich text 変換は「全要素が配列」の場合のみ適用することで、内部思考の漏洩を防いだ。
+
+### 検証
+
+- `npm run check` 0 error、`npm test` 143/143 pass（`tests/chat-jobs.test.ts` 6件と server 側 4件を新規追加）。
+- `npm run build` 成功、`node scripts/stdio-command-smoke.mjs` で 22 tools（`get_chat_result` / `list_chat_jobs` を含む）を確認。
+- `wait()` は timer を `unref` するため、budget 切れを検証する test では ref 付き `setInterval` で event loop を保つ必要があった。

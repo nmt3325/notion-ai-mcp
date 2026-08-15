@@ -507,3 +507,28 @@ UIの推論レベルボタンが「現在高い」、modelボタンが「GPT-5.4
 - temporary storage completionはHTTP 200または204だけを受理し、201を含む他の2xxを成功扱いしない。
 - Agent Service uploadは現行bundleから削除され、liveでもHTTP 500を返す。新規uploadでは明示的な`agent_service`もassistant-transcriptへfallbackする。既存`conversationId`を指定したuploadはretargetしない。
 - legacy downloadはNotionが返す`attachment:<uuid>:<name>` URIを受理し、`getSignedFileUrls`の結果が`file.notion.so` / `file.notion.com`のときは`file_token`だけをCookieとして送る。`token_v2`はfile hostへ送らない。
+
+
+## MCP client の60秒制限と job 回収
+
+Notion AI を MCP 経由で呼び出す場合、client は server に何も告げずに約60秒で request を放棄します
+（Notion AI 本体では `MCP error -32001: Request timed out`）。実測した挙動:
+
+- `runInferenceTranscript` は `createThread: true` の時点で thread を作成済みなので、client が放棄しても
+  Notion 側は生成を続け、thread の `updated_time` が伸び続ける（実測: 14:43:48 作成 → 14:46:06 まで更新、約2分20秒）。
+- 放棄された呼び出しの response body を client は受け取れないため、`threadId` を同期的に返す設計だと
+  どの thread に課金されたのかさえ失われる。このため threadId は呼び出し前に client 側で生成し、
+  job として記録しておく必要がある（`transcript` の `threadId` はリクエスト側が決められる）。
+- 生成中の thread を `getInferenceTranscriptsForUser` で読むと、assistant step が保存されるまでは
+  user step だけが見える。完了後に `agent-inference` step が追加され、本文を後追いで回収できる。
+  この step 内には `thinking` / `tool-call` / `agent-search` などの非表示 content も含まれるので、
+  `type: "text"` 相当の可視 content のみを拾うこと。
+- タイムアウトした thread へ `conversationId` で再投入するには session 復元が必要。
+  復元時は `isPartialTranscript: true` と `createThread: false` で送る（既存 thread への追記扱い）。
+
+### state file
+
+`~/.notion-ai-mcp/state.json`（mode 0600、`NOTION_STATE_FILE` で変更・`off` で無効）に job と session を
+`{version, jobs[], sessions[]}` で保存する。同一 directory への temp ファイカを `rename` する原子的書き込み、
+24時間で prune、保存本文は20000文字・prompt preview は500文字で切る。プロセス再起動後に `running` のまま
+残っていた job は、監視するプロセスがもういないので `orphaned` に降格する。

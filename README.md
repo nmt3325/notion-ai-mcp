@@ -1,11 +1,13 @@
 # Notion AI MCP Server
 
 Notion AI の非公式な内部 API を MCP サーバーとしてラップする、個人検証用の TypeScript 実装です。
-stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次の 20 ツールを利用できます。
+stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次の 22 ツールを利用できます。
 
 **チャット / 履歴**
 
-- `notion_ai_chat`: Notion AI にプロンプトを送信し、NDJSON/SSE ストリームを集約して返す（モデル指定・添付対応）
+- `notion_ai_chat`: Notion AI にプロンプトを送信し、NDJSON/SSE ストリームを集約して返す（モデル・reasoningEffort 指定、添付対応）。MCP client が約60秒で呼び出しを放棄するため、既定45秒で切り上げて `jobId` 付きの `pending` を返し、生成はサーバー側で継続する
+- `get_chat_result`: 待機打ち切り後・タイムアウト後の回答を job または thread 本文から回収する
+- `list_chat_jobs`: バックグラウンドで走らせた chat job の状態・conversationId を一覧する
 - `list_conversations`: Notion AI の workflow/chat thread をページング取得する
 - `get_conversation`: 指定 thread の user-visible な user/assistant メッセージを取得する
 - `rename_conversation`: active workspace内のthreadを検証してタイトル変更する
@@ -89,6 +91,9 @@ node dist/src/index.js
 | `NOTION_API_BASE` | 任意 | 既定 `https://www.notion.so/api/v3` |
 | `NOTION_REQUEST_TIMEOUT_MS` | 任意 | 内部 API request timeout（workspace操作にも適用）。既定 300000 ms |
 | `NOTION_MAX_WORKSPACE_RETRIES` | 任意 | credit枯渇時のworkspaceローテーション上限。既定5、`0`で無効 |
+| `NOTION_CHAT_WAIT_MS` | 任意 | `notion_ai_chat` が inline で待つ上限。既定 45000 ms（1000〜55000）。MCP client の約60秒制限より短く保つ |
+| `NOTION_STATE_FILE` | 任意 | chat job と継続session の保存先（mode 0600）。既定 `~/.notion-ai-mcp/state.json`、`off` で保存無効 |
+| `NOTION_SESSION_REHYDRATE` | 任意 | 未知の `conversationId` を thread から復元して継続する。既定有効、`0` で無効 |
 | `NOTION_FULL_COOKIE` | 任意 | 完全なCookie header。assistant-transcript downloadにはブラウザsessionの`file_token`が必要 |
 | `NOTION_MODEL_ALIASES` | 任意 | モデル別名を追加/上書きする JSON。例 `{"my-fast":"oatmeal-cookie"}` |
 | `NOTION_MCP_REGISTRY_FILE` | 任意 | 登録済み MCP 接続の保存先（mode 0600） |
@@ -168,6 +173,61 @@ notion-ai-mcp.example.com {
 }
 ```
 
+## Docker
+
+### イメージの取得
+
+`main` への push と `v*` タグで GHCR に自動ビルド・自動 push されます
+(`.github/workflows/docker-image.yml`、linux/amd64 + linux/arm64)。
+
+```bash
+docker pull ghcr.io/nmt3325/notion-ai-mcp:latest
+```
+
+タグは `latest` / `main` / `sha-<commit>` / `v1.2.3` / `1.2` が付きます。
+リポジトリが private の間は package も private なので、pull 前に
+`echo $GHCR_PAT | docker login ghcr.io -u nmt3325 --password-stdin` が必要です。
+
+### docker compose で HTTP モードを起動
+
+```bash
+cp .env.example .env      # NOTION_TOKEN_V2 と NOTION_MCP_HTTP_BEARER_TOKEN(32文字以上) を設定
+docker compose up -d
+curl -fsS http://127.0.0.1:3000/healthz   # {"status":"ok"}
+docker compose logs -f mcp-http
+```
+
+- コンテナ内では `NOTION_MCP_HTTP_HOST=0.0.0.0` 固定、公開側は既定で `127.0.0.1:3000` のみ。
+  LAN に出すなら `NOTION_MCP_HTTP_BIND_ADDRESS=0.0.0.0`、インターネット公開は TLS リバースプロキシ経由で。
+- 添付ファイルの入出力は named volume `notion-ai-mcp-data` を `/data` にマウントし
+  `NOTION_ATTACHMENT_ROOT=/data` / `NOTION_MCP_REGISTRY_FILE=/data/mcp-connections.json` としています。
+  ホストのファイルを渡したい場合は `- ./work:/data` などに差し替えてください。
+- コンテナは `read_only` + `no-new-privileges` + 非 root (`node`) 実行。書き込みは `/data` と `/tmp` のみ。
+
+### stdio モード
+
+```bash
+docker compose run --rm -T mcp-stdio
+# または compose なしで
+docker run -i --rm --env-file .env -v notion-ai-mcp-data:/data \
+  ghcr.io/nmt3325/notion-ai-mcp:latest node dist/src/index.js
+```
+
+Claude Code / Cursor に登録する場合は `command` を `docker`、`args` を
+`["run","-i","--rm","--env-file","/abs/path/.env","ghcr.io/nmt3325/notion-ai-mcp:latest","node","dist/src/index.js"]`
+にします。
+
+### ローカルビルド
+
+```bash
+docker compose build            # compose 経由
+docker build -t notion-ai-mcp:dev .
+docker build --build-arg NODE_VERSION=24 -t notion-ai-mcp:node24 .
+```
+
+multi-stage なので最終イメージには `dist/` と本番依存のみが入ります
+(tsc / devDependencies / tests は含まれません)。
+
 ## MCP クライアント登録
 
 先に `npm run build` を実行し、以下のパスを絶対パスへ置き換えます。
@@ -220,7 +280,9 @@ notion-ai-mcp.example.com {
 - `prompt` (必須)
 - `model` (任意、Notion 内部 model ID)
 - `reasoningEffort` (任意、`none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`)
-- `conversationId` (任意、このサーバープロセスが直前に返した ID)
+- `conversationId` (任意、過去に返した ID。タイムアウトした chat や再起動前の thread も継続可能)
+- `waitSeconds` (任意、1〜55。既定は `NOTION_CHAT_WAIT_MS` の45秒)
+- `background` (既定 `false`、`true` で待たずに `jobId` と `conversationId` を即返す)
 - `webSearch` / `workspaceSearch` (既定 `false`)
 - `readOnly` (既定 `true`、legacy text chat の Notion Ask mode)
 - `fileIds` (任意、`upload_attachment` が返したID。最大19件)
@@ -237,8 +299,10 @@ handleは作成されたthreadに固定され、Agent Service ID・別thread・�
 同じactive inference conversationへ後からuploadできますが、`conversationId`指定済みの`auto` uploadは、失敗時に別threadへretargetしません。
 Agent Service file chatは安全のため`policies.approval_mode="ask"`を明示します。
 
-継続 chat の session は現在メモリ内にだけ保持するため、サーバー再起動後は以前の `conversationId` を
-送信継続には使えません。過去 thread の閲覧は `get_conversation` で可能です。
+継続 chat の session は `NOTION_STATE_FILE` に保存され、再起動後も同じ `conversationId` へ送信できます。
+保存が無効な場合や別プロセスが作った thread でも、`getInferenceTranscriptsForUser` から thread を引き当てて
+session を復元します（`NOTION_SESSION_REHYDRATE=0` で無効化）。復元できない ID は、どの workspace の
+thread か分かるエラーを返します。添付 handle は復元対象ではないため、再起動後は再uploadが必要です。
 
 ### `list_conversations`
 
@@ -262,6 +326,36 @@ Agent Service file chatは安全のため`policies.approval_mode="ask"`を明示
 `/createSpace` 成功後のtransaction・検証失敗はpartial creationです。重複workspaceを防ぐため、
 サーバーは `/createSpace` もtransactionも自動再試行せず、切り替え・pin・account JSON更新を行いません。
 HTTP errorにはbounded response bodyを含め、`Retry-After` があれば併記します。
+
+## 60秒タイムアウト対策（job と回収）
+
+Notion AI 側の生成は数分続くことがありますが、MCP client は約60秒で呼び出しを放棄します。
+このとき Notion 側では thread が作られて生成が進み、credit も消費されるのに、client には
+`MCP error -32001: Request timed out` だけが残り、`conversationId` すら受け取れませんでした。
+
+本サーバーは待ち時間を client 側の制限より短く保ち、答えを job として保持することで取りこぼしを防ぎます。
+
+- `notion_ai_chat` は既定45秒（`waitSeconds` / `NOTION_CHAT_WAIT_MS`、最大55秒）まで待ち、
+  終わらなければ `status: "pending"` と `jobId` / `conversationId` を返します。生成はサーバー側で継続します。
+- 数分かかると分かっている質問は `background: true` で投げると、待たずに `jobId` と `conversationId` を受け取れます。
+- `get_chat_result` は `jobId` または `conversationId` で回答を回収します。job が残っていればそこから、
+  無ければ thread 本文（`get_conversation` と同じ user-visible step のみ）から回収します。
+- `list_chat_jobs` で job の一覧・状態・prompt preview を確認できます。再起動時に走っていた job は
+  `orphaned` として残るので、`get_chat_result` で thread から回収してください。
+- job と session は `NOTION_STATE_FILE`（既定 `~/.notion-ai-mcp/state.json`、mode 0600、24時間保持）に
+  原子的に保存されます。`NOTION_STATE_FILE=off` で完全にメモリ内のみに切り替えられます。
+- client が `progressToken` を送っている場合、10秒ごとに `notifications/progress` を送出して
+  進行中であることを伝えます（対応 client は待機を延長できます）。
+
+```jsonc
+// 1) 長い質問を投げる（45秒で切り上げ）
+{ "name": "notion_ai_chat", "arguments": { "prompt": "...", "model": "gpt-5.4-high", "reasoningEffort": "max" } }
+// => { "status": "pending", "jobId": "...", "conversationId": "...", "elapsedMs": 45000, "hint": "..." }
+
+// 2) 回答を回収する（必要なら繰り返す）
+{ "name": "get_chat_result", "arguments": { "jobId": "...", "waitSeconds": 30 } }
+// => { "status": "completed", "source": "job", "text": "...", "conversationId": "..." }
+```
 
 ## 検証
 
@@ -498,8 +592,9 @@ Notionへ実ファイルとして送る場合は必ず `upload_attachment` と `
 
 - 非公式 API のため schema、header、model ID、client version は変更される。
 - Node `fetch` は `notion_manager` の Chrome uTLS fingerprint を再現しない。現時点の履歴 API は実環境で成功。
-- 起動中に作成した thread だけが multi-turn 送信 session として継続可能。assistant-transcript upload handleも再起動後は失効する。
+- chat job と継続 session は state file に保存されるが、assistant-transcript upload handle は再起動後に失効する。
 - Agent Service file chatのtoken usageはtranscript APIから返らないため、`usage`は現在0を返す。assistant-transcript fallbackは通常の推論usageを返す。
 - file chatでは `workspaceSearch` の無効化を明示できず、Agent Serviceのworkspace access既定値を使用する。
 - Notion quota がない場合、`premium-feature-unavailable` を tool error として返す。
 - browser DOM fallback は持たない。履歴 API が変更された場合は実装更新が必要。
+- MCP client の約60秒制限自体は回避できない。長い生成は `pending` job として返り、`get_chat_result` での回収が必要になる。
