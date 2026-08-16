@@ -19,10 +19,24 @@ export interface NotionConfig {
   chatWaitMs?: number | undefined;
   /** Allow rebuilding a chat session for a conversation this process never started. */
   allowSessionRehydrate?: boolean | undefined;
+  /** Web search for a new chat when the caller does not pass webSearch. */
+  defaultWebSearch: boolean;
+  /** Workspace search for a new chat when the caller does not pass workspaceSearch. */
+  defaultWorkspaceSearch: boolean;
+  /** Ask/read-only mode for a new chat when the caller does not pass readOnly. */
+  defaultReadOnly: boolean;
 }
 
 function optional(name: string, fallback = ""): string {
   return process.env[name]?.trim() || fallback;
+}
+
+function flag(name: string, fallback: boolean): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (["1", "true", "on", "yes"].includes(raw)) return true;
+  if (["0", "false", "off", "no"].includes(raw)) return false;
+  throw new Error(`${name} must be a boolean such as 1/0, true/false, on/off`);
 }
 
 function accountFile(): { path: string; data: Record<string, unknown> } {
@@ -73,6 +87,10 @@ export function loadConfig(): NotionConfig {
     maxWorkspaceRetries: maxRetries,
     chatWaitMs,
     allowSessionRehydrate: !["0", "false", "off", "no"].includes(rehydrate),
+    // A chat started through MCP used to be web-off and Ask-only, unlike the same chat in the Notion app.
+    defaultWebSearch: flag("NOTION_DEFAULT_WEB_SEARCH", true),
+    defaultWorkspaceSearch: flag("NOTION_DEFAULT_WORKSPACE_SEARCH", true),
+    defaultReadOnly: flag("NOTION_DEFAULT_READ_ONLY", false),
     ...(persistState && stateFile ? { stateFilePath: stateFile } : {}),
     account: {
       tokenV2,

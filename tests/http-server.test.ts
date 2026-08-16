@@ -38,7 +38,8 @@ function fakeClient(): NotionClient {
       createdAt: null,
       updatedAt: null,
       messages: []
-    })
+    }),
+    chatDefaults: () => ({ webSearch: true, workspaceSearch: true, readOnly: false })
   } as unknown as NotionClient;
 }
 
