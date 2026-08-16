@@ -39,7 +39,12 @@ async function withHeartbeat<T>(extra: unknown, run: () => Promise<T>): Promise<
   let ticks = 0;
   const timer = setInterval(() => {
     ticks += 1;
-    void send({ method: "notifications/progress", params: { progressToken, progress: ticks, message: `Notion AI is still generating (${ticks * 10}s)` } }).catch(() => { /* progress is best effort */ });
+    // A transport the client already abandoned can reject *or* throw synchronously. An uncaught throw
+    // inside a timer callback escapes the try/finally below and would kill the whole process, so both
+    // paths are swallowed here.
+    try {
+      void Promise.resolve(send({ method: "notifications/progress", params: { progressToken, progress: ticks, message: `Notion AI is still generating (${ticks * 10}s)` } })).catch(() => { /* progress is best effort */ });
+    } catch { /* progress is best effort */ }
   }, 10_000);
   timer.unref?.();
   try { return await run(); }
@@ -92,6 +97,7 @@ function result(value: unknown, text?: string): { content: Array<{ type: "text";
 
 export function createServer(client: NotionClient): McpServer {
   const server = new McpServer({ name: "notion-ai-mcp", version: SERVER_VERSION });
+  const defaults = client.chatDefaults();
   const canonicalModelIds = new Set(Object.values(BUILTIN_ALIASES));
   const modelHint = listModels().filter((entry) => entry.pickable || canonicalModelIds.has(entry.modelId)).map((entry) => `${entry.modelId} (${entry.aliases.join(", ")})`).join("; ");
   const effortHint = listModels()
@@ -110,9 +116,9 @@ export function createServer(client: NotionClient): McpServer {
       model: z.string().min(1).optional().describe(`Model name or internal ID. Known: ${modelHint}`),
       reasoningEffort: z.enum(REASONING_EFFORTS).optional().describe(`Thinking effort, sent as the same reasoningEffort field the Notion web client persists. Only models with an effort picker accept it. Per model: ${effortHint}`),
       conversationId: z.string().uuid().optional().describe("ID returned by a previous notion_ai_chat call, including one whose call timed out or ran before a restart; omit reasoningEffort to keep the effort already chosen for that conversation"),
-      webSearch: z.boolean().default(false).describe("Allow Notion AI web search"),
-      workspaceSearch: z.boolean().default(false).describe("Allow Notion workspace search"),
-      readOnly: z.boolean().default(true).describe("Use Notion Ask/read-only mode"),
+      webSearch: z.boolean().optional().describe(`Allow Notion AI web search. Omitted means NOTION_DEFAULT_WEB_SEARCH (currently ${defaults.webSearch}).`),
+      workspaceSearch: z.boolean().optional().describe(`Allow Notion workspace search. Omitted means NOTION_DEFAULT_WORKSPACE_SEARCH (currently ${defaults.workspaceSearch}).`),
+      readOnly: z.boolean().optional().describe(`Ask/read-only mode. false is Agent mode, which lets Notion AI edit the workspace. Omitted means NOTION_DEFAULT_READ_ONLY (currently ${defaults.readOnly}).`),
       attachments: z.array(z.object({
         name: z.string().min(1),
         url: z.string().min(1).optional(),
@@ -126,9 +132,9 @@ export function createServer(client: NotionClient): McpServer {
   }, async (input, extra) => {
     const options = {
       prompt: input.prompt,
-      webSearch: input.webSearch,
-      workspaceSearch: input.workspaceSearch,
-      readOnly: input.readOnly,
+      ...(input.webSearch === undefined ? {} : { webSearch: input.webSearch }),
+      ...(input.workspaceSearch === undefined ? {} : { workspaceSearch: input.workspaceSearch }),
+      ...(input.readOnly === undefined ? {} : { readOnly: input.readOnly }),
       ...(input.model ? { model: input.model } : {}),
       ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
       ...(input.conversationId ? { conversationId: input.conversationId } : {}),

@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 import { runHttpServer } from "./http-server.js";
+import { installProcessGuards } from "./process-guards.js";
+
+installProcessGuards("notion-ai-mcp-http");
 
 runHttpServer().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
