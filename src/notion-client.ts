@@ -317,7 +317,7 @@ function jobLookupOf(job: ChatJob): ChatJobLookup {
   };
 }
 
-export function parseConversationMessages(messageIds: string[], recordMap: Record<string, unknown>): ConversationMessage[] {
+export function parseConversationMessages(messageIds: string[], recordMap: Record<string, unknown>, options: { merge?: boolean } = {}): ConversationMessage[] {
   const messages: ConversationMessage[] = [];
   for (const id of messageIds) {
     const record = unwrapRecord(recordMap[id]);
@@ -327,10 +327,42 @@ export function parseConversationMessages(messageIds: string[], recordMap: Recor
     const text = conversationStepText(step);
     if (!text) continue;
     const previous = messages.at(-1);
-    if (previous?.role === role) { previous.text = `${previous.text}\n\n${text}`; continue; }
+    if (options.merge !== false && previous?.role === role) { previous.text = `${previous.text}\n\n${text}`; continue; }
     messages.push({ id, role, text, createdAt: asNumber(record.created_time) });
   }
   return messages;
+}
+
+export type AnswerMatch = "userMessageId" | "jobId" | "latestAssistant";
+
+type ThreadAnswer = { text: string; partialText: string; matchedBy: AnswerMatch; final: boolean; closed: boolean };
+
+/** How long a turn must stay quiet before an unclosed turn counts as finished. */
+const ANSWER_QUIET_MS = 120000;
+
+/**
+ * Picks the answer that belongs to one request out of a thread that may hold several.
+ *
+ * The turn is the span between the user step and the next user step. Its last assistant step is the answer;
+ * earlier steps in the span are progress notes. Nothing outside the span is ever returned as this request's
+ * answer, because parallel requests append their answers to the same thread.
+ */
+export function answerSegment(messages: ConversationMessage[], userMessageId?: string | undefined, since?: number | undefined): { text: string; matchedBy: AnswerMatch; askedFound: boolean; closed: boolean; lastAt: number | null } {
+  const askedAt = userMessageId ? messages.findIndex((message) => message.id === userMessageId) : -1;
+  if (askedAt >= 0) {
+    const rest = messages.slice(askedAt + 1);
+    const nextTurn = rest.findIndex((message) => message.role === "user");
+    const turn = nextTurn >= 0 ? rest.slice(0, nextTurn) : rest;
+    const answer = turn.filter((message) => message.role === "assistant" && message.text.trim()).at(-1);
+    return {
+      text: answer?.text ?? "", matchedBy: "userMessageId", askedFound: true, closed: nextTurn >= 0,
+      lastAt: typeof answer?.createdAt === "number" ? answer.createdAt : null
+    };
+  }
+  const newest = [...messages].reverse().find((message) => message.role === "assistant" && message.text.trim());
+  const createdAt = typeof newest?.createdAt === "number" ? newest.createdAt : null;
+  const fresh = newest && (since === undefined || createdAt === null || createdAt >= since - 5000) ? newest : undefined;
+  return { text: fresh?.text ?? "", matchedBy: "latestAssistant", askedFound: false, closed: false, lastAt: createdAt };
 }
 
 function cleanLangTags(text: string): string { return text.replace(/<lang\b[^>]*\/>/g, "").replace(/<lang[^>]*$/, ""); }
@@ -678,58 +710,88 @@ export class NotionClient {
     const waitMs = Math.max(0, options.waitMs ?? 0);
     const jobId = options.jobId?.trim() ?? "";
     const conversationId = options.conversationId?.trim() ?? "";
-    if (!jobId && !conversationId) throw new Error("jobId or conversationId is required");
-    let job = jobId ? this.state.job(jobId) : this.state.latestForConversation(conversationId);
-    // An unknown jobId is recoverable as long as the caller also named the conversation: the thread is the source of truth.
-    if (jobId && !job && !conversationId) throw new Error(`Unknown jobId ${jobId}. Call list_chat_jobs, or pass conversationId to read the answer from the thread.`);
+    const askedId = options.userMessageId?.trim() ?? "";
+    if (!jobId && !conversationId && !askedId) throw new Error("jobId, conversationId, or userMessageId is required");
+    // The request step is the first lookup key: it survives a lost ledger and it cannot point at another request.
+    let job = askedId ? this.state.jobByUserMessage(askedId) : null;
+    if (!job) job = jobId ? this.state.job(jobId) : conversationId ? this.state.latestForConversation(conversationId) : null;
+    if (jobId && !job && !conversationId && !askedId) throw new Error(`Unknown jobId ${jobId}. Call list_chat_jobs, or pass conversationId or userMessageId to read the answer from the thread.`);
     if (job?.status === "running" && waitMs > 0) job = await this.state.wait(job.jobId, waitMs);
-    if (job && (job.status === "completed" || job.status === "failed")) return jobLookupOf(job);
+    // A ledger answer is only handed back when it belongs to the request the caller named.
+    const owned = !askedId || job?.userMessageId === askedId;
+    if (job && owned && (job.status === "completed" || job.status === "failed")) {
+      return { ...jobLookupOf(job), matchedBy: "jobId", ...(job.userMessageId ? { userMessageId: job.userMessageId } : {}) };
+    }
     const threadId = job?.conversationId || conversationId;
     if (!threadId) throw new Error("conversationId is required to read the answer from the thread");
     // No live stream: the call timed out, the job is from a previous process, or the answer arrived late.
-    const askedId = options.userMessageId?.trim() || job?.userMessageId;
-    const recovered = await this.recoverAnswerFromThread(threadId, job?.startedAt, job ? 0 : waitMs, askedId);
-    if (recovered.text) {
-      if (job) this.state.complete(job.jobId, { text: recovered.text });
+    const wanted = askedId || job?.userMessageId;
+    const recovered = await this.recoverAnswerFromThread(threadId, job?.startedAt, job ? 0 : waitMs, wanted, job?.status === "running");
+    const identity = {
+      conversationId: threadId, ...(job ? { jobId: job.jobId } : {}), ...(wanted ? { userMessageId: wanted } : {}),
+      ...(job?.model ? { model: job.model } : {}), ...(job?.reasoningEffort ? { reasoningEffort: job.reasoningEffort } : {}),
+      ...(job ? { startedAt: job.startedAt, elapsedMs: Date.now() - job.startedAt } : {})
+    };
+    // A guessed answer is never silent: the caller has to be able to tell it may belong to another request.
+    const guessed = recovered.matchedBy === "latestAssistant"
+      ? ` This text is the newest assistant message, not a matched answer, because request step ${wanted ?? "(none given)"} is not visible in the thread. It may belong to a different request; pass the userMessageId returned by notion_ai_chat to match exactly.`
+      : "";
+    if (recovered.final && recovered.text) {
+      if (job && owned) this.state.complete(job.jobId, { text: recovered.text });
       return {
-        status: "completed", source: "thread", conversationId: threadId, ...(job ? { jobId: job.jobId } : {}),
-        ...(askedId ? { userMessageId: askedId } : {}), matchedBy: recovered.matchedBy,
-        ...(job?.model ? { model: job.model } : {}), ...(job?.reasoningEffort ? { reasoningEffort: job.reasoningEffort } : {}),
-        text: recovered.text, ...(job ? { startedAt: job.startedAt, elapsedMs: Date.now() - job.startedAt } : {})
+        status: "completed", source: "thread", ...identity, matchedBy: recovered.matchedBy, text: recovered.text,
+        ...(guessed ? { hint: guessed.trim() } : {})
       };
     }
+    const waiting = recovered.partialText
+      ? `Notion AI is still writing in conversation ${threadId}; partialText holds the steps written so far and is not the final answer.`
+      : `Notion AI has not written the answer to conversation ${threadId} yet.`;
+    // A turn that a later request closed without an answer can never be attributed, so say so instead of waiting forever.
+    const interleaved = recovered.closed
+      ? " Another request was added to this thread before this answer appeared, so it can no longer be matched; read the thread with get_conversation."
+      : "";
     return {
-      status: job?.status ?? "running", source: job ? "job" : "thread", conversationId: threadId,
-      ...(job ? { jobId: job.jobId, model: job.model, startedAt: job.startedAt, elapsedMs: Date.now() - job.startedAt } : {}),
-      ...(job?.reasoningEffort ? { reasoningEffort: job.reasoningEffort } : {}),
-      hint: `Notion AI has not written the answer to conversation ${threadId} yet. Call get_chat_result again in a few seconds, or read the thread with get_conversation.`
+      status: job && job.status !== "completed" ? job.status : "running", source: job ? "job" : "thread", ...identity,
+      matchedBy: recovered.matchedBy, ...(recovered.partialText ? { partialText: recovered.partialText } : {}),
+      ...(job?.error ? { error: job.error } : {}),
+      hint: `${waiting} Call get_chat_result again in a few seconds, or read the thread with get_conversation.${guessed}${interleaved}`
     };
   }
 
   /**
    * Polls the thread for the answer to one specific request.
    *
-   * When the user step id is known, the answer is the first assistant message after it. Reading the newest
-   * assistant message instead loses long answers once another turn is added, and hands back the wrong text
-   * when several requests run against the same thread at once.
+   * The answer is the last assistant step of the turn the user step opened: earlier steps of that turn are
+   * progress notes, and anything after the next user step belongs to another request. An unfinished turn is
+   * reported as partial text rather than as a completed answer, so a caller can tell a streamed fragment
+   * from a final answer.
    */
-  private async recoverAnswerFromThread(threadId: string, since: number | undefined, budgetMs: number, userMessageId?: string | undefined): Promise<{ text: string; matchedBy: "userMessageId" | "latestAssistant" }> {
+  private async recoverAnswerFromThread(threadId: string, since: number | undefined, budgetMs: number, userMessageId?: string | undefined, generating = false): Promise<ThreadAnswer> {
     const deadline = Date.now() + Math.max(0, budgetMs);
     for (;;) {
-      const conversation = await this.getConversation(threadId, 5);
-      const asked = userMessageId ? conversation.messages.findIndex((message) => message.id === userMessageId) : -1;
-      if (asked >= 0) {
-        const answer = conversation.messages.slice(asked + 1).find((message) => message.role === "assistant" && message.text.trim());
-        if (answer) return { text: answer.text, matchedBy: "userMessageId" };
+      const segment = answerSegment(await this.threadSteps(threadId), userMessageId, since);
+      // A turn is finished once a later request closed it, or once it has been quiet long enough to be over.
+      const quiet = !generating && segment.lastAt !== null && Date.now() - segment.lastAt >= ANSWER_QUIET_MS;
+      if (segment.text && (segment.closed || quiet)) {
+        return { text: segment.text, partialText: "", matchedBy: segment.matchedBy, final: true, closed: segment.closed };
       }
-      // Only guess from the newest answer while the user step itself is not visible in the thread.
-      const newest = asked < 0 ? [...conversation.messages].reverse().find((message) => message.role === "assistant" && message.text.trim()) : undefined;
-      const usable = newest && (since === undefined || newest.createdAt === null || newest.createdAt >= since - 5000) ? newest : null;
-      if (usable && !userMessageId) return { text: usable.text, matchedBy: "latestAssistant" };
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) return usable ? { text: usable.text, matchedBy: "latestAssistant" } : { text: "", matchedBy: userMessageId ? "userMessageId" : "latestAssistant" };
-      await sleep(Math.min(5000, Math.max(500, remaining)));
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        return {
+          text: "", partialText: segment.text, matchedBy: segment.matchedBy, final: false,
+          closed: segment.askedFound && segment.closed && !segment.text
+        };
+      }
+      await sleep(Math.min(5000, Math.max(500, left)));
     }
+  }
+
+  /** Thread steps without the display-time merge, so progress notes stay separable from the final answer. */
+  private async threadSteps(threadId: string): Promise<ConversationMessage[]> {
+    const found = await this.findThread(threadId, 5);
+    const messageIds = arrayOfStrings(found.thread.messages);
+    const records = await this.fetchThreadMessages(messageIds);
+    return parseConversationMessages(messageIds, records, { merge: false });
   }
 
   /**

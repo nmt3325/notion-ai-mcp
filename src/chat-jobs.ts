@@ -284,6 +284,12 @@ export class ChatStateStore {
     return { ...job };
   }
 
+  /** Finds the job that sent one specific user step, so a caller holding only that id can still recover. */
+  jobByUserMessage(userMessageId: string): ChatJob | null {
+    if (!userMessageId) return null;
+    return this.list({ limit: MAX_TRACKED_JOBS }).find((job) => job.userMessageId === userMessageId) ?? null;
+  }
+
   job(jobId: string): ChatJob | null {
     this.refresh();
     const job = this.jobRecords.get(jobId);

@@ -3,6 +3,7 @@ import test from "node:test";
 import type { NotionConfig } from "../src/config.js";
 import {
   NotionClient,
+  answerSegment,
   notionRichTextToMarkdown,
   parseConversationMessages,
   parseInferenceLines
@@ -669,4 +670,49 @@ test("a text-less stream reports the workspace and stream events instead of an e
     assert.match(message, /AI credits/);
     return true;
   });
+});
+
+// Reproduces a live incident: a slow request and a fast request sharing one thread.
+const parallelThread = [
+  { id: "user-a", role: "user" as const, text: "slow request", createdAt: 1786848450636 },
+  { id: "step-a-progress", role: "assistant" as const, text: "素数を数えています…", createdAt: 1786848455000 },
+  { id: "step-a-answer", role: "assistant" as const, text: "【遅い方の回答A】168個", createdAt: 1786848460153 },
+  { id: "user-b", role: "user" as const, text: "fast request", createdAt: 1786848530560 },
+  { id: "step-b-answer", role: "assistant" as const, text: "【速い方の回答B】2", createdAt: 1786848532324 }
+];
+
+test("an answer is taken from the turn its own request opened, never from a parallel request", () => {
+  const slow = answerSegment(parallelThread, "user-a");
+  assert.equal(slow.text, "【遅い方の回答A】168個");
+  assert.equal(slow.matchedBy, "userMessageId");
+  assert.equal(slow.closed, true);
+
+  const fast = answerSegment(parallelThread, "user-b");
+  assert.equal(fast.text, "【速い方の回答B】2");
+});
+
+test("progress notes of an unfinished turn are not reported as the finished answer", () => {
+  const segment = answerSegment(parallelThread.slice(0, 2), "user-a");
+  assert.equal(segment.text, "素数を数えています…");
+  assert.equal(segment.closed, false);
+  assert.equal(segment.askedFound, true);
+});
+
+test("a request step missing from the thread is reported as a guess, not as a match", () => {
+  const segment = answerSegment(parallelThread, "user-missing");
+  assert.equal(segment.matchedBy, "latestAssistant");
+  assert.equal(segment.askedFound, false);
+});
+
+test("thread steps stay separable so a progress note never merges into the answer", () => {
+  const ids = ["one", "two"];
+  const step = (content: string, createdTime: number) => ({
+    value: { value: { created_time: createdTime, step: { type: "agent-inference", value: [{ type: "text", content }] } } }
+  });
+  const records = { one: step("working on it", 1), two: step("final answer", 2) };
+  const merged = parseConversationMessages(ids, records);
+  const separate = parseConversationMessages(ids, records, { merge: false });
+  assert.equal(merged.length, 1);
+  assert.equal(separate.length, 2);
+  assert.equal(separate.at(-1)?.text, "final answer");
 });
