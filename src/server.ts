@@ -178,6 +178,9 @@ export function createServer(client: NotionClient): McpServer {
     return result({
       jobs: client.listChatJobs({ ...(input.status ? { status: input.status } : {}), limit: input.limit }),
       statePath: client.chatStatePath(),
+      instanceId: client.chatStateInstance(),
+      pid: process.pid,
+      uptimeSeconds: Math.round(process.uptime()),
       ...(warning ? { stateWarning: warning } : {})
     });
   });

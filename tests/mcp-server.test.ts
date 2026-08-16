@@ -87,7 +87,8 @@ function fakeClient(): { client: NotionClient; chatCalls: Array<Record<string, u
       listPreconfigured: async () => [{ id: "preconfigured-1", name: "Amplitude" }],
       connectPreconfigured: async () => ({ id: "preconfigured-1", connected: true })
     }),
-    chatDefaults: () => ({ webSearch: true, workspaceSearch: true, readOnly: false })
+    chatDefaults: () => ({ webSearch: true, workspaceSearch: true, readOnly: false }),
+    chatStateInstance: () => "test-instance"
   } as unknown as NotionClient;
   return { client, chatCalls, added, uploaded, downloaded, lookups, waits };
 }
@@ -180,7 +181,8 @@ test("notion_ai_chat keeps the client under the 60s limit and hands back a pendi
       status: "pending", jobId: "job-slow", conversationId, model: "mock-model", startedAt: 1, elapsedMs: 45_000,
       hint: "Still generating after 45s. Nothing is lost: call get_chat_result with jobId job-slow."
     }),
-    chatDefaults: () => ({ webSearch: true, workspaceSearch: true, readOnly: false })
+    chatDefaults: () => ({ webSearch: true, workspaceSearch: true, readOnly: false }),
+    chatStateInstance: () => "test-instance"
   } as unknown as NotionClient;
   const { mcpClient, close } = await connect(client);
   try {

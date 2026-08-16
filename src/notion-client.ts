@@ -666,6 +666,9 @@ export class NotionClient {
 
   chatStateError(): string | null { return this.state.persistError(); }
 
+  /** Ledger identity, so a caller can tell whether two calls reached the same server instance. */
+  chatStateInstance(): string { return this.state.instanceId(); }
+
   /** Collects a chat answer after the fact, from the job cache or, when the stream is gone, from the thread itself. */
   async chatResult(options: { jobId?: string | undefined; conversationId?: string | undefined; waitMs?: number | undefined }): Promise<ChatJobLookup> {
     const waitMs = Math.max(0, options.waitMs ?? 0);

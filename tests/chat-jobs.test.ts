@@ -105,3 +105,37 @@ test("a store without a state file keeps everything in memory", () => {
   assert.equal(store.persistError(), null);
   assert.equal(store.job(jobId)?.status, "running");
 });
+
+test("two stores on one file keep each other's jobs instead of clobbering them", () => {
+  withStateFile((path) => {
+    // The HTTP server used to build a client, and therefore a store, per MCP session.
+    const firstSession = new ChatStateStore(path);
+    const secondSession = new ChatStateStore(path);
+    const firstJob = start(firstSession, CONVERSATION, "From the first session");
+    const secondJob = start(secondSession, "22222222-2222-4222-8222-222222222222", "From the second session");
+
+    const reopened = new ChatStateStore(path);
+    assert.deepEqual(reopened.list({ limit: 100 }).map((job) => job.jobId).sort(), [firstJob, secondJob].sort());
+  });
+});
+
+test("a reader store sees a job another store wrote after it was created", () => {
+  withStateFile((path) => {
+    const reader = new ChatStateStore(path);
+    assert.equal(reader.list().length, 0);
+
+    const writer = new ChatStateStore(path);
+    const jobId = start(writer, CONVERSATION, "Started elsewhere");
+
+    const listed = reader.list();
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0]?.jobId, jobId);
+    assert.equal(reader.job(jobId)?.status, "orphaned");
+    assert.equal(reader.latestForConversation(CONVERSATION)?.jobId, jobId);
+
+    // The writer still owns the job, so its own view stays running and survives the reader's writes.
+    assert.equal(writer.job(jobId)?.status, "running");
+    writer.complete(jobId, { text: "Answer" });
+    assert.equal(new ChatStateStore(path).job(jobId)?.status, "completed");
+  });
+});

@@ -119,7 +119,11 @@ export function createRemoteMcpHttpServer(options: HttpServerOptions): RemoteMcp
   if (!options.path.startsWith("/")) throw new Error("HTTP MCP path must start with /");
   if (options.bearerToken.length < 32) throw new Error("HTTP MCP bearer token must contain at least 32 characters");
   const sessions = new Map<string, HttpSession>();
-  const clientFactory = options.clientFactory ?? (() => new NotionClient(loadConfig()));
+  // One client, and therefore one job ledger, per process. Building a client per MCP session made a job
+  // started in one session invisible to the next one, which is why list_chat_jobs always came back empty.
+  const buildClient = options.clientFactory ?? ((): NotionClient => new NotionClient(loadConfig()));
+  let sharedClient: NotionClient | undefined;
+  const clientFactory = (): NotionClient => (sharedClient ??= buildClient());
   const log = options.logger ?? ((message: string) => process.stderr.write(`${message}\n`));
 
   const removeExpiredSessions = async (): Promise<void> => {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ChatJob, ChatJobStatus, ChatJobUsage, ChatSession } from "./types.js";
@@ -38,7 +38,7 @@ function transportOf(value: unknown): "inference_transcript" | "agent_service" {
   return value === "agent_service" ? "agent_service" : "inference_transcript";
 }
 
-export function sanitizeJob(value: unknown): ChatJob | null {
+export function sanitizeJob(value: unknown, demoteRunning = true): ChatJob | null {
   if (!isRecord(value)) return null;
   const jobId = text(value.jobId);
   const conversationId = text(value.conversationId);
@@ -54,7 +54,7 @@ export function sanitizeJob(value: unknown): ChatJob | null {
     jobId,
     conversationId,
     // A job still marked running in the cache belongs to a dead process: Notion kept generating, but this process cannot await that stream.
-    status: status === "running" ? "orphaned" : status,
+    status: status === "running" && demoteRunning ? "orphaned" : status,
     model: text(value.model),
     ...(effort ? { reasoningEffort: effort } : {}),
     promptPreview: clip(text(value.promptPreview), MAX_PROMPT_PREVIEW),
@@ -101,11 +101,16 @@ export class ChatStateStore {
   private readonly sessionRecords = new Map<string, ChatSession>();
   private readonly waiters = new Map<string, Set<(job: ChatJob) => void>>();
   private lastPersistError: string | null = null;
+  private readonly instance = randomUUID();
+  private lastSeenMtimeMs = 0;
 
   constructor(private readonly filePath: string | null = null) { this.load(); }
 
   statePath(): string | null { return this.filePath; }
   persistError(): string | null { return this.lastPersistError; }
+
+  /** Identifies this in-process ledger. Two different values across calls mean two different servers answered. */
+  instanceId(): string { return this.instance; }
 
   private load(): void {
     if (!this.filePath) return;
@@ -121,21 +126,65 @@ export class ChatStateStore {
     if (!isRecord(parsed)) return;
     for (const candidate of Array.isArray(parsed.jobs) ? parsed.jobs : []) {
       const job = sanitizeJob(candidate);
-      if (job) this.jobRecords.set(job.jobId, job);
+      // A job this store is running stays authoritative; only unknown ones come back from the file.
+      if (job && !this.jobRecords.has(job.jobId)) this.jobRecords.set(job.jobId, job);
     }
     for (const candidate of Array.isArray(parsed.sessions) ? parsed.sessions : []) {
       const session = sanitizeSession(candidate);
-      if (session) this.sessionRecords.set(session.threadId, session);
+      if (session && !this.sessionRecords.has(session.threadId)) this.sessionRecords.set(session.threadId, session);
     }
+    this.lastSeenMtimeMs = this.currentMtimeMs();
     this.prune();
+  }
+
+  private currentMtimeMs(): number {
+    if (!this.filePath) return 0;
+    try { return statSync(this.filePath).mtimeMs; } catch { return 0; }
+  }
+
+  /** Picks up jobs written by another server process, or by another HTTP session with its own store. */
+  private refresh(): void {
+    if (!this.filePath) return;
+    const mtime = this.currentMtimeMs();
+    if (mtime === 0 || mtime === this.lastSeenMtimeMs) return;
+    this.load();
+  }
+
+  private foreignRecords(): { jobs: ChatJob[]; sessions: ChatSession[] } {
+    if (!this.filePath) return { jobs: [], sessions: [] };
+    let parsed: unknown;
+    try { parsed = JSON.parse(readFileSync(this.filePath, "utf8")); }
+    catch { return { jobs: [], sessions: [] }; }
+    if (!isRecord(parsed)) return { jobs: [], sessions: [] };
+    const jobs: ChatJob[] = [];
+    // Someone else's running job must not be demoted to orphaned just because this store rewrote the file.
+    for (const candidate of Array.isArray(parsed.jobs) ? parsed.jobs : []) {
+      const job = sanitizeJob(candidate, false);
+      if (job) jobs.push(job);
+    }
+    const sessions: ChatSession[] = [];
+    for (const candidate of Array.isArray(parsed.sessions) ? parsed.sessions : []) {
+      const session = sanitizeSession(candidate);
+      if (session) sessions.push(session);
+    }
+    return { jobs, sessions };
   }
 
   private persist(): void {
     if (!this.filePath) return;
+    // Records owned by another store in the same file are merged back in, so a write never erases jobs
+    // that this store has never seen.
+    const foreign = this.foreignRecords();
+    const jobs = [...this.jobRecords.values()].map((job) => (job.text ? { ...job, text: clip(job.text, MAX_PERSISTED_TEXT) } : { ...job }));
+    const knownJobIds = new Set(jobs.map((job) => job.jobId));
+    const sessions = [...this.sessionRecords.values()];
+    const knownThreadIds = new Set(sessions.map((session) => session.threadId));
     const payload = JSON.stringify({
       version: STATE_VERSION,
-      jobs: [...this.jobRecords.values()].map((job) => (job.text ? { ...job, text: clip(job.text, MAX_PERSISTED_TEXT) } : { ...job })),
-      sessions: [...this.sessionRecords.values()]
+      jobs: [...jobs, ...foreign.jobs.filter((job) => !knownJobIds.has(job.jobId))]
+        .sort((left, right) => right.startedAt - left.startedAt)
+        .slice(0, MAX_TRACKED_JOBS),
+      sessions: [...sessions, ...foreign.sessions.filter((session) => !knownThreadIds.has(session.threadId))].slice(0, MAX_TRACKED_SESSIONS)
     });
     const temporary = `${this.filePath}.${process.pid}.tmp`;
     try {
@@ -143,6 +192,7 @@ export class ChatStateStore {
       writeFileSync(temporary, payload, { encoding: "utf8", mode: 0o600 });
       renameSync(temporary, this.filePath);
       chmodSync(this.filePath, 0o600);
+      this.lastSeenMtimeMs = this.currentMtimeMs();
       this.lastPersistError = null;
     } catch (error) {
       // A cache write must never fail a chat: the tool result itself stays authoritative.
@@ -232,11 +282,13 @@ export class ChatStateStore {
   }
 
   job(jobId: string): ChatJob | null {
+    this.refresh();
     const job = this.jobRecords.get(jobId);
     return job ? { ...job } : null;
   }
 
   latestForConversation(conversationId: string): ChatJob | null {
+    this.refresh();
     let latest: ChatJob | null = null;
     for (const job of this.jobRecords.values()) {
       if (job.conversationId !== conversationId) continue;
@@ -246,6 +298,7 @@ export class ChatStateStore {
   }
 
   list(options: { status?: ChatJobStatus | undefined; limit?: number | undefined } = {}): ChatJob[] {
+    this.refresh();
     const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
     return [...this.jobRecords.values()]
       .filter((job) => (options.status ? job.status === options.status : true))
