@@ -659,6 +659,11 @@ export class NotionClient {
 
   chatStatePath(): string | null { return this.state.statePath(); }
 
+  /** Capability defaults applied when notion_ai_chat omits webSearch/workspaceSearch/readOnly. */
+  chatDefaults(): { webSearch: boolean; workspaceSearch: boolean; readOnly: boolean } {
+    return { webSearch: this.config.defaultWebSearch, workspaceSearch: this.config.defaultWorkspaceSearch, readOnly: this.config.defaultReadOnly };
+  }
+
   chatStateError(): string | null { return this.state.persistError(); }
 
   /** Collects a chat answer after the fact, from the job cache or, when the stream is gone, from the thread itself. */
@@ -794,7 +799,7 @@ export class NotionClient {
     if (fileIds.length > 0 && transcriptFiles.length === 0) throw new Error("Uploaded file IDs cannot be added to a legacy chat unless they are inference-transcript attachment handles. Start a new chat without conversationId.");
     if (transcriptFiles.some((file) => file.usedInChat)) throw new Error("An inference-transcript attachment handle can only be attached once");
     const prompt = promptWithLegacyAttachments(options.prompt, options.attachments ?? []);
-    const body = this.buildInferenceBody(account, prompt, effectiveModel, options.webSearch ?? false, options.workspaceSearch ?? false, options.readOnly ?? true, session, transcriptFiles, reasoningEffort);
+    const body = this.buildInferenceBody(account, prompt, effectiveModel, options.webSearch ?? this.config.defaultWebSearch, options.workspaceSearch ?? this.config.defaultWorkspaceSearch, options.readOnly ?? this.config.defaultReadOnly, session, transcriptFiles, reasoningEffort);
     const response = await this.request("runInferenceTranscript", body, true);
     if (!response.body) throw new Error("runInferenceTranscript returned no response stream");
     const parsed = await parseInferenceStream(response.body);
@@ -1369,7 +1374,7 @@ export class NotionClient {
         model,
         ...(reasoningEffort ? { reasoningEffort } : {}),
         policies: { approval_mode: "ask" },
-        browserEnabled: options.webSearch ?? false,
+        browserEnabled: options.webSearch ?? this.config.defaultWebSearch,
         clientEventId: clientMessageId
       });
     } else {
@@ -1381,7 +1386,7 @@ export class NotionClient {
         model,
         ...(reasoningEffort ? { reasoningEffort } : {}),
         policies: { approval_mode: "ask" },
-        browserEnabled: options.webSearch ?? false,
+        browserEnabled: options.webSearch ?? this.config.defaultWebSearch,
         clientMessageId
       });
     }

@@ -94,6 +94,9 @@ node dist/src/index.js
 | `NOTION_CHAT_WAIT_MS` | 任意 | `notion_ai_chat` が inline で待つ上限。既定 45000 ms（1000〜55000）。MCP client の約60秒制限より短く保つ |
 | `NOTION_STATE_FILE` | 任意 | chat job と継続session の保存先（mode 0600）。既定 `~/.notion-ai-mcp/state.json`、`off` で保存無効 |
 | `NOTION_SESSION_REHYDRATE` | 任意 | 未知の `conversationId` を thread から復元して継続する。既定有効、`0` で無効 |
+| `NOTION_DEFAULT_WEB_SEARCH` | 任意 | 新規 chat の web 検索。既定 有効（`0` で無効） |
+| `NOTION_DEFAULT_WORKSPACE_SEARCH` | 任意 | 新規 chat の workspace 検索。既定 有効（`0` で無効） |
+| `NOTION_DEFAULT_READ_ONLY` | 任意 | Ask（読み取り専用）モード。既定 無効 = Agent モードで spawn（`1` で Ask 固定） |
 | `NOTION_FULL_COOKIE` | 任意 | 完全なCookie header。assistant-transcript downloadにはブラウザsessionの`file_token`が必要 |
 | `NOTION_MODEL_ALIASES` | 任意 | モデル別名を追加/上書きする JSON。例 `{"my-fast":"oatmeal-cookie"}` |
 | `NOTION_MCP_REGISTRY_FILE` | 任意 | 登録済み MCP 接続の保存先（mode 0600） |
