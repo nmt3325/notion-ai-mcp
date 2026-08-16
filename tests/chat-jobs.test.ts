@@ -139,3 +139,12 @@ test("a reader store sees a job another store wrote after it was created", () =>
     assert.equal(new ChatStateStore(path).job(jobId)?.status, "completed");
   });
 });
+
+test("a job keeps the user step id that identifies its answer in the thread", () => {
+  withStateFile((path) => {
+    const store = new ChatStateStore(path);
+    const job = store.createJob({ conversationId: CONVERSATION, userMessageId: "44444444-4444-4444-8444-444444444444", model: "mock-model", prompt: "Hello", turn: 1, transport: "inference_transcript" });
+    assert.equal(job.userMessageId, "44444444-4444-4444-8444-444444444444");
+    assert.equal(new ChatStateStore(path).job(job.jobId)?.userMessageId, "44444444-4444-4444-8444-444444444444");
+  });
+});

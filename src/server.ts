@@ -7,6 +7,8 @@ import type { McpAuth } from "./mcp-connections.js";
 import { BUILTIN_ALIASES, listModels, modelReasoningEfforts, REASONING_EFFORTS } from "./models.js";
 
 export const SERVER_VERSION = "0.8.0";
+// Set at deploy time (docker build arg or env) so a caller can tell which commit is actually running.
+const BUILD_COMMIT = process.env.NOTION_BUILD_COMMIT?.trim() || process.env.GIT_COMMIT?.trim() || "unknown";
 
 const authShape = z.object({
   type: z.enum(["none", "bearer", "token", "apiKey", "basic", "header", "oauth"]).describe("Authentication style expected by the MCP server"),
@@ -154,13 +156,16 @@ export function createServer(client: NotionClient): McpServer {
     description: "Collect the answer of a chat that is still generating or whose call already timed out. Reads the background job and falls back to the conversation thread, so an answer is never lost at the client 60s limit.",
     inputSchema: {
       jobId: z.string().min(1).optional().describe("jobId returned by notion_ai_chat"),
-      conversationId: z.string().uuid().optional().describe("Conversation to read the newest answer from; works for jobs from an earlier server process too"),
+      conversationId: z.string().uuid().optional().describe("Conversation to read the answer from; works for jobs from an earlier server process too"),
+      userMessageId: z.string().uuid().optional().describe("userMessageId returned by notion_ai_chat. The answer is then the assistant message right after that request, which stays correct when the thread has newer turns or parallel requests."),
       waitSeconds: z.number().int().min(0).max(55).default(20).describe("Seconds to wait for the answer before returning the current status")
     }
   }, async (input, extra) => {
+    // matchedBy tells the caller whether the answer was matched to their own request or guessed from the newest one.
     const lookup = await withHeartbeat(extra, () => client.chatResult({
       ...(input.jobId ? { jobId: input.jobId } : {}),
       ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+      ...(input.userMessageId ? { userMessageId: input.userMessageId } : {}),
       waitMs: input.waitSeconds * 1000
     }));
     return result(lookup, lookup.text ?? lookup.error ?? lookup.hint ?? lookup.status);
@@ -178,6 +183,8 @@ export function createServer(client: NotionClient): McpServer {
     return result({
       jobs: client.listChatJobs({ ...(input.status ? { status: input.status } : {}), limit: input.limit }),
       statePath: client.chatStatePath(),
+      version: SERVER_VERSION,
+      commit: BUILD_COMMIT,
       instanceId: client.chatStateInstance(),
       pid: process.pid,
       uptimeSeconds: Math.round(process.uptime()),

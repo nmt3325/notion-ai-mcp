@@ -42,6 +42,7 @@ export function sanitizeJob(value: unknown, demoteRunning = true): ChatJob | nul
   if (!isRecord(value)) return null;
   const jobId = text(value.jobId);
   const conversationId = text(value.conversationId);
+  const userMessageId = text(value.userMessageId);
   const status = jobStatus(value.status);
   const startedAt = finite(value.startedAt);
   if (!jobId || !conversationId || !status || startedAt === null) return null;
@@ -53,6 +54,7 @@ export function sanitizeJob(value: unknown, demoteRunning = true): ChatJob | nul
   return {
     jobId,
     conversationId,
+    ...(userMessageId ? { userMessageId } : {}),
     // A job still marked running in the cache belongs to a dead process: Notion kept generating, but this process cannot await that stream.
     status: status === "running" && demoteRunning ? "orphaned" : status,
     model: text(value.model),
@@ -223,10 +225,11 @@ export class ChatStateStore {
     }
   }
 
-  createJob(input: { conversationId: string; model: string; reasoningEffort?: string | undefined; prompt: string; turn: number; transport: "inference_transcript" | "agent_service" }): ChatJob {
+  createJob(input: { conversationId: string; userMessageId?: string | undefined; model: string; reasoningEffort?: string | undefined; prompt: string; turn: number; transport: "inference_transcript" | "agent_service" }): ChatJob {
     const job: ChatJob = {
       jobId: randomUUID(),
       conversationId: input.conversationId,
+      ...(input.userMessageId ? { userMessageId: input.userMessageId } : {}),
       status: "running",
       model: input.model,
       ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),

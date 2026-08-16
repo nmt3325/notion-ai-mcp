@@ -34,6 +34,8 @@ interface ChatOptions {
   conversationId?: string | undefined;
   /** Thread UUID for a brand new conversation so the caller can learn the ID before generation finishes. */
   newConversationId?: string | undefined;
+  /** Pre-minted id of the user step, so the matching answer can be found in the thread later. */
+  userMessageId?: string | undefined;
   webSearch?: boolean | undefined;
   workspaceSearch?: boolean | undefined;
   readOnly?: boolean | undefined;
@@ -526,10 +528,10 @@ export class NotionClient {
 
   private buildContext(account: AccountContext, datetime: string, hasAttachments = false): JsonObject { return { timezone: account.timezone, userName: account.userName, userId: account.userId, userEmail: account.userEmail, spaceName: account.spaceName, spaceId: account.spaceId, spaceViewId: account.spaceViewId, currentDatetime: datetime, surface: hasAttachments ? "workflows" : "ai_module" }; }
 
-  private buildInferenceBody(account: AccountContext, prompt: string, model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, session: ChatSession, attachments: TranscriptUploadRecord[] = [], reasoningEffort?: string | undefined): JsonObject {
+  private buildInferenceBody(account: AccountContext, prompt: string, userMessageId: string, model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, session: ChatSession, attachments: TranscriptUploadRecord[] = [], reasoningEffort?: string | undefined): JsonObject {
     const sub = session.turnCount > 0;
     const now = new Date().toISOString();
-    const userStep: JsonObject = { id: randomUUID(), type: "user", value: [[prompt]], userId: account.userId, createdAt: now };
+    const userStep: JsonObject = { id: userMessageId, type: "user", value: [[prompt]], userId: account.userId, createdAt: now };
     const attachmentSteps = attachments.map((attachment) => {
       if (attachment.processed) {
         const metadata: JsonObject = { ...attachment.processed.metadata, attachmentSource: "user_upload" };
@@ -603,14 +605,16 @@ export class NotionClient {
       rehydrated = true;
     }
     const conversationId = requested || randomUUID();
+    // The user step id is minted here, so the answer stays identifiable in the thread even if this process dies.
+    const userMessageId = randomUUID();
     const job = this.state.createJob({
-      conversationId, model, ...(reasoningEffort ? { reasoningEffort } : {}), prompt: options.prompt,
+      conversationId, userMessageId, model, ...(reasoningEffort ? { reasoningEffort } : {}), prompt: options.prompt,
       turn: (this.sessions.get(conversationId)?.turnCount ?? 0) + 1,
       transport: normalizedFileIds(options.fileIds).length > 0 ? "agent_service" : "inference_transcript"
     });
-    void this.runChatJob(job.jobId, requested ? { ...options } : { ...options, newConversationId: conversationId });
+    void this.runChatJob(job.jobId, requested ? { ...options, userMessageId } : { ...options, userMessageId, newConversationId: conversationId });
     return {
-      status: "running", jobId: job.jobId, conversationId, model,
+      status: "running", jobId: job.jobId, conversationId, userMessageId, model,
       ...(reasoningEffort ? { reasoningEffort } : {}), startedAt: job.startedAt,
       ...(rehydrated ? { rehydrated: true } : {}),
       hint: `Notion AI is generating in the background. Collect the answer with get_chat_result (jobId ${job.jobId} or conversationId ${conversationId}).`
@@ -638,7 +642,7 @@ export class NotionClient {
     if (job?.status === "failed") throw new Error(job.error || "Notion AI chat failed");
     if (job?.status === "completed") {
       return {
-        status: "completed", jobId: job.jobId, conversationId: job.conversationId, text: job.text ?? "", model: job.model,
+        status: "completed", jobId: job.jobId, conversationId: job.conversationId, ...(job.userMessageId ? { userMessageId: job.userMessageId } : {}), text: job.text ?? "", model: job.model,
         ...(job.reasoningEffort ? { reasoningEffort: job.reasoningEffort } : {}),
         usage: job.usage ?? { inputTokens: 0, outputTokens: 0 },
         ...(started.rehydrated ? { rehydrated: true } : {})
@@ -647,7 +651,7 @@ export class NotionClient {
     const conversationId = job?.conversationId ?? started.conversationId;
     const elapsedMs = Date.now() - started.startedAt;
     return {
-      status: "pending", jobId: started.jobId, conversationId, model: started.model,
+      status: "pending", jobId: started.jobId, conversationId, ...(started.userMessageId ? { userMessageId: started.userMessageId } : {}), model: started.model,
       ...(started.reasoningEffort ? { reasoningEffort: started.reasoningEffort } : {}),
       startedAt: started.startedAt, elapsedMs,
       ...(started.rehydrated ? { rehydrated: true } : {}),
@@ -670,25 +674,28 @@ export class NotionClient {
   chatStateInstance(): string { return this.state.instanceId(); }
 
   /** Collects a chat answer after the fact, from the job cache or, when the stream is gone, from the thread itself. */
-  async chatResult(options: { jobId?: string | undefined; conversationId?: string | undefined; waitMs?: number | undefined }): Promise<ChatJobLookup> {
+  async chatResult(options: { jobId?: string | undefined; conversationId?: string | undefined; userMessageId?: string | undefined; waitMs?: number | undefined }): Promise<ChatJobLookup> {
     const waitMs = Math.max(0, options.waitMs ?? 0);
     const jobId = options.jobId?.trim() ?? "";
     const conversationId = options.conversationId?.trim() ?? "";
     if (!jobId && !conversationId) throw new Error("jobId or conversationId is required");
     let job = jobId ? this.state.job(jobId) : this.state.latestForConversation(conversationId);
-    if (jobId && !job) throw new Error(`Unknown jobId ${jobId}. Call list_chat_jobs, or pass conversationId to read the answer from the thread.`);
+    // An unknown jobId is recoverable as long as the caller also named the conversation: the thread is the source of truth.
+    if (jobId && !job && !conversationId) throw new Error(`Unknown jobId ${jobId}. Call list_chat_jobs, or pass conversationId to read the answer from the thread.`);
     if (job?.status === "running" && waitMs > 0) job = await this.state.wait(job.jobId, waitMs);
     if (job && (job.status === "completed" || job.status === "failed")) return jobLookupOf(job);
     const threadId = job?.conversationId || conversationId;
     if (!threadId) throw new Error("conversationId is required to read the answer from the thread");
     // No live stream: the call timed out, the job is from a previous process, or the answer arrived late.
-    const recovered = await this.recoverAnswerFromThread(threadId, job?.startedAt, job ? 0 : waitMs);
-    if (recovered) {
-      if (job) this.state.complete(job.jobId, { text: recovered });
+    const askedId = options.userMessageId?.trim() || job?.userMessageId;
+    const recovered = await this.recoverAnswerFromThread(threadId, job?.startedAt, job ? 0 : waitMs, askedId);
+    if (recovered.text) {
+      if (job) this.state.complete(job.jobId, { text: recovered.text });
       return {
         status: "completed", source: "thread", conversationId: threadId, ...(job ? { jobId: job.jobId } : {}),
+        ...(askedId ? { userMessageId: askedId } : {}), matchedBy: recovered.matchedBy,
         ...(job?.model ? { model: job.model } : {}), ...(job?.reasoningEffort ? { reasoningEffort: job.reasoningEffort } : {}),
-        text: recovered, ...(job ? { startedAt: job.startedAt, elapsedMs: Date.now() - job.startedAt } : {})
+        text: recovered.text, ...(job ? { startedAt: job.startedAt, elapsedMs: Date.now() - job.startedAt } : {})
       };
     }
     return {
@@ -699,15 +706,28 @@ export class NotionClient {
     };
   }
 
-  /** Polls the thread until an assistant answer newer than the request shows up. */
-  private async recoverAnswerFromThread(threadId: string, since: number | undefined, budgetMs: number): Promise<string> {
+  /**
+   * Polls the thread for the answer to one specific request.
+   *
+   * When the user step id is known, the answer is the first assistant message after it. Reading the newest
+   * assistant message instead loses long answers once another turn is added, and hands back the wrong text
+   * when several requests run against the same thread at once.
+   */
+  private async recoverAnswerFromThread(threadId: string, since: number | undefined, budgetMs: number, userMessageId?: string | undefined): Promise<{ text: string; matchedBy: "userMessageId" | "latestAssistant" }> {
     const deadline = Date.now() + Math.max(0, budgetMs);
     for (;;) {
       const conversation = await this.getConversation(threadId, 5);
-      const answer = [...conversation.messages].reverse().find((message) => message.role === "assistant" && message.text.trim());
-      if (answer && (since === undefined || answer.createdAt === null || answer.createdAt >= since - 5000)) return answer.text;
+      const asked = userMessageId ? conversation.messages.findIndex((message) => message.id === userMessageId) : -1;
+      if (asked >= 0) {
+        const answer = conversation.messages.slice(asked + 1).find((message) => message.role === "assistant" && message.text.trim());
+        if (answer) return { text: answer.text, matchedBy: "userMessageId" };
+      }
+      // Only guess from the newest answer while the user step itself is not visible in the thread.
+      const newest = asked < 0 ? [...conversation.messages].reverse().find((message) => message.role === "assistant" && message.text.trim()) : undefined;
+      const usable = newest && (since === undefined || newest.createdAt === null || newest.createdAt >= since - 5000) ? newest : null;
+      if (usable && !userMessageId) return { text: usable.text, matchedBy: "latestAssistant" };
       const remaining = deadline - Date.now();
-      if (remaining <= 0) return "";
+      if (remaining <= 0) return usable ? { text: usable.text, matchedBy: "latestAssistant" } : { text: "", matchedBy: userMessageId ? "userMessageId" : "latestAssistant" };
       await sleep(Math.min(5000, Math.max(500, remaining)));
     }
   }
@@ -802,7 +822,8 @@ export class NotionClient {
     if (fileIds.length > 0 && transcriptFiles.length === 0) throw new Error("Uploaded file IDs cannot be added to a legacy chat unless they are inference-transcript attachment handles. Start a new chat without conversationId.");
     if (transcriptFiles.some((file) => file.usedInChat)) throw new Error("An inference-transcript attachment handle can only be attached once");
     const prompt = promptWithLegacyAttachments(options.prompt, options.attachments ?? []);
-    const body = this.buildInferenceBody(account, prompt, effectiveModel, options.webSearch ?? this.config.defaultWebSearch, options.workspaceSearch ?? this.config.defaultWorkspaceSearch, options.readOnly ?? this.config.defaultReadOnly, session, transcriptFiles, reasoningEffort);
+    const userMessageId = options.userMessageId?.trim() || randomUUID();
+    const body = this.buildInferenceBody(account, prompt, userMessageId, effectiveModel, options.webSearch ?? this.config.defaultWebSearch, options.workspaceSearch ?? this.config.defaultWorkspaceSearch, options.readOnly ?? this.config.defaultReadOnly, session, transcriptFiles, reasoningEffort);
     const response = await this.request("runInferenceTranscript", body, true);
     if (!response.body) throw new Error("runInferenceTranscript returned no response stream");
     const parsed = await parseInferenceStream(response.body);
