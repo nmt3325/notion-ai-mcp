@@ -58,7 +58,7 @@
   "spaceId": "<space-id>",
   "threadId": "<uuid>",
   "transcript": [
-    { "id": "<uuid>", "type": "config", "value": { "type": "workflow", "useReadOnlyMode": true, "model": "<internal-model-id>", "modelFromUser": true, "reasoningEffort": "high" } },
+    { "id": "<uuid>", "type": "config", "value": { "type": "workflow", "useReadOnlyMode": false, "model": "<internal-model-id>", "modelFromUser": true, "reasoningEffort": "high" } },
     { "id": "<uuid>", "type": "context", "value": { "userId": "...", "spaceId": "...", "surface": "ai_module" } },
     { "id": "<uuid>", "type": "user", "value": [["prompt"]], "userId": "...", "createdAt": "<ISO-8601>" }
   ],

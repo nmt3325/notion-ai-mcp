@@ -106,6 +106,9 @@ test("MCP server advertises chat, workspace, and MCP management tools", async ()
   try {
     const tools = await mcpClient.listTools();
     assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), EXPECTED_TOOLS);
+    const chatTool = tools.tools.find((tool) => tool.name === "notion_ai_chat");
+    const properties = (chatTool?.inputSchema as { properties?: Record<string, { default?: unknown }> } | undefined)?.properties;
+    assert.equal(properties?.readOnly?.default, false);
   } finally { await close(); }
 });
 
@@ -119,6 +122,7 @@ test("notion_ai_chat forwards model and uploaded file IDs and returns the answer
     assert.equal(chatCalls[0]?.model, "thinking");
     assert.equal(chatCalls[0]?.reasoningEffort, "high");
     assert.deepEqual(chatCalls[0]?.fileIds, ["file-1"]);
+    assert.equal(chatCalls[0]?.readOnly, false);
   } finally { await close(); }
 });
 

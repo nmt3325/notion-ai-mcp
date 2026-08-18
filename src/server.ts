@@ -118,7 +118,7 @@ export function createServer(client: NotionClient): McpServer {
       conversationId: z.string().uuid().optional().describe("ID returned by a previous notion_ai_chat call, including one whose call timed out or ran before a restart; omit reasoningEffort to keep the effort already chosen for that conversation"),
       webSearch: z.boolean().optional().describe(`Allow Notion AI web search. Omitted means NOTION_DEFAULT_WEB_SEARCH (currently ${defaults.webSearch}).`),
       workspaceSearch: z.boolean().optional().describe(`Allow Notion workspace search. Omitted means NOTION_DEFAULT_WORKSPACE_SEARCH (currently ${defaults.workspaceSearch}).`),
-      readOnly: z.boolean().optional().describe(`Ask/read-only mode. false is Agent mode, which lets Notion AI edit the workspace. Omitted means NOTION_DEFAULT_READ_ONLY (currently ${defaults.readOnly}).`),
+      readOnly: z.boolean().default(defaults.readOnly).describe(`Ask/read-only mode. false is Agent mode, which lets Notion AI edit the workspace. Default: ${defaults.readOnly} (NOTION_DEFAULT_READ_ONLY).`),
       attachments: z.array(z.object({
         name: z.string().min(1),
         url: z.string().min(1).optional(),
