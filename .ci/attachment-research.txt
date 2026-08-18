@@ -1,4 +1,4 @@
-researched_at=2026-08-18T08:37:23Z
+researched_at=2026-08-18T09:50:38Z
 method=wget plus webpack-runtime dependency crawl
 
 == Fetch login and initial JavaScript assets ==
