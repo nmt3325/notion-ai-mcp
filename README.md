@@ -286,8 +286,8 @@ multi-stage なので最終イメージには `dist/` と本番依存のみが�
 - `conversationId` (任意、過去に返した ID。タイムアウトした chat や再起動前の thread も継続可能)
 - `waitSeconds` (任意、1〜55。既定は `NOTION_CHAT_WAIT_MS` の45秒)
 - `background` (既定 `false`、`true` で待たずに `jobId` と `conversationId` を即返す)
-- `webSearch` / `workspaceSearch` (既定 `false`)
-- `readOnly` (既定 `true`、legacy text chat の Notion Ask mode)
+- `webSearch` / `workspaceSearch` (既定 `true`)
+- `readOnly` (既定 `false` = Agent mode。`true` で Notion Ask/read-only mode)
 - `fileIds` (任意、`upload_attachment` が返したID。最大19件)
 - `attachments` (任意、旧互換のinline text/link context。実ファイルには `fileIds` を使用)
 
@@ -300,7 +300,7 @@ assistant-transcript uploadへfallbackし、不透明handleを`runInferenceTrans
 `processAgentAttachment`処理完了を待ち、検証済みの`attachment` stepとして送信します。
 handleは作成されたthreadに固定され、Agent Service ID・別thread・別workspaceとの混在を拒否し、server再起動・workspace切替で失効します。
 同じactive inference conversationへ後からuploadできますが、`conversationId`指定済みの`auto` uploadは、失敗時に別threadへretargetしません。
-Agent Service file chatは安全のため`policies.approval_mode="ask"`を明示します。
+Agent Service file chatの`policies.approval_mode="ask"`はツール実行時の承認方針であり、`readOnly`のNotion Ask modeとは別設定です。
 
 継続 chat の session は `NOTION_STATE_FILE` に保存され、再起動後も同じ `conversationId` へ送信できます。
 保存が無効な場合や別プロセスが作った thread でも、`getInferenceTranscriptsForUser` から thread を引き当てて
