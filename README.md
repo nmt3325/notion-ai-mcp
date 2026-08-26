@@ -315,7 +315,7 @@ thread か分かるエラーを返します。添付 handle は復元対象で�
 
 ### `get_conversation` / `rename_conversation` / `delete_conversation`
 
-`get_conversation` は `conversationId` と任意の `maxPages` を受け取り、hidden thinking、tool call、config/contextなどの運用レコードを返しません。`rename_conversation` は同じworkspace内でthreadの存在を確認後、1行・500 UTF-8 bytes以内の`title`へ変更します。`delete_conversation` は同じ所有権チェックの後、thread recordを`alive: false`へ更新して削除します。誤操作防止のため`confirm: true`が必須で、Notion側で既に削除済みのthreadはno-op（`alreadyDeleted: true`）として返します。
+`get_conversation` は `conversationId` と任意の `maxPages` を受け取り、hidden thinking、tool call、config/contextなどの運用レコードを返しません。`rename_conversation` は同じworkspace内でthreadの存在を確認後、1行・500 UTF-8 bytes以内の`title`へ変更します。`delete_conversation` は同じ所有権チェックの後、thread recordを`alive: false`へ更新して削除します。誤操作防止のため`confirm: true`が必須で、Notion側で既に削除済みのthreadはno-op（`alreadyDeleted: true`）として返します。 2026-08-26の実アカウント検証では、一時threadが`alive:true`から`false`になり、会話履歴から即時に消えることを確認しました。
 
 ### Workspace tools
 

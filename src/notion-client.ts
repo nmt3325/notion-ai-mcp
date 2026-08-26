@@ -527,7 +527,7 @@ export class NotionClient {
   /**
    * Deletes a conversation by turning off the thread record itself.
    *
-   * The Web client removes an AI thread the same way it removes any other record: one
+   * The live Notion backend accepts the ordinary record-off operation for an AI thread: one
    * `saveTransactionsFanout` operation with `path: []`, `command: "update"`, `args: { alive: false }`.
    * Ownership is checked first through the transcript listing, so a thread that belongs to another
    * workspace can never be touched, and a thread Notion already deleted stays a no-op.
