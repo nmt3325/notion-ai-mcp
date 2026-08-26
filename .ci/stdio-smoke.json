@@ -1,13 +1,14 @@
 {
   "started": true,
   "transport": "stdio",
-  "toolCount": 22,
+  "toolCount": 23,
   "tools": [
     "add_mcp_connection",
     "check_mcp_oauth_support",
     "complete_mcp_oauth",
     "connect_preconfigured_mcp_server",
     "create_workspace",
+    "delete_conversation",
     "download_attachment",
     "get_chat_result",
     "get_conversation",

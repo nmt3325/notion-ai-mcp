@@ -262,6 +262,20 @@ export function createServer(client: NotionClient): McpServer {
     }
   }, async ({ conversationId, title, maxPages }) => result(await client.renameConversation(conversationId, title, maxPages)));
 
+  server.registerTool("delete_conversation", {
+    title: "Delete a Notion AI conversation",
+    description: "Delete an existing Notion AI thread after verifying that it belongs to the active workspace. Requires confirm: true because the thread disappears from Notion AI and this server cannot restore it.",
+    inputSchema: {
+      conversationId: z.string().uuid(),
+      confirm: z.boolean().default(false).describe("Must be true; guards against deleting a thread by accident"),
+      maxPages: z.number().int().min(1).max(100).default(20)
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true }
+  }, async ({ conversationId, confirm, maxPages }) => {
+    if (!confirm) throw new Error("delete_conversation requires confirm: true because deleting a Notion AI thread cannot be undone from this server");
+    return result(await client.deleteConversation(conversationId, maxPages));
+  });
+
   server.registerTool("list_workspaces", {
     title: "List Notion workspaces",
     description: "List every workspace on the signed-in account, flagging the current, pinned, and credit-exhausted ones.",

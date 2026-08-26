@@ -31,6 +31,7 @@ function fakeClient(): NotionClient {
     chatStateError: () => null,
     listConversations: async () => ({ conversations: [], nextCursor: null, hasMore: false }),
     renameConversation: async (id: string, title: string) => ({ conversationId: id, previousTitle: "Remote mock", title, changed: true }),
+    deleteConversation: async (id: string) => ({ conversationId: id, title: "Remote mock", deleted: true, alreadyDeleted: false }),
     getConversation: async (id: string) => ({
       id,
       title: "Remote mock",
@@ -90,6 +91,7 @@ test("Streamable HTTP server requires bearer auth and executes MCP tools", async
       "complete_mcp_oauth",
       "connect_preconfigured_mcp_server",
       "create_workspace",
+      "delete_conversation",
       "download_attachment",
       "get_chat_result",
       "get_conversation",
