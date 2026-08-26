@@ -1,4 +1,4 @@
-researched_at=2026-08-26T07:28:48Z
+researched_at=2026-08-26T07:30:07Z
 method=wget plus webpack-runtime dependency crawl
 
 == Fetch login and initial JavaScript assets ==
@@ -20,7 +20,7 @@ asset_host=www.notion.so asset_path=/_assets/UISpacePermissionGroupToken-1a465dc
 asset_host=www.notion.so asset_path=/_assets/app-f83c26f56f4e5139.js
 asset_host=www.notion.so asset_path=/_assets/contentPreview-b4d956be00566486.js
 downloaded_initial_count=15
-downloaded_initial_bytes=5833625
+downloaded_initial_bytes=5833624
 
 == Resolve runtime maps and crawl attachment dependencies ==
 Traceback (most recent call last):
