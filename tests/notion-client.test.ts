@@ -540,6 +540,61 @@ test("renameConversation verifies ownership and updates thread data", async () =
   await assert.rejects(() => client.renameConversation(threadId, "bad\nname"), /one line/);
 });
 
+test("deleteConversation verifies ownership and turns the thread record off", async () => {
+  const threadId = "77777777-7777-4777-8777-777777777777";
+  let saveBody: Record<string, unknown> | undefined;
+  const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const endpoint = String(input).split("/").at(-1) ?? "";
+    if (endpoint === "getInferenceTranscriptsForUser") return jsonResponse({
+      transcripts: [{ id: threadId, title: "Doomed" }],
+      hasMore: false,
+      recordMap: { thread: { [threadId]: { value: { value: { alive: true, data: { title: "Doomed" }, messages: [] } } } } }
+    });
+    if (endpoint === "saveTransactionsFanout") {
+      saveBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return jsonResponse({});
+    }
+    return new Response("unexpected", { status: 500 });
+  };
+  const client = new NotionClient(config, fakeFetch as typeof fetch);
+  const deleted = await client.deleteConversation(threadId);
+  assert.deepEqual(deleted, { conversationId: threadId, title: "Doomed", deleted: true, alreadyDeleted: false });
+  const transaction = (saveBody?.transactions as Array<Record<string, unknown>>)[0];
+  const operation = (transaction.operations as Array<Record<string, unknown>>)[0];
+  assert.deepEqual(operation, {
+    pointer: { table: "thread", id: threadId, spaceId: account.spaceId },
+    path: [],
+    command: "update",
+    args: { alive: false }
+  });
+});
+
+test("deleteConversation stays a no-op for a thread Notion already deleted", async () => {
+  const threadId = "88888888-8888-4888-8888-888888888888";
+  const fakeFetch = async (input: string | URL | Request): Promise<Response> => {
+    const endpoint = String(input).split("/").at(-1) ?? "";
+    if (endpoint === "getInferenceTranscriptsForUser") return jsonResponse({
+      transcripts: [{ id: threadId, title: "Gone" }],
+      hasMore: false,
+      recordMap: { thread: { [threadId]: { value: { value: { alive: false, data: { title: "Gone" }, messages: [] } } } } }
+    });
+    throw new Error("no transaction must run for an already deleted thread");
+  };
+  const client = new NotionClient(config, fakeFetch as typeof fetch);
+  assert.deepEqual(await client.deleteConversation(threadId), { conversationId: threadId, title: "Gone", deleted: false, alreadyDeleted: true });
+});
+
+test("deleteConversation refuses a thread outside the active workspace", async () => {
+  const threadId = "99999999-9999-4999-8999-999999999999";
+  const fakeFetch = async (input: string | URL | Request): Promise<Response> => {
+    const endpoint = String(input).split("/").at(-1) ?? "";
+    if (endpoint === "getInferenceTranscriptsForUser") return jsonResponse({ transcripts: [], hasMore: false, recordMap: { thread: {} } });
+    throw new Error("no transaction must run for an unknown thread");
+  };
+  const client = new NotionClient(config, fakeFetch as typeof fetch);
+  await assert.rejects(() => client.deleteConversation(threadId), /was not found/);
+});
+
 test("chat persists the requested reasoning effort and reuses it for later turns", async () => {
   const inferenceBodies: Record<string, unknown>[] = [];
   const fakeFetch = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {

@@ -16,6 +16,7 @@
 | 会話一覧 | POST | `/api/v3/getInferenceTranscriptsForUser` | 同上 | space pointer、種別、cursor | JSON `transcripts`, `recordMap.thread`, `nextCursor`, `hasMore` |
 | メッセージ本体 | POST | `/api/v3/syncRecordValuesMain` | 同上 | `thread_message` pointer 配列 | JSON `recordMap.thread_message` |
 | thread rename | POST | `/api/v3/saveTransactionsFanout` | 同上 | `{pointer:{table:"thread",id,spaceId}, path:["data"], command:"update", args:{title}}` | JSON `{}` |
+| thread delete | POST | `/api/v3/saveTransactionsFanout` | 同上 | `{pointer:{table:"thread",id,spaceId}, path:[], command:"update", args:{alive:false}}` | JSON `{}` |
 | Agent Service thread作成 | POST | `/api/v3/createAgentThread` | 同上 | `type`, `threadId`, `content`, model等 | JSON `thread` |
 | Agent Service継続送信 | POST | `/api/v3/sendEventToAgentThread` | 同上 | `event:{type:"user.message",content}` | JSON |
 | Agent Service transcript | POST | `/api/v3/getThreadTranscript` | 同上 | `threadId`, direction, cursor, limit | patch page |

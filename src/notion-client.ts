@@ -524,6 +524,36 @@ export class NotionClient {
     return { conversationId: threadId, previousTitle, title: nextTitle, changed: true };
   }
 
+  /**
+   * Deletes a conversation by turning off the thread record itself.
+   *
+   * The Web client removes an AI thread the same way it removes any other record: one
+   * `saveTransactionsFanout` operation with `path: []`, `command: "update"`, `args: { alive: false }`.
+   * Ownership is checked first through the transcript listing, so a thread that belongs to another
+   * workspace can never be touched, and a thread Notion already deleted stays a no-op.
+   */
+  async deleteConversation(threadId: string, maxPages = 20): Promise<{ conversationId: string; title: string; deleted: boolean; alreadyDeleted: boolean }> {
+    const found = await this.findThread(threadId, Math.min(Math.max(maxPages, 1), 100));
+    const title = asString(found.transcript?.title) || asString(object(found.thread.data).title) || "Untitled";
+    if (found.thread.alive === false) return { conversationId: threadId, title, deleted: false, alreadyDeleted: true };
+    const account = await this.account();
+    await this.fetchJson("saveTransactionsFanout", {
+      requestId: randomUUID(),
+      transactions: [{
+        id: randomUUID(),
+        spaceId: account.spaceId,
+        debug: { userAction: "deleteThread" },
+        operations: [{
+          pointer: { table: "thread", id: threadId, spaceId: account.spaceId },
+          path: [],
+          command: "update",
+          args: { alive: false }
+        }]
+      }]
+    });
+    return { conversationId: threadId, title, deleted: true, alreadyDeleted: false };
+  }
+
   private buildContext(account: AccountContext, datetime: string, hasAttachments = false): JsonObject { return { timezone: account.timezone, userName: account.userName, userId: account.userId, userEmail: account.userEmail, spaceName: account.spaceName, spaceId: account.spaceId, spaceViewId: account.spaceViewId, currentDatetime: datetime, surface: hasAttachments ? "workflows" : "ai_module" }; }
 
   private buildInferenceBody(account: AccountContext, prompt: string, model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, session: ChatSession, attachments: TranscriptUploadRecord[] = [], reasoningEffort?: string | undefined): JsonObject {
