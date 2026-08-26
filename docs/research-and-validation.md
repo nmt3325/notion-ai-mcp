@@ -432,3 +432,19 @@ Live verification with a personal account, one workspace holding credits and one
 | Thread after the resumed turn | 4 messages (user, assistant, user, assistant) in the same thread |
 | Chat pinned to an exhausted workspace, `NOTION_MAX_WORKSPACE_RETRIES=0` | `Notion AI premium feature unavailable (AI credit limit reached: 120/75)` |
 | `list_workspaces` after the refusal | the exhausted space is flagged |
+
+## 2026-08-26 thread deleteのlive検証
+
+実アカウントのcookie exportをrepository外のmode 0600 fileとしてdisposable environmentへ渡し、
+`NotionClient.deleteConversation()`を実環境で検証した。既存会話は削除せず、専用の一時threadを新規作成して使用した。
+
+1. `loadUserContent`と`getInferenceTranscriptsForUser`が成功し、対象workspaceの履歴を読めることを確認。
+2. web/workspace searchを無効にした短い一時chatを作成し、`get_conversation`で取得でき、
+   `syncRecordValuesMain`のthread recordが`alive:true`であることを確認。
+3. `saveTransactionsFanout`へ
+   `{pointer:{table:"thread",id,spaceId}, path:[], command:"update", args:{alive:false}}`を1回送信。
+4. 直後の`syncRecordValuesMain`で同じrecordが`alive:false`、
+   `getInferenceTranscriptsForUser`経由の所有権検索ではnot foundとなり、会話履歴から消えた。
+
+したがってthread削除は専用endpointではなく、`saveTransactionsFanout`によるrecord-offで動作することを
+live backend上でも確認済み。確認用threadは同じ処理で削除され、cookie/account JSONはrepositoryへ保存していない。

@@ -1,7 +1,7 @@
 # Notion AI MCP Server
 
 Notion AI の非公式な内部 API を MCP サーバーとしてラップする、個人検証用の TypeScript 実装です。
-stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次の 22 ツールを利用できます。
+stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次の 23 ツールを利用できます。
 
 **チャット / 履歴**
 
@@ -11,6 +11,7 @@ stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion 
 - `list_conversations`: Notion AI の workflow/chat thread をページング取得する
 - `get_conversation`: 指定 thread の user-visible な user/assistant メッセージを取得する
 - `rename_conversation`: active workspace内のthreadを検証してタイトル変更する
+- `delete_conversation`: active workspace内のthreadを検証して削除する（`confirm: true`必須）
 - `upload_attachment` / `download_attachment`: Agent Serviceまたはassistant-transcript transportでファイルを安全にupload/downloadする
 
 **ワークスペース**
@@ -312,9 +313,9 @@ thread か分かるエラーを返します。添付 handle は復元対象で�
 `limit`, `cursor`, `maxPages` を受け取ります。返却された `cursor` は不透明値として次回へそのまま 本ツールが発行していないカーソル (`mcpv1.` 以外や壊れた値) はエラーになります。
 渡してください。
 
-### `get_conversation` / `rename_conversation`
+### `get_conversation` / `rename_conversation` / `delete_conversation`
 
-`get_conversation` は `conversationId` と任意の `maxPages` を受け取り、hidden thinking、tool call、config/contextなどの運用レコードを返しません。`rename_conversation` は同じworkspace内でthreadの存在を確認後、1行・500 UTF-8 bytes以内の`title`へ変更します。
+`get_conversation` は `conversationId` と任意の `maxPages` を受け取り、hidden thinking、tool call、config/contextなどの運用レコードを返しません。`rename_conversation` は同じworkspace内でthreadの存在を確認後、1行・500 UTF-8 bytes以内の`title`へ変更します。`delete_conversation` は同じ所有権チェックの後、thread recordを`alive: false`へ更新して削除します。誤操作防止のため`confirm: true`が必須で、Notion側で既に削除済みのthreadはno-op（`alreadyDeleted: true`）として返します。 2026-08-26の実アカウント検証では、一時threadが`alive:true`から`false`になり、会話履歴から即時に消えることを確認しました。
 
 ### Workspace tools
 
