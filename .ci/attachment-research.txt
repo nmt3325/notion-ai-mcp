@@ -1,4 +1,4 @@
-researched_at=2026-08-26T07:30:07Z
+researched_at=2026-08-30T01:48:41Z
 method=wget plus webpack-runtime dependency crawl
 
 == Fetch login and initial JavaScript assets ==
@@ -9,18 +9,18 @@ asset_host=www.notion.so asset_path=/_assets/10512-d06fbb63a3c48f72.js
 asset_host=www.notion.so asset_path=/_assets/13566-5987c77cec56c2a6.js
 asset_host=www.notion.so asset_path=/_assets/49459-7ae169a8581f2b47.js
 asset_host=www.notion.so asset_path=/_assets/56643-254b7f29e5762127.js
-asset_host=www.notion.so asset_path=/_assets/61145-f280ebc8d53a0ba4.js
+asset_host=www.notion.so asset_path=/_assets/66525-fd103ba126bd1f2f.js
 asset_host=www.notion.so asset_path=/_assets/8563-9e3514d19f7f9efe.js
 asset_host=www.notion.so asset_path=/_assets/86379-13d08e09628902af.js
-asset_host=www.notion.so asset_path=/_assets/86570-3ead25ead20d0796.js
 asset_host=www.notion.so asset_path=/_assets/87022-232a0a62575cae4f.js
-asset_host=www.notion.so asset_path=/_assets/ClientFramework-71fa76d72be0e754.js
-asset_host=www.notion.so asset_path=/_assets/RecordMap-3fe3dfa73958267e.js
-asset_host=www.notion.so asset_path=/_assets/UISpacePermissionGroupToken-1a465dc9d01ac46c.js
-asset_host=www.notion.so asset_path=/_assets/app-f83c26f56f4e5139.js
+asset_host=www.notion.so asset_path=/_assets/93608-7997904397c99dca.js
+asset_host=www.notion.so asset_path=/_assets/ClientFramework-c9fe9bd23e5e8b6f.js
+asset_host=www.notion.so asset_path=/_assets/RecordMap-51e3b32fc61942f6.js
+asset_host=www.notion.so asset_path=/_assets/UISpacePermissionGroupToken-9438295f55bf9122.js
+asset_host=www.notion.so asset_path=/_assets/app-ed8b30d07add206a.js
 asset_host=www.notion.so asset_path=/_assets/contentPreview-b4d956be00566486.js
 downloaded_initial_count=15
-downloaded_initial_bytes=5833624
+downloaded_initial_bytes=5852169
 
 == Resolve runtime maps and crawl attachment dependencies ==
 Traceback (most recent call last):
@@ -35,7 +35,7 @@ Traceback (most recent call last):
   File "/usr/lib/python3.12/json/decoder.py", line 353, in raw_decode
     obj, end = self.scan_once(s, idx)
                ^^^^^^^^^^^^^^^^^^^^^^
-json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 4358 (char 4357)
+json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2879 (char 2878)
 
 == Public source-code queries (wget) ==
 query=getUploadFileUrl
