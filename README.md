@@ -331,6 +331,23 @@ thread か分かるエラーを返します。添付 handle は復元対象で�
 サーバーは `/createSpace` もtransactionも自動再試行せず、切り替え・pin・account JSON更新を行いません。
 HTTP errorにはbounded response bodyを含め、`Retry-After` があれば併記します。
 
+## ツール注釈（annotations）
+
+全23ツールが MCP の tool annotations（`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`）を明示的に宣言します。MCP 仕様の既定値は `readOnlyHint: false` / `destructiveHint: true` / `openWorldHint: true` なので、注釈を省いたツールはクライアントから「書き込み・破壊的」と解釈されます。Notion AI は read tool と write tool の2グループしか持たず（`runReadToolsAutomatically` / `runWriteToolsAutomatically`）、その分類は実質 `readOnlyHint` だけで決まるため、読み取り専用ツールに `readOnlyHint: true` を明示しないと delete 系と区別されません。
+
+| 区分 | ツール | 主な注釈 |
+| --- | --- | --- |
+| 読み取り専用 | `get_chat_result` `list_chat_jobs` `list_conversations` `get_conversation` `list_workspaces` `get_current_workspace` `list_mcp_connections` `get_mcp_connection_status` `check_mcp_oauth_support` `list_preconfigured_mcp_servers` | `readOnlyHint: true` / `destructiveHint: false` / `idempotentHint: true` |
+| 追加のみの書き込み | `upload_attachment` `switch_workspace` `create_workspace` `add_mcp_connection` `start_mcp_oauth` `complete_mcp_oauth` `connect_preconfigured_mcp_server` | `readOnlyHint: false` / `destructiveHint: false` |
+| 破壊的 | `notion_ai_chat` `download_attachment` `rename_conversation` `update_mcp_connection` `remove_mcp_connection` `delete_conversation` | `readOnlyHint: false` / `destructiveHint: true` |
+
+- `notion_ai_chat` は Agent mode（`readOnly: false`）でワークスペースを編集・削除できるため破壊的に分類しています。読み取りだけで使う場合は `readOnly: true` を渡してください。
+- `download_attachment` は `overwrite: true` でローカルファイルを上書きできるため破壊的です。
+- `delete_conversation` と `remove_mcp_connection` は `idempotentHint: false` にして、ホストの自動リトライ対象にならないようにしています。
+- `openWorldHint` は Notion のサーバーに出るツールが `true`、サーバーローカルのジョブ台帳だけを読む `list_chat_jobs` のみ `false` です。
+- 注釈は信頼できないヒントに過ぎないため、`delete_conversation` の `confirm: true` ガードは維持しています。
+- Notion AI はツールの分類を接続時点で保存します。注釈を変えたらモジュールを再接続（または再承認）しないと古い分類のままになります。
+
 ## 60秒タイムアウト対策（job と回収）
 
 Notion AI 側の生成は数分続くことがありますが、MCP client は約60秒で呼び出しを放棄します。

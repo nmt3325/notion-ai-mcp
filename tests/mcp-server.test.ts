@@ -236,3 +236,45 @@ test("get_chat_result and list_chat_jobs recover answers after a timed out call"
     assert.deepEqual(lookups[1], { status: "running", limit: 20 });
   } finally { await close(); }
 });
+
+const READ_ONLY_TOOLS = [
+  "check_mcp_oauth_support",
+  "get_chat_result",
+  "get_conversation",
+  "get_current_workspace",
+  "get_mcp_connection_status",
+  "list_chat_jobs",
+  "list_conversations",
+  "list_mcp_connections",
+  "list_preconfigured_mcp_servers",
+  "list_workspaces"
+];
+
+const DESTRUCTIVE_TOOLS = [
+  "delete_conversation",
+  "download_attachment",
+  "notion_ai_chat",
+  "remove_mcp_connection",
+  "rename_conversation",
+  "update_mcp_connection"
+];
+
+const REQUIRED_HINTS = ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] as const;
+
+test("every tool declares explicit annotations so clients can group read, write, and destructive calls", async () => {
+  const { client } = fakeClient();
+  const { mcpClient, close } = await connect(client);
+  try {
+    const { tools } = await mcpClient.listTools();
+    for (const tool of tools) {
+      for (const hint of REQUIRED_HINTS) {
+        assert.equal(typeof tool.annotations?.[hint], "boolean", `${tool.name} is missing ${hint}`);
+      }
+      if (tool.annotations?.readOnlyHint === true) {
+        assert.equal(tool.annotations?.destructiveHint, false, `${tool.name} is read-only but flagged destructive`);
+      }
+    }
+    assert.deepEqual(tools.filter((tool) => tool.annotations?.readOnlyHint === true).map((tool) => tool.name).sort(), READ_ONLY_TOOLS);
+    assert.deepEqual(tools.filter((tool) => tool.annotations?.readOnlyHint === false && tool.annotations?.destructiveHint === true).map((tool) => tool.name).sort(), DESTRUCTIVE_TOOLS);
+  } finally { await close(); }
+});

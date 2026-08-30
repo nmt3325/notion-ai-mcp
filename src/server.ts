@@ -128,7 +128,8 @@ export function createServer(client: NotionClient): McpServer {
       fileIds: z.array(z.string().min(1)).max(19).optional().describe("File IDs returned by upload_attachment. A new file chat uses the current Agent Service content-block format."),
       waitSeconds: z.number().int().min(1).max(55).optional().describe("Seconds to wait inline for the answer (default NOTION_CHAT_WAIT_MS, 45s). The cap stays under the ~60s client limit; when it passes, a pending job is returned instead of an error."),
       background: z.boolean().default(false).describe("Return jobId and conversationId immediately without waiting, then collect the answer with get_chat_result. Use this for prompts that need minutes of thinking.")
-    }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
   }, async (input, extra) => {
     const options = {
       prompt: input.prompt,
@@ -156,7 +157,8 @@ export function createServer(client: NotionClient): McpServer {
       jobId: z.string().min(1).optional().describe("jobId returned by notion_ai_chat"),
       conversationId: z.string().uuid().optional().describe("Conversation to read the newest answer from; works for jobs from an earlier server process too"),
       waitSeconds: z.number().int().min(0).max(55).default(20).describe("Seconds to wait for the answer before returning the current status")
-    }
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async (input, extra) => {
     const lookup = await withHeartbeat(extra, () => client.chatResult({
       ...(input.jobId ? { jobId: input.jobId } : {}),
@@ -172,7 +174,8 @@ export function createServer(client: NotionClient): McpServer {
     inputSchema: {
       status: z.enum(["running", "completed", "failed", "orphaned"]).optional().describe("Only jobs in this state. orphaned means the job was still running when the server restarted, so read it with get_chat_result."),
       limit: z.number().int().min(1).max(100).default(20)
-    }
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async (input) => {
     const warning = client.chatStateError();
     return result({
@@ -193,7 +196,8 @@ export function createServer(client: NotionClient): McpServer {
       conversationId: z.string().uuid().optional().describe("Existing conversation target; omit for a new file chat"),
       transport: z.enum(["auto", "agent_service", "inference_transcript"]).optional().describe("Upload transport. Auto falls back when Agent Service is unavailable."),
       processForInference: z.boolean().optional().describe("For explicit inference_transcript uploads, wait for Notion's processAgentAttachment result and emit a processed attachment step")
-    }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
   }, async (input) => result(await client.uploadAttachment({
     ...(input.path ? { path: input.path } : {}),
     ...(input.base64 ? { base64: input.base64 } : {}),
@@ -223,7 +227,8 @@ export function createServer(client: NotionClient): McpServer {
       outputPath: z.string().min(1).optional().describe("Destination path under NOTION_ATTACHMENT_ROOT; defaults to downloads/<filename>"),
       returnBase64: z.boolean().default(false),
       overwrite: z.boolean().default(false)
-    }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }
   }, async (input) => result(await client.downloadAttachment({
     returnBase64: input.returnBase64,
     overwrite: input.overwrite,
@@ -240,7 +245,8 @@ export function createServer(client: NotionClient): McpServer {
       limit: z.number().int().min(1).max(100).default(20),
       cursor: z.string().min(1).optional(),
       maxPages: z.number().int().min(1).max(50).default(10)
-    }
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async (input) => result(await client.listConversations({ limit: input.limit, maxPages: input.maxPages, ...(input.cursor ? { cursor: input.cursor } : {}) })));
 
   server.registerTool("get_conversation", {
@@ -249,7 +255,8 @@ export function createServer(client: NotionClient): McpServer {
     inputSchema: {
       conversationId: z.string().uuid(),
       maxPages: z.number().int().min(1).max(100).default(20)
-    }
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async ({ conversationId, maxPages }) => result(await client.getConversation(conversationId, maxPages)));
 
   server.registerTool("rename_conversation", {
@@ -259,7 +266,8 @@ export function createServer(client: NotionClient): McpServer {
       conversationId: z.string().uuid(),
       title: z.string().trim().min(1).max(500),
       maxPages: z.number().int().min(1).max(100).default(20)
-    }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }
   }, async ({ conversationId, title, maxPages }) => result(await client.renameConversation(conversationId, title, maxPages)));
 
   server.registerTool("delete_conversation", {
@@ -270,7 +278,7 @@ export function createServer(client: NotionClient): McpServer {
       confirm: z.boolean().default(false).describe("Must be true; guards against deleting a thread by accident"),
       maxPages: z.number().int().min(1).max(100).default(20)
     },
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true }
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
   }, async ({ conversationId, confirm, maxPages }) => {
     if (!confirm) throw new Error("delete_conversation requires confirm: true because deleting a Notion AI thread cannot be undone from this server");
     return result(await client.deleteConversation(conversationId, maxPages));
@@ -279,13 +287,15 @@ export function createServer(client: NotionClient): McpServer {
   server.registerTool("list_workspaces", {
     title: "List Notion workspaces",
     description: "List every workspace on the signed-in account, flagging the current, pinned, and credit-exhausted ones.",
-    inputSchema: {}
+    inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async () => result(await client.listWorkspaces()));
 
   server.registerTool("get_current_workspace", {
     title: "Get the active workspace",
     description: "Show which workspace Notion AI calls currently run in.",
-    inputSchema: {}
+    inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async () => result(await client.getCurrentWorkspace()));
 
   server.registerTool("switch_workspace", {
@@ -294,7 +304,8 @@ export function createServer(client: NotionClient): McpServer {
     inputSchema: {
       workspace: z.string().min(1).describe("Space ID or (partial) workspace name"),
       pin: z.boolean().default(false).describe("Keep using this workspace even after automatic rotation")
-    }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async ({ workspace, pin }) => result(await client.switchWorkspace(workspace, pin)));
 
   server.registerTool("create_workspace", {
@@ -304,13 +315,15 @@ export function createServer(client: NotionClient): McpServer {
       name: z.string().min(1).optional().describe("Workspace name; defaults to an auto-generated one"),
       switchTo: z.boolean().default(true).describe("Switch the client to the new workspace"),
       pin: z.boolean().default(true).describe("Pin the new workspace so rotation does not move away from it")
-    }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
   }, async ({ name, switchTo, pin }) => result(await client.createWorkspace(name, { switchTo, pin })));
 
   server.registerTool("list_mcp_connections", {
     title: "List MCP connections",
     description: "List custom MCP modules linked to the current Personal Agent, merged with safe local registry metadata.",
-    inputSchema: {}
+    inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async () => result(await client.mcp().list()));
 
   server.registerTool("add_mcp_connection", {
@@ -324,7 +337,8 @@ export function createServer(client: NotionClient): McpServer {
       enabledToolNames: z.array(z.string().min(1)).max(1000).optional().describe("Exact discovered tool names to enable; omit to enable all"),
       runReadToolsAutomatically: z.boolean().optional().describe("Allow read-only tools to run without confirmation; defaults to true"),
       runWriteToolsAutomatically: z.boolean().optional().describe("Allow write tools to run without confirmation; defaults to false")
-    }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
   }, async ({ name, serverUrl, auth, transport, enabledToolNames, runReadToolsAutomatically, runWriteToolsAutomatically }) => result(await client.mcp().add({
     name,
     serverUrl,
@@ -347,7 +361,8 @@ export function createServer(client: NotionClient): McpServer {
       enabledToolNames: z.array(z.string().min(1)).max(1000).nullable().optional().describe("Exact tool names to enable; [] disables all and null restores all"),
       runReadToolsAutomatically: z.boolean().optional(),
       runWriteToolsAutomatically: z.boolean().optional()
-    }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }
   }, async ({ id, name, serverUrl, auth, transport, enabledToolNames, runReadToolsAutomatically, runWriteToolsAutomatically }) => result(await client.mcp().update(id, {
     ...(name ? { name } : {}),
     ...(serverUrl ? { serverUrl } : {}),
@@ -361,19 +376,22 @@ export function createServer(client: NotionClient): McpServer {
   server.registerTool("remove_mcp_connection", {
     title: "Remove an MCP connection",
     description: "Delete a custom MCP connection from the workspace.",
-    inputSchema: { id: z.string().min(1) }
+    inputSchema: { id: z.string().min(1) },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
   }, async ({ id }) => result(await client.mcp().remove(id)));
 
   server.registerTool("get_mcp_connection_status", {
     title: "Get MCP connection status",
     description: "Check the stored authentication/OAuth status of one MCP connection.",
-    inputSchema: { id: z.string().min(1) }
+    inputSchema: { id: z.string().min(1) },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async ({ id }) => result(await client.mcp().status(id)));
 
   server.registerTool("check_mcp_oauth_support", {
     title: "Check MCP OAuth support",
     description: "Ask Notion whether an MCP server advertises OAuth, before choosing an auth method.",
-    inputSchema: { serverUrl: z.string().min(1) }
+    inputSchema: { serverUrl: z.string().min(1) },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async ({ serverUrl }) => result(await client.mcp().checkOAuthSupport(serverUrl)));
 
   server.registerTool("start_mcp_oauth", {
@@ -391,7 +409,8 @@ export function createServer(client: NotionClient): McpServer {
       enabledToolNames: z.array(z.string().min(1)).max(1_000).optional(),
       runReadToolsAutomatically: z.boolean().optional(),
       runWriteToolsAutomatically: z.boolean().optional()
-    }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
   }, async ({
     serverUrl, connectionName, transport, selectedScopes, workflowId, existingModuleId,
     userProvidedOAuthClientId, userProvidedOAuthClientSecret, enabledToolNames,
@@ -420,7 +439,8 @@ export function createServer(client: NotionClient): McpServer {
       enabledToolNames: z.array(z.string().min(1)).max(1_000).nullable().optional().describe("Exact tool names; [] disables all and null restores all during reconnect"),
       runReadToolsAutomatically: z.boolean().optional(),
       runWriteToolsAutomatically: z.boolean().optional()
-    }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
   }, async ({
     oauthFlowId, waitSeconds, connectionName, transport, enabledToolNames,
     runReadToolsAutomatically, runWriteToolsAutomatically
@@ -436,7 +456,8 @@ export function createServer(client: NotionClient): McpServer {
   server.registerTool("list_preconfigured_mcp_servers", {
     title: "List preconfigured MCP servers",
     description: "List Notion's visible MCP catalog using a credential-free allowlisted response.",
-    inputSchema: {}
+    inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async () => result(await client.mcp().listPreconfigured()));
 
   server.registerTool("connect_preconfigured_mcp_server", {
@@ -455,7 +476,8 @@ export function createServer(client: NotionClient): McpServer {
       enabledToolNames: z.array(z.string().min(1)).max(1_000).optional(),
       runReadToolsAutomatically: z.boolean().optional(),
       runWriteToolsAutomatically: z.boolean().optional()
-    }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
   }, async ({
     preconfiguredServerId, variant, serverUrl, templateValues, auth, transport, selectedScopes,
     userProvidedOAuthClientId, userProvidedOAuthClientSecret, enabledToolNames,
