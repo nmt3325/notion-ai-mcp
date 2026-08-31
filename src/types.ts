@@ -33,7 +33,17 @@ export interface TurnOutcome { status:string; completedTime:number|null; stepCou
  * that died mid-flight, because both freeze the heartbeat. serverNow is the Date response header, so
  * every comparison stays on Notion's clock instead of depending on local clock skew.
  */
-export interface ThreadSignals { threadId:string; updatedTime:number|null; serverNow:number; messageCount:number; lastTurnOutcome:TurnOutcome|null; credits:number|null }
+export interface ThreadSignals { threadId:string; updatedTime:number|null; serverNow:number; messageCount:number; lastTurnOutcome:TurnOutcome|null; credits:number|null;
+  currentInferenceId: string;
+  leaseExpiration: number | null;
+}
+
+export interface InterruptResult {
+  threadId: string;
+  cleared: boolean;
+  inferenceId: string;
+  leaseExpiration: number | null;
+}
 
 export type KeepAliveStatus = "watching"|"completed"|"exhausted"|"expired"|"stopped"|"orphaned";
 export interface KeepAlive {

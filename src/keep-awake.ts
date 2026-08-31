@@ -15,6 +15,26 @@ export const DEFAULT_DEADLINE_MS = 3 * 60 * 60 * 1000;
 export const MAX_TRACKED_KEEP_ALIVES = 100;
 export const FINISHED_KEEP_ALIVE_RETENTION_MS = 24 * 60 * 60 * 1000;
 
+export type LeaseState = "free" | "held" | "stale";
+
+/**
+ * Reads how the thread's inference lease stands right now.
+ *
+ * Notion stamps `current_inference_id` on the thread for the duration of a turn and refuses a second
+ * turn while it is set, so this is first-hand evidence of whether a chat can accept a nudge at all -
+ * unlike the heartbeat, which only says when the thread was last written to.
+ */
+export function leaseState(signals: ThreadSignals): LeaseState {
+  if (!signals.currentInferenceId) return "free";
+  if (signals.leaseExpiration === null) return "held";
+  return signals.leaseExpiration > signals.serverNow ? "held" : "stale";
+}
+
+/** Recognises the empty-stream answer Notion returns for a send against a thread that is still leased. */
+export function isLockedError(message: string): boolean {
+  return /no events|rejected the resumed thread state|inference lease/i.test(message);
+}
+
 export type KeepAwakeDecision =
   | { action: "wait"; reason: "healthy" | "cooldown" | "signals_unavailable" }
   | { action: "nudge"; reason: "stalled"; idleMs: number }
@@ -310,10 +330,14 @@ export class KeepAliveStore {
 export interface KeepAwakeRuntime {
   readSignals: (conversationId: string) => Promise<ThreadSignals>;
   sendNudge: (conversationId: string, prompt: string) => Promise<void>;
+  /** Clears the thread's inference lease. Resolves true when a lease was actually cleared. */
+  interrupt?: ((conversationId: string) => Promise<boolean>) | undefined;
   now?: (() => number) | undefined;
 }
 
 export interface KeepAwakeDefaults {
+  /** Interrupt a held inference lease before nudging, like the web client's stop button. */
+  interrupt: boolean;
   idleMs: number;
   pollMs: number;
   cooldownMs: number;
@@ -412,12 +436,33 @@ export class KeepAwakeSupervisor {
         ...(record.doneToken ? { doneToken: record.doneToken } : {}),
         ...(record.message ? { custom: record.message } : {})
       });
+      // Notion holds a lease on the thread while an inference is in flight and answers a second turn
+      // with an empty stream instead of an error, so a turn that stopped without releasing its lease
+      // has to be interrupted the way the web client's stop button does before a nudge can land.
+      const lease = signals ? leaseState(signals) : "free";
+      const canInterrupt = this.defaults.interrupt && Boolean(this.runtime.interrupt);
+      let interrupted = false;
       try {
+        if (canInterrupt && lease !== "free") interrupted = await this.interruptLease(record.conversationId);
         await this.runtime.sendNudge(record.conversationId, prompt);
         this.store.recordNudge(keepAliveId, now);
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // A rejected nudge leaves no step behind, so one retry behind an interrupt cannot duplicate work.
+        if (canInterrupt && !interrupted && isLockedError(message)) {
+          try {
+            await this.interruptLease(record.conversationId);
+            await this.runtime.sendNudge(record.conversationId, prompt);
+            this.store.recordNudge(keepAliveId, now);
+            return { decision, keepAlive: this.store.get(keepAliveId) };
+          } catch (retryError) {
+            const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+            this.store.noteCheck(keepAliveId, now, signals?.updatedTime ?? null, retryMessage);
+            return { decision, keepAlive: this.store.get(keepAliveId) };
+          }
+        }
         // A nudge that could not be delivered must not burn a slot from the budget.
-        this.store.noteCheck(keepAliveId, now, signals?.updatedTime ?? null, error instanceof Error ? error.message : String(error));
+        this.store.noteCheck(keepAliveId, now, signals?.updatedTime ?? null, message);
       }
     }
     return { decision, keepAlive: this.store.get(keepAliveId) };
@@ -458,6 +503,12 @@ export class KeepAwakeSupervisor {
     }, pollMs);
     timer.unref?.();
     this.timers.set(keepAliveId, timer);
+  }
+
+  /** Clears a held inference lease, reproducing the persisted half of the web client's stop button. */
+  private async interruptLease(conversationId: string): Promise<boolean> {
+    if (!this.runtime.interrupt) return false;
+    return await this.runtime.interrupt(conversationId);
   }
 
   private cancel(keepAliveId: string): void {

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { buildNudge, decideKeepAwake, KeepAliveStore, KeepAwakeSupervisor, MIN_IDLE_MS } from "../src/keep-awake.js";
+import { buildNudge, decideKeepAwake, isLockedError, KeepAliveStore, KeepAwakeSupervisor, leaseState, MIN_IDLE_MS } from "../src/keep-awake.js";
 import type { KeepAwakeDefaults } from "../src/keep-awake.js";
 import type { ThreadSignals } from "../src/types.js";
 
@@ -13,13 +13,15 @@ const BASE = 1_788_140_086_830;
 const IDLE = MIN_IDLE_MS;
 const COOLDOWN = 60_000;
 
-function signals(input: { updatedTime: number | null; serverNow: number; outcome?: { status: string; completedTime: number | null } | undefined }): ThreadSignals {
+function signals(input: { updatedTime: number | null; serverNow: number; outcome?: { status: string; completedTime: number | null } | undefined; lease?: { inferenceId: string; expiration: number | null } | undefined }): ThreadSignals {
   return {
     threadId: CONVERSATION,
     updatedTime: input.updatedTime,
     serverNow: input.serverNow,
     messageCount: 11,
     credits: null,
+    currentInferenceId: input.lease?.inferenceId ?? "",
+    leaseExpiration: input.lease?.expiration ?? null,
     lastTurnOutcome: input.outcome
       ? { status: input.outcome.status, completedTime: input.outcome.completedTime, stepCount: 35, inferenceId: "inference-1", finalStepId: "step-1" }
       : null
@@ -128,7 +130,7 @@ test("the nudge text carries the counter, the done token and no question for the
   assert.equal(custom, "[KEEP-AWAKE 2/9] resume the build");
 });
 
-const DEFAULTS: KeepAwakeDefaults = { idleMs: IDLE, pollMs: 30_000, cooldownMs: COOLDOWN, maxNudges: 3, deadlineMs: 3_600_000, enabled: true };
+const DEFAULTS: KeepAwakeDefaults = { interrupt: false, idleMs: IDLE, pollMs: 30_000, cooldownMs: COOLDOWN, maxNudges: 3, deadlineMs: 3_600_000, enabled: true };
 
 function harness(initial: ThreadSignals) {
   let current = initial;
@@ -229,4 +231,98 @@ test("a watchdog is persisted and a live one is orphaned after a restart", () =>
     assert.equal(reloaded?.doneToken, "DONE::KA-2");
     assert.equal(reloaded?.anchorTime, BASE);
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+/**
+ * A harness whose runtime can clear a lease and can refuse the first send the way Notion does for a
+ * thread that is still leased: HTTP 200 with an empty stream, surfaced as an error by the client.
+ */
+function interruptHarness(initial: ThreadSignals, options: { failFirstSend?: boolean; interruptEnabled?: boolean } = {}) {
+  let current = initial;
+  let clock = initial.serverNow;
+  const sent: string[] = [];
+  const interrupted: string[] = [];
+  let sends = 0;
+  const store = new KeepAliveStore(null);
+  const supervisor = new KeepAwakeSupervisor(store, {
+    readSignals: async () => current,
+    sendNudge: async (_conversationId, prompt) => {
+      sends += 1;
+      if (options.failFirstSend && sends === 1) {
+        throw new Error("Notion AI streamed no answer text (workspace w; stream events: no events). Notion rejected the resumed thread state because the thread still holds an inference lease.");
+      }
+      sent.push(prompt);
+    },
+    interrupt: async (conversationId) => { interrupted.push(conversationId); return true; },
+    now: () => clock
+  }, { ...DEFAULTS, interrupt: options.interruptEnabled !== false });
+  return {
+    supervisor,
+    sent,
+    interrupted,
+    advance(next: ThreadSignals): void { current = next; clock = next.serverNow; }
+  };
+}
+
+test("the lease is read from the thread record rather than guessed from the heartbeat", () => {
+  // current_inference_id is first-hand evidence that a turn is still checked out, which the heartbeat
+  // alone cannot tell apart from a turn that died.
+  const at = { updatedTime: BASE, serverNow: BASE + 200_000 };
+  assert.equal(leaseState(signals(at)), "free");
+  assert.equal(leaseState(signals({ ...at, lease: { inferenceId: "inference-9", expiration: null } })), "held");
+  assert.equal(leaseState(signals({ ...at, lease: { inferenceId: "inference-9", expiration: BASE + 300_000 } })), "held");
+  assert.equal(leaseState(signals({ ...at, lease: { inferenceId: "inference-9", expiration: BASE + 100_000 } })), "stale");
+});
+
+test("the empty-stream refusal Notion returns for a leased thread is recognised", () => {
+  assert.equal(isLockedError("Notion AI streamed no answer text (workspace w; stream events: no events)."), true);
+  assert.equal(isLockedError("Notion rejected the resumed thread state because the thread still holds an inference lease."), true);
+  assert.equal(isLockedError("fetch failed"), false);
+});
+
+test("a stalled turn that still holds its lease is interrupted before the nudge is sent", async () => {
+  const box = interruptHarness(signals({ updatedTime: BASE, serverNow: BASE }));
+  const record = await box.supervisor.start({ conversationId: CONVERSATION });
+  box.advance(signals({ updatedTime: BASE, serverNow: BASE + 200_000, lease: { inferenceId: "inference-9", expiration: null } }));
+  const outcome = await box.supervisor.tick(record.keepAliveId);
+  assert.equal(outcome.decision.action, "nudge");
+  assert.deepEqual(box.interrupted, [CONVERSATION]);
+  assert.equal(box.sent.length, 1);
+  assert.equal(outcome.keepAlive?.nudgeCount, 1);
+  box.supervisor.stopAll();
+});
+
+test("a stalled turn whose lease is already gone is nudged without an interrupt", async () => {
+  const box = interruptHarness(signals({ updatedTime: BASE, serverNow: BASE }));
+  const record = await box.supervisor.start({ conversationId: CONVERSATION });
+  box.advance(signals({ updatedTime: BASE, serverNow: BASE + 200_000 }));
+  await box.supervisor.tick(record.keepAliveId);
+  assert.deepEqual(box.interrupted, []);
+  assert.equal(box.sent.length, 1);
+  box.supervisor.stopAll();
+});
+
+test("a nudge refused as an empty stream is retried once behind an interrupt", async () => {
+  // The lease can be taken between the read and the send, and a refused nudge writes no step, so the
+  // retry cannot duplicate work.
+  const box = interruptHarness(signals({ updatedTime: BASE, serverNow: BASE }), { failFirstSend: true });
+  const record = await box.supervisor.start({ conversationId: CONVERSATION });
+  box.advance(signals({ updatedTime: BASE, serverNow: BASE + 200_000 }));
+  const outcome = await box.supervisor.tick(record.keepAliveId);
+  assert.deepEqual(box.interrupted, [CONVERSATION]);
+  assert.equal(box.sent.length, 1);
+  assert.equal(outcome.keepAlive?.nudgeCount, 1);
+  box.supervisor.stopAll();
+});
+
+test("interrupting can be switched off, and a refused nudge keeps its budget", async () => {
+  const box = interruptHarness(signals({ updatedTime: BASE, serverNow: BASE }), { failFirstSend: true, interruptEnabled: false });
+  const record = await box.supervisor.start({ conversationId: CONVERSATION });
+  box.advance(signals({ updatedTime: BASE, serverNow: BASE + 200_000, lease: { inferenceId: "inference-9", expiration: null } }));
+  const outcome = await box.supervisor.tick(record.keepAliveId);
+  assert.deepEqual(box.interrupted, []);
+  assert.equal(box.sent.length, 0);
+  assert.equal(outcome.keepAlive?.nudgeCount, 0);
+  assert.match(outcome.keepAlive?.lastError ?? "", /no events/);
+  box.supervisor.stopAll();
 });
