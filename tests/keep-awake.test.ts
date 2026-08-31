@@ -473,3 +473,18 @@ test("auto-continue can be switched off per watchdog", async () => {
   assert.equal(box.sent.length, 0);
   box.supervisor.stopAll();
 });
+
+test("a stall with no confirmation prompt still gets the ordinary nudge", async () => {
+  // The button and its prompt always arrive together, so text that is not the prompt means there is
+  // no button: the four ordinary signals decide alone and a frozen turn is nudged as before.
+  const box = continueHarness(signals({ updatedTime: BASE, serverNow: BASE }));
+  const record = await box.supervisor.start({ conversationId: CONVERSATION });
+  box.setTail("31\u4ef6\u76ee: \u30c9\u30ad\u30e5\u30e1\u30f3\u30c8 / 50\u4ef6");
+  box.advance(signals({ updatedTime: BASE, serverNow: BASE + IDLE + 30_000 }));
+  const nudged = await box.supervisor.tick(record.keepAliveId);
+  assert.equal(nudged.decision.action, "nudge");
+  assert.equal(nudged.keepAlive?.nudgeCount, 1);
+  assert.equal(nudged.keepAlive?.continueCount, 0);
+  assert.match(box.sent[0] ?? "", /\[KEEP-AWAKE 1\/3\]/);
+  box.supervisor.stopAll();
+});
