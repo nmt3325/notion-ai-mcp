@@ -22,3 +22,40 @@ export interface CompletedChatResult extends ChatResult { status:"completed"; jo
 export interface PendingChatResult { status:"pending"; jobId:string; conversationId:string; model:string; reasoningEffort?:string|undefined; startedAt:number; elapsedMs:number; rehydrated?:boolean|undefined; hint:string }
 export type ChatWaitResult = CompletedChatResult|PendingChatResult;
 export interface ChatJobLookup { status:ChatJobStatus; source:"job"|"thread"; conversationId:string; jobId?:string|undefined; model?:string|undefined; reasoningEffort?:string|undefined; text?:string|undefined; error?:string|undefined; usage?:ChatJobUsage|undefined; startedAt?:number|undefined; finishedAt?:number|undefined; elapsedMs?:number|undefined; hint?:string|undefined }
+
+/** One closed turn, as Notion records it in thread.data.last_turn_outcome. */
+export interface TurnOutcome { status:string; completedTime:number|null; stepCount:number|null; inferenceId:string; finalStepId:string }
+/**
+ * The signals the keep-awake watchdog reads from a single thread record.
+ *
+ * updatedTime is the heartbeat: it matches the created_time of the newest step. lastTurnOutcome is
+ * only written when a turn closes, which is the only way to tell a finished turn apart from a turn
+ * that died mid-flight, because both freeze the heartbeat. serverNow is the Date response header, so
+ * every comparison stays on Notion's clock instead of depending on local clock skew.
+ */
+export interface ThreadSignals { threadId:string; updatedTime:number|null; serverNow:number; messageCount:number; lastTurnOutcome:TurnOutcome|null; credits:number|null }
+
+export type KeepAliveStatus = "watching"|"completed"|"exhausted"|"expired"|"stopped"|"orphaned";
+export interface KeepAlive {
+  keepAliveId:string;
+  conversationId:string;
+  status:KeepAliveStatus;
+  /** Heartbeat value at registration. A turn that closed at or after this belongs to the watched work. */
+  anchorTime:number;
+  createdAt:number;
+  deadlineAt:number;
+  idleMs:number;
+  pollMs:number;
+  cooldownMs:number;
+  maxNudges:number;
+  nudgeCount:number;
+  language:"ja"|"en";
+  doneToken?:string|undefined;
+  message?:string|undefined;
+  lastNudgeAt?:number|undefined;
+  lastCheckedAt?:number|undefined;
+  lastUpdatedTime?:number|undefined;
+  finishedAt?:number|undefined;
+  stopReason?:string|undefined;
+  lastError?:string|undefined;
+}

@@ -1,11 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { basename, extname } from "node:path";
 import { isIP } from "node:net";
-import type {
-  AccountContext, AgentUploadedFile, AttachmentDownloadResult, AttachmentUploadResult, ChatAttachment, LegacyAttachmentDownloadInput,
-  ChatResult, ChatSession, Conversation, ConversationMessage, ConversationSummary, ListConversationsResult,
-  ParsedInferenceStream, ChatJob, ChatJobLookup, ChatJobStatus, ChatStartResult, ChatWaitResult
-} from "./types.js";
+import type { AccountContext, AgentUploadedFile, AttachmentDownloadResult, AttachmentUploadResult, ChatAttachment, ChatJob, ChatJobLookup, ChatJobStatus, ChatResult, ChatSession, ChatStartResult, ChatWaitResult, Conversation, ConversationMessage, ConversationSummary, LegacyAttachmentDownloadInput, ListConversationsResult, ParsedInferenceStream, ThreadSignals, TurnOutcome } from "./types.js";
 import type { NotionConfig } from "./config.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 import { ChatStateStore } from "./chat-jobs.js";
@@ -397,6 +393,19 @@ function decodeConversationCursor(cursor?: string): ConversationCursor { if (!cu
 
 function encodeConversationCursor(value: ConversationCursor): string { return `mcpv1.${Buffer.from(JSON.stringify(value)).toString("base64url")}`; }
 
+function parseTurnOutcome(value: unknown): TurnOutcome | null {
+  const raw = object(value);
+  const status = asString(raw.status);
+  if (!status) return null;
+  return {
+    status,
+    completedTime: asNumber(raw.completed_time),
+    stepCount: asNumber(raw.step_count),
+    inferenceId: asString(raw.inference_id),
+    finalStepId: asString(raw.final_step_id)
+  };
+}
+
 export class NotionClient {
   private accountPromise: Promise<AccountContext> | null = null;
   private readonly sessions = new Map<string, ChatSession>();
@@ -497,6 +506,48 @@ export class NotionClient {
   }
 
   async getConversation(threadId: string, maxPages = 20): Promise<Conversation> { const found = await this.findThread(threadId, Math.min(Math.max(maxPages, 1), 100)); const messageIds = arrayOfStrings(found.thread.messages); const records = await this.fetchThreadMessages(messageIds); const t = found.transcript ?? {}; return { id: threadId, title: asString(t.title) || asString(object(found.thread.data).title) || "Untitled", type: asString(t.type) || asString(found.thread.type, "workflow"), createdAt: asNumber(t.created_at) ?? asNumber(found.thread.created_time), updatedAt: asNumber(t.updated_at) ?? asNumber(found.thread.updated_time), messages: parseConversationMessages(messageIds, records) }; }
+
+  /**
+   * Reads one thread record and returns the signals a keep-awake watchdog needs.
+   *
+   * Both signals have to come from the same read: updated_time and data.last_turn_outcome describe
+   * the same turn only if they were fetched together, and a torn pair is exactly what makes a
+   * watchdog nudge a chat that already finished. syncRecordValuesMain answers straight from the
+   * record store, so this stays cheap enough to poll every 30 seconds.
+   *
+   * The current time is taken from the Date response header, because completed_time and updated_time
+   * are Notion's stamps and comparing them against a local clock makes the result depend on skew.
+   */
+  async threadSignals(threadId: string): Promise<ThreadSignals> {
+    const account = await this.account();
+    const response = await this.request("syncRecordValuesMain", { requests: [{ pointer: { table: "thread", id: threadId, spaceId: account.spaceId }, version: -1 }] }, false);
+    const header = Date.parse(response.headers.get("date") ?? "");
+    const serverNow = Number.isFinite(header) ? header : Date.now();
+    const payload = object(await response.json());
+    const record = unwrapRecord(object(object(payload.recordMap).thread)[threadId]);
+    if (Object.keys(record).length === 0) throw new Error(`Conversation ${threadId} was not found`);
+    const data = object(record.data);
+    const creditsByType = object(object(data.usage_summary).credits_by_type_unit);
+    let credits: number | null = null;
+    for (const value of Object.values(creditsByType)) {
+      const amount = asNumber(value);
+      if (amount !== null) credits = (credits ?? 0) + amount;
+    }
+    return {
+      threadId,
+      updatedTime: asNumber(record.updated_time),
+      serverNow,
+      messageCount: arrayOfStrings(record.messages).length,
+      lastTurnOutcome: parseTurnOutcome(data.last_turn_outcome),
+      credits
+    };
+  }
+
+  keepAwakeDefaults(): { idleMs: number; pollMs: number; cooldownMs: number; maxNudges: number; deadlineMs: number; enabled: boolean } {
+    return { ...this.config.keepAwake };
+  }
+
+  keepAliveStatePath(): string | null { return this.config.keepAliveFilePath ?? null; }
 
   async renameConversation(threadId: string, title: string, maxPages = 20): Promise<{ conversationId: string; previousTitle: string; title: string; changed: boolean }> {
     const nextTitle = title.trim();
