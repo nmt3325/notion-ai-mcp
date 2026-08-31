@@ -1,4 +1,4 @@
-researched_at=2026-08-31T04:08:59Z
+researched_at=2026-08-31T07:11:13Z
 method=wget full current webpack chunk map plus bounded MCP connection extraction
 initial_asset_count=15
 Traceback (most recent call last):

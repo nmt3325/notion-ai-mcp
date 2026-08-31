@@ -1,4 +1,4 @@
-researched_at=2026-08-31T04:08:56Z
+researched_at=2026-08-31T07:11:12Z
 method=wget full chunk map plus module-export callsite tracing
 Traceback (most recent call last):
   File "<stdin>", line 32, in <module>
