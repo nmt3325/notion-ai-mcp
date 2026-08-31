@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { AccountContext } from "./types.js";
 import { defaultStateFilePath } from "./chat-jobs.js";
 
@@ -25,6 +26,10 @@ export interface NotionConfig {
   defaultWorkspaceSearch: boolean;
   /** Ask/read-only mode for a new chat when the caller does not pass readOnly. */
   defaultReadOnly: boolean;
+  /** Registry of keep-awake watchdogs. Undefined disables persistence. */
+  keepAliveFilePath?: string | undefined;
+  /** Defaults for keep_me_awake. */
+  keepAwake: { idleMs: number; pollMs: number; cooldownMs: number; maxNudges: number; deadlineMs: number; enabled: boolean };
 }
 
 function optional(name: string, fallback = ""): string {
@@ -37,6 +42,14 @@ function flag(name: string, fallback: boolean): boolean {
   if (["1", "true", "on", "yes"].includes(raw)) return true;
   if (["0", "false", "off", "no"].includes(raw)) return false;
   throw new Error(`${name} must be a boolean such as 1/0, true/false, on/off`);
+}
+
+function integer(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error(`${name} must be a safe integer between ${min} and ${max}`);
+  return value;
 }
 
 function accountFile(): { path: string; data: Record<string, unknown> } {
@@ -76,6 +89,17 @@ export function loadConfig(): NotionConfig {
   const rehydrate = optional("NOTION_SESSION_REHYDRATE", "1").toLowerCase();
   const maxAttachmentBytes = Number(optional("NOTION_MAX_ATTACHMENT_BYTES", String(20 * 1024 * 1024)));
   if (!Number.isSafeInteger(maxAttachmentBytes) || maxAttachmentBytes <= 0) throw new Error("NOTION_MAX_ATTACHMENT_BYTES must be a positive safe integer");
+  const keepAwake = {
+    // A healthy turn goes quiet for 10-20s between steps, so the floor is a minute: anything shorter
+    // reports stalls that are really just a slow tool call.
+    idleMs: integer("NOTION_KEEP_AWAKE_IDLE_MS", 120_000, 60_000, 900_000),
+    pollMs: integer("NOTION_KEEP_AWAKE_POLL_MS", 30_000, 5_000, 300_000),
+    cooldownMs: integer("NOTION_KEEP_AWAKE_COOLDOWN_MS", 60_000, 0, 1_800_000),
+    // Every nudge is a real turn and costs credits, so the budget and the deadline are not optional.
+    maxNudges: integer("NOTION_KEEP_AWAKE_MAX_NUDGES", 40, 1, 500),
+    deadlineMs: integer("NOTION_KEEP_AWAKE_DEADLINE_MS", 3 * 60 * 60 * 1000, 60_000, 24 * 60 * 60 * 1000),
+    enabled: flag("NOTION_KEEP_AWAKE", true)
+  };
   return {
     apiBase: optional("NOTION_API_BASE", "https://www.notion.so/api/v3").replace(/\/$/, ""),
     defaultModel: optional("NOTION_DEFAULT_MODEL", "almond-croissant-low"),
@@ -91,7 +115,8 @@ export function loadConfig(): NotionConfig {
     defaultWebSearch: flag("NOTION_DEFAULT_WEB_SEARCH", true),
     defaultWorkspaceSearch: flag("NOTION_DEFAULT_WORKSPACE_SEARCH", true),
     defaultReadOnly: flag("NOTION_DEFAULT_READ_ONLY", false),
-    ...(persistState && stateFile ? { stateFilePath: stateFile } : {}),
+    keepAwake,
+    ...(persistState && stateFile ? { stateFilePath: stateFile, keepAliveFilePath: join(dirname(stateFile), "keep-alives.json") } : {}),
     account: {
       tokenV2,
       userId: optional("NOTION_USER_ID", fileString(file, "user_id")),

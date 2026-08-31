@@ -5,6 +5,7 @@ import { loadConfig } from "./config.js";
 import { NotionClient } from "./notion-client.js";
 import type { McpAuth } from "./mcp-connections.js";
 import { BUILTIN_ALIASES, listModels, modelReasoningEfforts, REASONING_EFFORTS } from "./models.js";
+import { KeepAliveStore, KeepAwakeSupervisor } from "./keep-awake.js";
 
 export const SERVER_VERSION = "0.8.0";
 
@@ -98,6 +99,18 @@ function result(value: unknown, text?: string): { content: Array<{ type: "text";
 export function createServer(client: NotionClient): McpServer {
   const server = new McpServer({ name: "notion-ai-mcp", version: SERVER_VERSION });
   const defaults = client.chatDefaults();
+  const keepAwakeSettings = client.keepAwakeDefaults();
+  // A nudge is an ordinary chat turn on the watched conversation, started in the background so the
+  // watchdog loop never blocks on the answer it just asked for.
+  const keepAwake = new KeepAwakeSupervisor(
+    new KeepAliveStore(client.keepAliveStatePath()),
+    {
+      readSignals: (conversationId) => client.threadSignals(conversationId),
+      sendNudge: async (conversationId, prompt) => { await client.startChat({ prompt, conversationId }); }
+    },
+    keepAwakeSettings
+  );
+  const seconds = (value: number): number => Math.round(value / 1000);
   const canonicalModelIds = new Set(Object.values(BUILTIN_ALIASES));
   const modelHint = listModels().filter((entry) => entry.pickable || canonicalModelIds.has(entry.modelId)).map((entry) => `${entry.modelId} (${entry.aliases.join(", ")})`).join("; ");
   const effortHint = listModels()
@@ -184,6 +197,93 @@ export function createServer(client: NotionClient): McpServer {
       ...(warning ? { stateWarning: warning } : {})
     });
   });
+
+  server.registerTool("keep_me_awake", {
+    title: "Keep a stalled turn awake",
+    description: [
+      "Watch a Notion AI conversation and re-send a short continuation message whenever its turn stops without finishing.",
+      "The heartbeat is the thread updated_time, which equals the created_time of the newest step.",
+      "A frozen heartbeat alone is ambiguous, so a turn whose last_turn_outcome closed as completed at or after registration ends the watch instead of being nudged; only a freeze with no matching completion is treated as a dead turn.",
+      "Call this from inside the long task that needs protecting and pass that same conversation id, then keep working. Every nudge is a real turn and costs credits, so the budget and the deadline always apply."
+    ].join(" "),
+    inputSchema: {
+      conversationId: z.string().uuid().describe("Conversation to watch. From inside a Notion AI chat this is that chat own thread id."),
+      idleSeconds: z.number().int().min(60).max(900).optional().describe(`Silence that counts as a stall. A healthy turn goes quiet for 10-20s between steps, so the floor is 60s. Default ${seconds(keepAwakeSettings.idleMs)}s.`),
+      pollSeconds: z.number().int().min(5).max(300).optional().describe(`How often the thread record is read. Default ${seconds(keepAwakeSettings.pollMs)}s.`),
+      cooldownSeconds: z.number().int().min(0).max(1800).optional().describe(`Minimum gap between two nudges, so a nudge has time to land. Default ${seconds(keepAwakeSettings.cooldownMs)}s.`),
+      maxNudges: z.number().int().min(1).max(500).optional().describe(`Hard cap on nudges before the watch gives up. Default ${keepAwakeSettings.maxNudges}.`),
+      deadlineMinutes: z.number().int().min(1).max(1440).optional().describe(`Absolute end of the watch regardless of activity. Default ${Math.round(keepAwakeSettings.deadlineMs / 60000)} minutes.`),
+      language: z.enum(["ja", "en"]).optional().describe("Language of the built-in nudge text. Default ja."),
+      doneToken: z.string().min(3).max(64).optional().describe("Token the watched chat can reply with to report that the task is finished. It is quoted in every nudge."),
+      message: z.string().min(1).max(2000).optional().describe("Replaces the built-in nudge body. The [KEEP-AWAKE n/max] tag is still prepended.")
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  }, async (input) => {
+    const record = await keepAwake.start({
+      conversationId: input.conversationId,
+      ...(input.idleSeconds === undefined ? {} : { idleMs: input.idleSeconds * 1000 }),
+      ...(input.pollSeconds === undefined ? {} : { pollMs: input.pollSeconds * 1000 }),
+      ...(input.cooldownSeconds === undefined ? {} : { cooldownMs: input.cooldownSeconds * 1000 }),
+      ...(input.maxNudges === undefined ? {} : { maxNudges: input.maxNudges }),
+      ...(input.deadlineMinutes === undefined ? {} : { deadlineMs: input.deadlineMinutes * 60000 }),
+      ...(input.language ? { language: input.language } : {}),
+      ...(input.doneToken ? { doneToken: input.doneToken } : {}),
+      ...(input.message ? { message: input.message } : {})
+    });
+    return result(record, `Watching ${record.conversationId}. Nudges after ${seconds(record.idleMs)}s of silence, at most ${record.maxNudges} times, until ${new Date(record.deadlineAt).toISOString()}. Stop it with stop_keep_me_awake and keepAliveId ${record.keepAliveId}.`);
+  });
+
+  server.registerTool("check_keep_alive", {
+    title: "Check a keep-awake watchdog now",
+    description: "Run one watchdog poll immediately and report the decision. Reads the thread record, then waits, nudges or stops exactly as the background loop would.",
+    inputSchema: { keepAliveId: z.string().min(1).describe("keepAliveId returned by keep_me_awake") },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+  }, async ({ keepAliveId }) => {
+    const outcome = await keepAwake.tick(keepAliveId);
+    if (!outcome.keepAlive) return result({ keepAliveId, found: false }, `No watchdog with keepAliveId ${keepAliveId}`);
+    return result({ decision: outcome.decision, keepAlive: outcome.keepAlive }, `${outcome.decision.action}: ${outcome.decision.reason}`);
+  });
+
+  server.registerTool("keep_alive_kick", {
+    title: "Re-anchor a keep-awake watchdog",
+    description: "Move a watchdog anchor to the current heartbeat and clear any pending cooldown. Use it after sending a new instruction to the watched conversation, so a completion that belonged to the previous turn cannot end the watch early.",
+    inputSchema: { keepAliveId: z.string().min(1).describe("keepAliveId returned by keep_me_awake") },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+  }, async ({ keepAliveId }) => {
+    const record = await keepAwake.kick(keepAliveId);
+    if (!record) return result({ keepAliveId, found: false }, `No watchdog with keepAliveId ${keepAliveId}`);
+    return result(record, `Re-anchored to ${new Date(record.anchorTime).toISOString()} (status ${record.status})`);
+  });
+
+  server.registerTool("stop_keep_me_awake", {
+    title: "Stop a keep-awake watchdog",
+    description: "Stop one watchdog, or every live watchdog when keepAliveId is omitted. This is the kill switch for a nudge loop.",
+    inputSchema: { keepAliveId: z.string().min(1).optional().describe("Omit to stop every watchdog this server is running") },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
+  }, async ({ keepAliveId }) => {
+    if (!keepAliveId) {
+      const stopped = keepAwake.stopAll();
+      return result({ stopped }, `Stopped ${stopped.length} watchdog(s)`);
+    }
+    const record = keepAwake.stop(keepAliveId);
+    if (!record) return result({ keepAliveId, found: false }, `No watchdog with keepAliveId ${keepAliveId}`);
+    return result(record, `Watchdog ${record.keepAliveId} is ${record.status} after ${record.nudgeCount} nudge(s)`);
+  });
+
+  server.registerTool("list_keep_alives", {
+    title: "List keep-awake watchdogs",
+    description: "List keep-awake watchdogs with their nudge counts and stop reasons. A watchdog left as orphaned belonged to an earlier server process and is no longer polling.",
+    inputSchema: {
+      status: z.enum(["watching", "completed", "exhausted", "expired", "stopped", "orphaned"]).optional(),
+      conversationId: z.string().uuid().optional(),
+      limit: z.number().int().min(1).max(100).default(20)
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async (input) => result(keepAwake.list({
+    limit: input.limit,
+    ...(input.status ? { status: input.status } : {}),
+    ...(input.conversationId ? { conversationId: input.conversationId } : {})
+  })));
 
   server.registerTool("upload_attachment", {
     title: "Upload an attachment",

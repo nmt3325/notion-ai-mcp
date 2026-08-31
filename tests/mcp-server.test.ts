@@ -7,6 +7,7 @@ import { createServer, toMcpAuth } from "../src/server.js";
 
 export const EXPECTED_TOOLS = [
   "add_mcp_connection",
+  "check_keep_alive",
   "check_mcp_oauth_support",
   "complete_mcp_oauth",
   "connect_preconfigured_mcp_server",
@@ -17,8 +18,11 @@ export const EXPECTED_TOOLS = [
   "get_conversation",
   "get_current_workspace",
   "get_mcp_connection_status",
+  "keep_alive_kick",
+  "keep_me_awake",
   "list_chat_jobs",
   "list_conversations",
+  "list_keep_alives",
   "list_mcp_connections",
   "list_preconfigured_mcp_servers",
   "list_workspaces",
@@ -26,6 +30,7 @@ export const EXPECTED_TOOLS = [
   "remove_mcp_connection",
   "rename_conversation",
   "start_mcp_oauth",
+  "stop_keep_me_awake",
   "switch_workspace",
   "update_mcp_connection",
   "upload_attachment"
@@ -89,7 +94,10 @@ function fakeClient(): { client: NotionClient; chatCalls: Array<Record<string, u
       listPreconfigured: async () => [{ id: "preconfigured-1", name: "Amplitude" }],
       connectPreconfigured: async () => ({ id: "preconfigured-1", connected: true })
     }),
-    chatDefaults: () => ({ webSearch: true, workspaceSearch: true, readOnly: false })
+    chatDefaults: () => ({ webSearch: true, workspaceSearch: true, readOnly: false }),
+    keepAwakeDefaults: () => ({ idleMs: 120_000, pollMs: 30_000, cooldownMs: 60_000, maxNudges: 40, deadlineMs: 10_800_000, enabled: true }),
+    keepAliveStatePath: () => null,
+    threadSignals: async (threadId: string) => ({ threadId, updatedTime: 1, serverNow: 2, messageCount: 1, lastTurnOutcome: null, credits: null })
   } as unknown as NotionClient;
   return { client, chatCalls, added, uploaded, downloaded, lookups, waits };
 }
@@ -186,7 +194,10 @@ test("notion_ai_chat keeps the client under the 60s limit and hands back a pendi
       status: "pending", jobId: "job-slow", conversationId, model: "mock-model", startedAt: 1, elapsedMs: 45_000,
       hint: "Still generating after 45s. Nothing is lost: call get_chat_result with jobId job-slow."
     }),
-    chatDefaults: () => ({ webSearch: true, workspaceSearch: true, readOnly: false })
+    chatDefaults: () => ({ webSearch: true, workspaceSearch: true, readOnly: false }),
+    keepAwakeDefaults: () => ({ idleMs: 120_000, pollMs: 30_000, cooldownMs: 60_000, maxNudges: 40, deadlineMs: 10_800_000, enabled: true }),
+    keepAliveStatePath: () => null,
+    threadSignals: async (threadId: string) => ({ threadId, updatedTime: 1, serverNow: 2, messageCount: 1, lastTurnOutcome: null, credits: null })
   } as unknown as NotionClient;
   const { mcpClient, close } = await connect(client);
   try {
@@ -245,6 +256,7 @@ const READ_ONLY_TOOLS = [
   "get_mcp_connection_status",
   "list_chat_jobs",
   "list_conversations",
+  "list_keep_alives",
   "list_mcp_connections",
   "list_preconfigured_mcp_servers",
   "list_workspaces"
@@ -256,6 +268,7 @@ const DESTRUCTIVE_TOOLS = [
   "notion_ai_chat",
   "remove_mcp_connection",
   "rename_conversation",
+  "stop_keep_me_awake",
   "update_mcp_connection"
 ];
 

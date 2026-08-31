@@ -8,6 +8,7 @@ stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion 
 - `notion_ai_chat`: Notion AI にプロンプトを送信し、NDJSON/SSE ストリームを集約して返す（モデル・reasoningEffort 指定、添付対応）。MCP client が約60秒で呼び出しを放棄するため、既定45秒で切り上げて `jobId` 付きの `pending` を返し、生成はサーバー側で継続する
 - `get_chat_result`: 待機打ち切り後・タイムアウト後の回答を job または thread 本文から回収する
 - `list_chat_jobs`: バックグラウンドで走らせた chat job の状態・conversationId を一覧する
+- `keep_me_awake`: 長いタスクの途中で止まったターンを検知して継続を促す短いメッセージを自動送信する
 - `list_conversations`: Notion AI の workflow/chat thread をページング取得する
 - `get_conversation`: 指定 thread の user-visible な user/assistant メッセージを取得する
 - `rename_conversation`: active workspace内のthreadを検証してタイトル変更する
@@ -330,6 +331,31 @@ thread か分かるエラーを返します。添付 handle は復元対象で�
 `/createSpace` 成功後のtransaction・検証失敗はpartial creationです。重複workspaceを防ぐため、
 サーバーは `/createSpace` もtransactionも自動再試行せず、切り替え・pin・account JSON更新を行いません。
 HTTP errorにはbounded response bodyを含め、`Retry-After` があれば併記します。
+
+### `keep_me_awake` / `check_keep_alive` / `keep_alive_kick` / `stop_keep_me_awake` / `list_keep_alives`
+
+Notion AI は長いタスクの途中でターンを閉じずに止まることがあり、何か送信すれば再開します。`keep_me_awake` はその再開を自動化する見張り役です。保護したい作業の中から、そのチャット自身の `conversationId` を渡して呼びます。
+
+判定は4つの信号で行います。
+
+| 信号 | 中身 |
+| --- | --- |
+| heartbeat | `thread.updated_time`。最新ステップの `created_time` と一致します |
+| stall判定 | `now - updated_time > idleMs`（既定 120s、下限 60s） |
+| 正常終了 | `last_turn_outcome.status == "completed"` かつ `completed_time >= anchorTime` → ナッジせず監視終了 |
+| 異常停止 | 上記を満たさず heartbeat が止まったもの → ナッジ |
+
+`updated_time` が止まる理由は「正常終了」と「ターン途中死」の2つあり、見た目は同じです。`last_turn_outcome` はターンが閉じたときだけ書かれるので、この2つを分ける唯一の手がかりになります。正常終了のチェックを stall 判定より先に置くのは、閉じたターンも heartbeat を凍結させるためです。逆にすると完了したチャットを永久につつき続けます。
+
+`anchorTime` は登録時の `updated_time` です。ユーザー発言を探しに行かないのは、登録がターンの内側で起きるので安全側に倒れることと、サーバ時刻同士の比較で clock skew を踏まないことの2点が理由です。現在時刻は `syncRecordValuesMain` の `Date` レスポンスヘッダを使います。heartbeat と outcome は同じ 1 回の読み取りから取るので、両者が別のターンを指してしまうことがありません。
+
+新しい指示を投げた直後は `keep_alive_kick` で anchor を打ち直してください。前のターンの完了記録で監視が早期終了するのを防います。
+
+ナッジ本文は `[KEEP-AWAKE n/max]` タグ付きの短文で、「中断箇所から続行」「ユーザーに質問しない」を明記します。素の `continue` を避けているのは、新しい作業を発明されたり質問でターンを潰されたりするためです。`doneToken` を渡すと全ナッジに引用され、監視対象側から完了を申告できます。`message` で本文を差し替えられます。
+
+ナッジは1回ごとに実ターンとしてクレジットを消費します。`maxNudges`、`cooldownSeconds`、`deadlineMinutes` は常に効き、`stop_keep_me_awake` を `keepAliveId` なしで呼べば全停止できます。監視台帳は `state.json` の隣の `keep-alives.json` に永続化され、再起動前から生き残っていたものは `orphaned` として残るので、タイマーが死んだ監視を生きていると見間違えません。
+
+既定値は `NOTION_KEEP_AWAKE_*` で変えられ、`NOTION_KEEP_AWAKE=0` で機能ごと無効化できます。
 
 ## ツール注釈（annotations）
 

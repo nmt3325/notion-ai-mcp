@@ -40,7 +40,10 @@ function fakeClient(): NotionClient {
       updatedAt: null,
       messages: []
     }),
-    chatDefaults: () => ({ webSearch: true, workspaceSearch: true, readOnly: false })
+    chatDefaults: () => ({ webSearch: true, workspaceSearch: true, readOnly: false }),
+    keepAwakeDefaults: () => ({ idleMs: 120_000, pollMs: 30_000, cooldownMs: 60_000, maxNudges: 40, deadlineMs: 10_800_000, enabled: true }),
+    keepAliveStatePath: () => null,
+    threadSignals: async (threadId: string) => ({ threadId, updatedTime: 1, serverNow: 2, messageCount: 1, lastTurnOutcome: null, credits: null })
   } as unknown as NotionClient;
 }
 
@@ -87,6 +90,7 @@ test("Streamable HTTP server requires bearer auth and executes MCP tools", async
     const tools = await client.listTools();
     assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), [
       "add_mcp_connection",
+      "check_keep_alive",
       "check_mcp_oauth_support",
       "complete_mcp_oauth",
       "connect_preconfigured_mcp_server",
@@ -97,8 +101,11 @@ test("Streamable HTTP server requires bearer auth and executes MCP tools", async
       "get_conversation",
       "get_current_workspace",
       "get_mcp_connection_status",
+      "keep_alive_kick",
+      "keep_me_awake",
       "list_chat_jobs",
       "list_conversations",
+      "list_keep_alives",
       "list_mcp_connections",
       "list_preconfigured_mcp_servers",
       "list_workspaces",
@@ -106,6 +113,7 @@ test("Streamable HTTP server requires bearer auth and executes MCP tools", async
       "remove_mcp_connection",
       "rename_conversation",
       "start_mcp_oauth",
+      "stop_keep_me_awake",
       "switch_workspace",
       "update_mcp_connection",
       "upload_attachment"
