@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { buildContinue, buildNudge, decideKeepAwake, isConfirmationStatus, isLockedError, isStepLimitConfirmation, KeepAliveStore, KeepAwakeSupervisor, leaseState, MIN_IDLE_MS, parseConfirmationPatterns, parseConfirmationStatuses } from "../src/keep-awake.js";
+import { buildContinue, buildNudge, decideKeepAwake, isLockedError, isStepLimitConfirmation, KeepAliveStore, KeepAwakeSupervisor, leaseState, MIN_IDLE_MS, parseConfirmationPatterns } from "../src/keep-awake.js";
 import type { KeepAwakeDefaults } from "../src/keep-awake.js";
 import type { ThreadSignals } from "../src/types.js";
 
@@ -36,7 +36,7 @@ function decide(input: {
   nudgeCount?: number;
   maxNudges?: number;
   deadlineAt?: number;
-  confirmation?: "status" | "text" | null;
+  awaitingConfirmation?: boolean;
   continueCount?: number;
   maxContinues?: number;
   lastContinueAt?: number | null;
@@ -51,7 +51,7 @@ function decide(input: {
     cooldownMs: COOLDOWN,
     maxNudges: input.maxNudges ?? 40,
     deadlineAt: input.deadlineAt ?? BASE + 3_600_000,
-    confirmation: input.confirmation ?? null,
+    awaitingConfirmation: input.awaitingConfirmation ?? false,
     continueCount: input.continueCount ?? 0,
     maxContinues: input.maxContinues ?? 10,
     lastContinueAt: input.lastContinueAt ?? null
@@ -385,19 +385,17 @@ function continueHarness(initial: ThreadSignals) {
   let current = initial;
   let clock = initial.serverNow;
   let tail = "";
-  let reads = 0;
   const sent: string[] = [];
   const store = new KeepAliveStore(null);
   const supervisor = new KeepAwakeSupervisor(store, {
     readSignals: async () => current,
     sendNudge: async (_conversationId, prompt) => { sent.push(prompt); },
-    readTail: async () => { reads += 1; return tail; },
+    readTail: async () => tail,
     now: () => clock
   }, CONTINUE_DEFAULTS);
   return {
     supervisor,
     sent,
-    readCount: (): number => reads,
     setTail(next: string): void { tail = next; },
     advance(next: ThreadSignals): void { current = next; clock = next.serverNow; }
   };
@@ -419,17 +417,17 @@ test("a step-limit confirmation is answered instead of ending the watch", () => 
   const decision = decide({
     now: BASE + 60_000,
     signals: signals({ updatedTime: BASE + 20_000, serverNow: BASE + 60_000, outcome: { status: "completed", completedTime: BASE + 20_000 } }),
-    confirmation: "text"
+    awaitingConfirmation: true
   });
-  assert.deepEqual(decision, { action: "continue", reason: "awaiting_confirmation", via: "text" });
+  assert.deepEqual(decision, { action: "continue", reason: "awaiting_confirmation" });
 });
 
 test("the confirmation answer waits out a grace window, its own cooldown and its own budget", () => {
-  const fresh = decide({ now: BASE + 5_000, signals: signals({ updatedTime: BASE + 2_000, serverNow: BASE + 5_000 }), confirmation: "text" });
+  const fresh = decide({ now: BASE + 5_000, signals: signals({ updatedTime: BASE + 2_000, serverNow: BASE + 5_000 }), awaitingConfirmation: true });
   assert.deepEqual(fresh, { action: "wait", reason: "confirm_grace" });
-  const cooling = decide({ now: BASE + 60_000, signals: signals({ updatedTime: BASE, serverNow: BASE + 60_000 }), confirmation: "text", lastContinueAt: BASE + 55_000 });
+  const cooling = decide({ now: BASE + 60_000, signals: signals({ updatedTime: BASE, serverNow: BASE + 60_000 }), awaitingConfirmation: true, lastContinueAt: BASE + 55_000 });
   assert.deepEqual(cooling, { action: "wait", reason: "cooldown" });
-  const spent = decide({ now: BASE + 60_000, signals: signals({ updatedTime: BASE, serverNow: BASE + 60_000 }), confirmation: "text", continueCount: 2, maxContinues: 2 });
+  const spent = decide({ now: BASE + 60_000, signals: signals({ updatedTime: BASE, serverNow: BASE + 60_000 }), awaitingConfirmation: true, continueCount: 2, maxContinues: 2 });
   assert.deepEqual(spent, { action: "stop", reason: "max_continues" });
 });
 
@@ -474,43 +472,4 @@ test("auto-continue can be switched off per watchdog", async () => {
   assert.equal(outcome.keepAlive?.stopReason, "turn_completed");
   assert.equal(box.sent.length, 0);
   box.supervisor.stopAll();
-});
-
-test("a parked turn status presses Continue without reading the transcript", async () => {
-  // pending_input lives only in the streamed transcript, so the status is what a watchdog gets: a
-  // turn waiting on the button is closed, but not as "completed".
-  const box = continueHarness(signals({ updatedTime: BASE, serverNow: BASE }));
-  const record = await box.supervisor.start({ conversationId: CONVERSATION });
-  box.setTail("31\u4ef6\u76ee: \u30c9\u30ad\u30e5\u30e1\u30f3\u30c8 / 50\u4ef6");
-  box.advance(signals({ updatedTime: BASE + 20_000, serverNow: BASE + 40_000, outcome: { status: "awaiting_user_input", completedTime: BASE + 20_000 } }));
-  const answered = await box.supervisor.tick(record.keepAliveId);
-  assert.deepEqual(answered.decision, { action: "continue", reason: "awaiting_confirmation", via: "status" });
-  assert.equal(answered.keepAlive?.continueCount, 1);
-  assert.equal(box.readCount(), 0);
-  box.supervisor.stopAll();
-});
-
-test("no button and no prompt still gets the ordinary stall nudge", async () => {
-  const box = continueHarness(signals({ updatedTime: BASE, serverNow: BASE }));
-  const record = await box.supervisor.start({ conversationId: CONVERSATION });
-  box.setTail("31\u4ef6\u76ee: \u30c9\u30ad\u30e5\u30e1\u30f3\u30c8 / 50\u4ef6");
-  // Frozen mid-task: no confirmation, no closing outcome, just silence past the idle window.
-  box.advance(signals({ updatedTime: BASE, serverNow: BASE + IDLE + 30_000 }));
-  const nudged = await box.supervisor.tick(record.keepAliveId);
-  assert.equal(nudged.decision.action, "nudge");
-  assert.equal(nudged.keepAlive?.nudgeCount, 1);
-  assert.equal(nudged.keepAlive?.continueCount, 0);
-  assert.match(box.sent[0] ?? "", /\[KEEP-AWAKE 1\/3\]/);
-  box.supervisor.stopAll();
-});
-
-test("statuses that mean finished or dead are not confirmations", () => {
-  assert.equal(isConfirmationStatus("completed"), false);
-  assert.equal(isConfirmationStatus("interrupted"), false);
-  assert.equal(isConfirmationStatus("failed"), false);
-  assert.equal(isConfirmationStatus(undefined), false);
-  assert.equal(isConfirmationStatus("awaiting_user_input"), true);
-  assert.equal(isConfirmationStatus("pending_confirmation"), true);
-  assert.equal(isConfirmationStatus("step_limit_reached"), true);
-  assert.equal(isConfirmationStatus("frobnicated", parseConfirmationStatuses("frobnicated, other")), true);
 });

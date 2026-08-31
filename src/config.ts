@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AccountContext } from "./types.js";
 import { defaultStateFilePath } from "./chat-jobs.js";
-import { DEFAULT_CONFIRM_GRACE_MS, DEFAULT_CONTINUE_COOLDOWN_MS, DEFAULT_MAX_CONTINUES, parseConfirmationPatterns, parseConfirmationStatuses, type KeepAwakeDefaults } from "./keep-awake.js";
+import { DEFAULT_CONFIRM_GRACE_MS, DEFAULT_CONTINUE_COOLDOWN_MS, DEFAULT_MAX_CONTINUES, parseConfirmationPatterns, type KeepAwakeDefaults } from "./keep-awake.js";
 
 export interface NotionConfig {
   apiBase: string;
@@ -108,8 +108,7 @@ export function loadConfig(): NotionConfig {
     maxContinues: integer("NOTION_KEEP_AWAKE_MAX_CONTINUES", DEFAULT_MAX_CONTINUES, 0, 100),
     continueCooldownMs: integer("NOTION_KEEP_AWAKE_CONTINUE_COOLDOWN_MS", DEFAULT_CONTINUE_COOLDOWN_MS, 0, 600_000),
     confirmGraceMs: integer("NOTION_KEEP_AWAKE_CONFIRM_GRACE_MS", DEFAULT_CONFIRM_GRACE_MS, 0, 600_000),
-    continuePatterns: parseConfirmationPatterns(process.env.NOTION_KEEP_AWAKE_CONTINUE_PATTERNS),
-    confirmStatuses: parseConfirmationStatuses(process.env.NOTION_KEEP_AWAKE_CONFIRM_STATUSES)
+    continuePatterns: parseConfirmationPatterns(process.env.NOTION_KEEP_AWAKE_CONTINUE_PATTERNS)
   };
   return {
     apiBase: optional("NOTION_API_BASE", "https://www.notion.so/api/v3").replace(/\/$/, ""),
