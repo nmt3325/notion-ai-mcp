@@ -1,4 +1,4 @@
-researched_at=2026-08-31T07:11:05Z
+researched_at=2026-08-31T09:06:24Z
 method=wget plus webpack-runtime dependency crawl
 
 == Fetch login and initial JavaScript assets ==
@@ -13,11 +13,11 @@ asset_host=www.notion.so asset_path=/_assets/66525-fd103ba126bd1f2f.js
 asset_host=www.notion.so asset_path=/_assets/8563-9e3514d19f7f9efe.js
 asset_host=www.notion.so asset_path=/_assets/86379-13d08e09628902af.js
 asset_host=www.notion.so asset_path=/_assets/87022-232a0a62575cae4f.js
-asset_host=www.notion.so asset_path=/_assets/93608-34da7e6ff26f21be.js
+asset_host=www.notion.so asset_path=/_assets/93608-ed146eca121a6814.js
 asset_host=www.notion.so asset_path=/_assets/ClientFramework-c9fe9bd23e5e8b6f.js
 asset_host=www.notion.so asset_path=/_assets/RecordMap-51e3b32fc61942f6.js
-asset_host=www.notion.so asset_path=/_assets/UISpacePermissionGroupToken-b0b0906c9935d512.js
-asset_host=www.notion.so asset_path=/_assets/app-1b3580476aef604c.js
+asset_host=www.notion.so asset_path=/_assets/UISpacePermissionGroupToken-0ac893954902a153.js
+asset_host=www.notion.so asset_path=/_assets/app-c2ae84225eec8e32.js
 asset_host=www.notion.so asset_path=/_assets/contentPreview-b4d956be00566486.js
 downloaded_initial_count=15
 downloaded_initial_bytes=5853778
