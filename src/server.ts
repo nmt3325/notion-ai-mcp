@@ -111,6 +111,13 @@ export function createKeepAwakeSupervisor(client: NotionClient): KeepAwakeSuperv
     {
       readSignals: (conversationId) => client.threadSignals(conversationId),
       sendNudge: async (conversationId, prompt) => { await client.startChat({ prompt, conversationId }); },
+      // Notion's step-limit prompt is an ordinary assistant step, so the newest user-visible message
+      // is where the watchdog sees it. One page is enough: only the tail can be the pause.
+      readTail: async (conversationId) => {
+        const conversation = await client.getConversation(conversationId, 1);
+        const last = conversation.messages.at(-1);
+        return last && last.role === "assistant" ? last.text : "";
+      },
       interrupt: async (conversationId) => (await client.interruptTurn(conversationId)).cleared
     },
     client.keepAwakeDefaults()
@@ -216,6 +223,7 @@ export function createServer(client: NotionClient, shared?: { keepAwake?: KeepAw
       "Watch a Notion AI conversation and re-send a short continuation message whenever its turn stops without finishing.",
       "The heartbeat is the thread updated_time, which equals the created_time of the newest step.",
       "A frozen heartbeat alone is ambiguous, so a turn whose last_turn_outcome closed as completed at or after registration ends the watch instead of being nudged; only a freeze with no matching completion is treated as a dead turn.",
+      "A turn that stopped on Notion's own step-limit prompt (\"This task is taking a lot of steps. Please confirm you want the agent to keep going.\") is answered with a short Continue message instead of a nudge, which is what the web client's Continue button does; those answers have their own budget, maxContinues.",
       "Call this from inside the long task that needs protecting and pass that same conversation id, then keep working. Every nudge is a real turn and costs credits, so the budget and the deadline always apply."
     ].join(" "),
     inputSchema: {
@@ -225,6 +233,8 @@ export function createServer(client: NotionClient, shared?: { keepAwake?: KeepAw
       cooldownSeconds: z.number().int().min(0).max(1800).optional().describe(`Minimum gap between two nudges, so a nudge has time to land. Default ${seconds(keepAwakeSettings.cooldownMs)}s.`),
       maxNudges: z.number().int().min(1).max(500).optional().describe(`Hard cap on nudges before the watch gives up. Default ${keepAwakeSettings.maxNudges}.`),
       deadlineMinutes: z.number().int().min(1).max(1440).optional().describe(`Absolute end of the watch regardless of activity. Default ${Math.round(keepAwakeSettings.deadlineMs / 60000)} minutes.`),
+      autoContinue: z.boolean().optional().describe(`Answer Notion's "This task is taking a lot of steps" prompt automatically, like pressing Continue. Default ${keepAwakeSettings.autoContinue === false ? "off" : "on"}.`),
+      maxContinues: z.number().int().min(0).max(100).optional().describe(`Hard cap on those Continue answers, counted apart from nudges. Default ${keepAwakeSettings.maxContinues ?? 10}.`),
       language: z.enum(["ja", "en"]).optional().describe("Language of the built-in nudge text. Default ja."),
       doneToken: z.string().min(3).max(64).optional().describe("Token the watched chat can reply with to report that the task is finished. It is quoted in every nudge."),
       message: z.string().min(1).max(2000).optional().describe("Replaces the built-in nudge body. The [KEEP-AWAKE n/max] tag is still prepended.")
@@ -238,11 +248,16 @@ export function createServer(client: NotionClient, shared?: { keepAwake?: KeepAw
       ...(input.cooldownSeconds === undefined ? {} : { cooldownMs: input.cooldownSeconds * 1000 }),
       ...(input.maxNudges === undefined ? {} : { maxNudges: input.maxNudges }),
       ...(input.deadlineMinutes === undefined ? {} : { deadlineMs: input.deadlineMinutes * 60000 }),
+      ...(input.autoContinue === undefined ? {} : { autoContinue: input.autoContinue }),
+      ...(input.maxContinues === undefined ? {} : { maxContinues: input.maxContinues }),
       ...(input.language ? { language: input.language } : {}),
       ...(input.doneToken ? { doneToken: input.doneToken } : {}),
       ...(input.message ? { message: input.message } : {})
     });
-    return result(record, `Watching ${record.conversationId}. Nudges after ${seconds(record.idleMs)}s of silence, at most ${record.maxNudges} times, until ${new Date(record.deadlineAt).toISOString()}. Stop it with stop_keep_me_awake and keepAliveId ${record.keepAliveId}.`);
+    const continues = record.autoContinue === false
+      ? "Step-limit confirmation prompts are left for you to answer."
+      : `Step-limit confirmation prompts are answered with Continue at most ${record.maxContinues ?? 10} times.`;
+    return result(record, `Watching ${record.conversationId}. Nudges after ${seconds(record.idleMs)}s of silence, at most ${record.maxNudges} times, until ${new Date(record.deadlineAt).toISOString()}. ${continues} Stop it with stop_keep_me_awake and keepAliveId ${record.keepAliveId}.`);
   });
 
   server.registerTool("interrupt_conversation", {

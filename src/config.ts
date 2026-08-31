@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AccountContext } from "./types.js";
 import { defaultStateFilePath } from "./chat-jobs.js";
+import { DEFAULT_CONFIRM_GRACE_MS, DEFAULT_CONTINUE_COOLDOWN_MS, DEFAULT_MAX_CONTINUES, parseConfirmationPatterns, type KeepAwakeDefaults } from "./keep-awake.js";
 
 export interface NotionConfig {
   apiBase: string;
@@ -29,7 +30,7 @@ export interface NotionConfig {
   /** Registry of keep-awake watchdogs. Undefined disables persistence. */
   keepAliveFilePath?: string | undefined;
   /** Defaults for keep_me_awake. */
-  keepAwake: { interrupt: boolean; idleMs: number; pollMs: number; cooldownMs: number; maxNudges: number; deadlineMs: number; enabled: boolean };
+  keepAwake: KeepAwakeDefaults;
 }
 
 function optional(name: string, fallback = ""): string {
@@ -99,7 +100,15 @@ export function loadConfig(): NotionConfig {
     maxNudges: integer("NOTION_KEEP_AWAKE_MAX_NUDGES", 40, 1, 500),
     deadlineMs: integer("NOTION_KEEP_AWAKE_DEADLINE_MS", 3 * 60 * 60 * 1000, 60_000, 24 * 60 * 60 * 1000),
     enabled: flag("NOTION_KEEP_AWAKE", true),
-    interrupt: flag("NOTION_KEEP_AWAKE_INTERRUPT", true)
+    interrupt: flag("NOTION_KEEP_AWAKE_INTERRUPT", true),
+    // Notion pauses a long agent turn with "This task is taking a lot of steps" and waits for a
+    // Continue click. Answering it is the same continuation the watchdog already does for a dead
+    // turn, so it is on by default and capped separately from nudges.
+    autoContinue: flag("NOTION_KEEP_AWAKE_AUTO_CONTINUE", true),
+    maxContinues: integer("NOTION_KEEP_AWAKE_MAX_CONTINUES", DEFAULT_MAX_CONTINUES, 0, 100),
+    continueCooldownMs: integer("NOTION_KEEP_AWAKE_CONTINUE_COOLDOWN_MS", DEFAULT_CONTINUE_COOLDOWN_MS, 0, 600_000),
+    confirmGraceMs: integer("NOTION_KEEP_AWAKE_CONFIRM_GRACE_MS", DEFAULT_CONFIRM_GRACE_MS, 0, 600_000),
+    continuePatterns: parseConfirmationPatterns(process.env.NOTION_KEEP_AWAKE_CONTINUE_PATTERNS)
   };
   return {
     apiBase: optional("NOTION_API_BASE", "https://www.notion.so/api/v3").replace(/\/$/, ""),

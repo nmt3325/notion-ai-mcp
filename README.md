@@ -360,6 +360,10 @@ Notion AI は長いタスクの途中でターンを閉じずに止まること�
 
 ロックされた thread へのナッジはそのままでは拒否されるため、lease を握ったまま止まっているターンに対しては送信の直前に自動で中断を行います（`NOTION_KEEP_AWAKE_INTERRUPT=0` で無効化）。送信が空ストリームで拒否された場合も、中断して1度だけ再送します。拒否されたナッジは step を残さないので、再送で作業が二重になることはありません。
 
+Notion 自体が長いエージェントターンを途中で止めて `This task is taking a lot of steps. Please confirm you want the agent to keep going.` と表示し、Continue クリックを待つことがあります。この停止は `last_turn_outcome` が閉じた形で記録されるため、以前は見張りが「正常終了」と判定して監視を終了していました。現在は最新ステップの本文がこの確認プロンプトと一致した場合だけ、`[KEEP-AWAKE CONTINUE n/max]` の短い承認メッセージを自動送信します（Web の Continue ボタン相当）。本文は「承認だけ」で、新しい指示を与えないことを明記します。判定はターンが閉じたか治まったときだけ行い、生成中のスレッドを追加で読みに行きません。
+
+Continue の回数はナッジ予算とは別カウンタで、既定は最大 10 回・クールダウン 15 秒・プロンプト書き込みから 10 秒の猟予後に送信します。`keep_me_awake` の `autoContinue: false` で監視単位に無効化でき、`maxContinues` で上限を変えられます。既定値は `NOTION_KEEP_AWAKE_AUTO_CONTINUE` / `NOTION_KEEP_AWAKE_MAX_CONTINUES` / `NOTION_KEEP_AWAKE_CONTINUE_COOLDOWN_MS` / `NOTION_KEEP_AWAKE_CONFIRM_GRACE_MS`、文言が将来変わった場合の追加パターンは `NOTION_KEEP_AWAKE_CONTINUE_PATTERNS`（1行1パターン、大文字小文字無視）で調整します。
+
 ### `interrupt_conversation`
 
 Notion は生成中のターンについて thread に `current_inference_id` を立て、その間の追加送信を HTTP 200 のまま空ストリームで拒否します。生成が途中で死んでも lease は残るので、止まったチャットは「送信して起こす」ことすらできません。`interrupt_conversation` は Web クライアントの停止ボタンが永続化しているのと同じ状態変更（`current_inference_id` と `current_inference_lease_expiration` の null 化）だけを行い、thread を再び受信可能にします。専用の停止 endpoint は存在しません。
