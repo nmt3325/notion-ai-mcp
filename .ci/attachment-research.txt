@@ -1,8 +1,8 @@
-researched_at=2026-08-31T03:56:18Z
+researched_at=2026-08-31T04:08:50Z
 method=wget plus webpack-runtime dependency crawl
 
 == Fetch login and initial JavaScript assets ==
-login_bytes=20032
+login_bytes=20035
 initial_asset_count=15
 asset_host=transcend-cdn.com asset_path=/cm/4d6a6beb-faf4-4a4e-9e1c-c7692d5f9c2f/airgap.js
 asset_host=www.notion.so asset_path=/_assets/10512-d06fbb63a3c48f72.js
@@ -13,11 +13,11 @@ asset_host=www.notion.so asset_path=/_assets/66525-fd103ba126bd1f2f.js
 asset_host=www.notion.so asset_path=/_assets/8563-9e3514d19f7f9efe.js
 asset_host=www.notion.so asset_path=/_assets/86379-13d08e09628902af.js
 asset_host=www.notion.so asset_path=/_assets/87022-232a0a62575cae4f.js
-asset_host=www.notion.so asset_path=/_assets/93608-7cf2974149b0ffc8.js
+asset_host=www.notion.so asset_path=/_assets/93608-3839f0f7f1a6320c.js
 asset_host=www.notion.so asset_path=/_assets/ClientFramework-c9fe9bd23e5e8b6f.js
 asset_host=www.notion.so asset_path=/_assets/RecordMap-51e3b32fc61942f6.js
 asset_host=www.notion.so asset_path=/_assets/UISpacePermissionGroupToken-d874a7d2784959ac.js
-asset_host=www.notion.so asset_path=/_assets/app-f8543f9c16796dd2.js
+asset_host=www.notion.so asset_path=/_assets/app-e9655e7893678c05.js
 asset_host=www.notion.so asset_path=/_assets/contentPreview-b4d956be00566486.js
 downloaded_initial_count=15
 downloaded_initial_bytes=5853799
