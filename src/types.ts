@@ -38,6 +38,16 @@ export interface ThreadSignals { threadId:string; updatedTime:number|null; serve
   leaseExpiration: number | null;
 }
 
+/**
+ * The shape of the step a closed turn ended on.
+ *
+ * Notion writes last_turn_outcome.status = "completed" even when it stopped the turn on its own
+ * step-limit prompt, and that prompt is drawn from the live stream and never stored as a step, so
+ * the status alone cannot tell a finished answer from a turn that was cut off. A real answer ends on
+ * an agent-inference step carrying text; a cut-off turn ends on a tool call still marked streaming.
+ */
+export interface FinalStepShape { stepId:string; type:string; state:string; hasAnswerText:boolean; finishedAt:number|null }
+
 export interface InterruptResult {
   threadId: string;
   cleared: boolean;

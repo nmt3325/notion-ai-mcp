@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { KeepAlive, KeepAliveStatus, ThreadSignals } from "./types.js";
+import type { FinalStepShape, KeepAlive, KeepAliveStatus, ThreadSignals } from "./types.js";
 
 export const KEEP_ALIVE_STATE_VERSION = 1;
 
@@ -18,6 +18,13 @@ export const FINISHED_KEEP_ALIVE_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_MAX_CONTINUES = 10;
 export const DEFAULT_CONTINUE_COOLDOWN_MS = 15_000;
 export const DEFAULT_CONFIRM_GRACE_MS = 10_000;
+
+/**
+ * Step count above which a closed-but-unfinished turn reads as Notion's step limit rather than a
+ * crash. Measured on live threads: the turn that stopped on the prompt closed at 2992 steps, an
+ * ordinary finish at 99.
+ */
+export const DEFAULT_STEP_LIMIT_STEPS = 2_000;
 
 export type LeaseState = "free" | "held" | "stale";
 
@@ -74,46 +81,26 @@ export function parseConfirmationPatterns(raw: string | undefined): RegExp[] {
 }
 
 /**
- * Turn statuses that mean Notion is waiting for the user rather than working or finished.
+ * True when a closed turn did not end on an answer.
  *
- * The Continue button is drawn by the client and the `pending_input` behind it exists only inside a
- * streamed transcript, so a watchdog polling the thread record cannot see the button itself. What it
- * can see is how the turn closed, and a turn parked on that button does not close as "completed" --
- * the same condition the button renders on. Matched as substrings because the wording belongs to
- * Notion; add to it with NOTION_KEEP_AWAKE_CONFIRM_STATUSES instead of patching this list.
+ * The step-limit prompt is never written to the thread, so the only durable trace of a turn Notion
+ * stopped is the step it ended on: a finished answer is an agent-inference step carrying text, while
+ * a turn that was cut off ends on a tool call that is still marked streaming.
  */
-const CONFIRMATION_STATUSES: readonly string[] = [
-  "pending",
-  "await",
-  "confirm",
-  "pause",
-  "user_input",
-  "needs_input",
-  "requires_input",
-  "step_limit",
-  "max_steps",
-  "blocked"
-];
-
-export function isConfirmationStatus(status: string | undefined, extra: readonly string[] = []): boolean {
-  const value = (status ?? "").trim().toLowerCase();
-  // "completed" is a finished turn and "interrupted" is this watchdog's own stop button; neither is
-  // a question waiting for an answer.
-  if (!value || value === "completed" || value === "interrupted") return false;
-  return [...CONFIRMATION_STATUSES, ...extra].some((candidate) => value.includes(candidate));
+export function isUnfinishedFinalStep(shape: FinalStepShape | null | undefined): boolean {
+  if (!shape) return false;
+  return !shape.hasAnswerText;
 }
 
-/** Extra turn statuses to treat as "waiting for the user", comma or whitespace separated. */
-export function parseConfirmationStatuses(raw: string | undefined): string[] {
-  return (raw ?? "").split(/[\s,]+/).map((part) => part.trim().toLowerCase()).filter(Boolean);
+/** True when an unfinished close ran long enough to be the step limit rather than an early death. */
+export function isStepLimitStop(shape: FinalStepShape | null | undefined, stepCount: number | null, threshold = DEFAULT_STEP_LIMIT_STEPS): boolean {
+  if (!isUnfinishedFinalStep(shape)) return false;
+  return stepCount !== null && stepCount >= threshold;
 }
-
-/** Whether the pause was recognised from the turn status Notion left behind or from the prompt text. */
-export type ConfirmationSource = "status" | "text";
 
 export type KeepAwakeDecision =
   | { action: "wait"; reason: "healthy" | "cooldown" | "signals_unavailable" | "confirm_grace" }
-  | { action: "continue"; reason: "awaiting_confirmation"; via: ConfirmationSource }
+  | { action: "continue"; reason: "awaiting_confirmation" }
   | { action: "nudge"; reason: "stalled"; idleMs: number }
   | { action: "stop"; reason: "turn_completed" | "max_nudges" | "max_continues" | "deadline" };
 
@@ -127,12 +114,10 @@ export interface KeepAwakeDecisionInput {
   cooldownMs: number;
   maxNudges: number;
   deadlineAt: number;
-  /**
-   * How a waiting Continue button was recognised, if one is waiting at all: from the turn status or
-   * from the newest step being the step-limit prompt. Null means no button, so the ordinary stall
-   * rules below decide whether to nudge.
-   */
-  confirmation?: ConfirmationSource | null | undefined;
+  /** The newest step is Notion's step-limit prompt, so the turn is one confirmation from resuming. */
+  awaitingConfirmation?: boolean | undefined;
+  /** False when the closed turn did not end on an answer, so the completion must not stop the watch. */
+  completionIsAnswer?: boolean | undefined;
   continueCount?: number | undefined;
   maxContinues?: number | undefined;
   lastContinueAt?: number | null | undefined;
@@ -155,7 +140,7 @@ export function decideKeepAwake(input: KeepAwakeDecisionInput): KeepAwakeDecisio
 
   // Notion closes the turn when it asks to keep going, so this has to be checked before the
   // completion rule: otherwise the watch ends on the prompt and nobody ever presses Continue.
-  if (input.confirmation) {
+  if (input.awaitingConfirmation) {
     const maxContinues = input.maxContinues ?? DEFAULT_MAX_CONTINUES;
     if ((input.continueCount ?? 0) >= maxContinues) return { action: "stop", reason: "max_continues" };
     const lastContinueAt = input.lastContinueAt ?? null;
@@ -165,11 +150,13 @@ export function decideKeepAwake(input: KeepAwakeDecisionInput): KeepAwakeDecisio
     const confirmGraceMs = input.confirmGraceMs ?? DEFAULT_CONFIRM_GRACE_MS;
     // The prompt is written as a step, so a short grace keeps the answer from racing the rest of it.
     if (writtenAt !== null && input.now - writtenAt < confirmGraceMs) return { action: "wait", reason: "confirm_grace" };
-    return { action: "continue", reason: "awaiting_confirmation", via: input.confirmation };
+    return { action: "continue", reason: "awaiting_confirmation" };
   }
 
   const outcome = input.signals.lastTurnOutcome;
-  if (outcome && outcome.status === "completed" && outcome.completedTime !== null && outcome.completedTime >= input.anchorTime) {
+  // Notion stamps "completed" on a turn it stopped itself, so a completion that did not end on an
+  // answer is not a finish at all: it is a dead turn that still needs continuing.
+  if (outcome && outcome.status === "completed" && outcome.completedTime !== null && outcome.completedTime >= input.anchorTime && input.completionIsAnswer !== false) {
     return { action: "stop", reason: "turn_completed" };
   }
 
@@ -488,6 +475,8 @@ export interface KeepAwakeRuntime {
   sendNudge: (conversationId: string, prompt: string) => Promise<void>;
   /** Newest user-visible text on the thread, used to spot Notion's step-limit prompt. */
   readTail?: ((conversationId: string) => Promise<string>) | undefined;
+  /** Shape of the step a closed turn ended on: the durable half of the web client's Continue prompt. */
+  readFinalStep?: ((conversationId: string, stepId: string) => Promise<FinalStepShape | null>) | undefined;
   /** Clears the thread's inference lease. Resolves true when a lease was actually cleared. */
   interrupt?: ((conversationId: string) => Promise<boolean>) | undefined;
   now?: (() => number) | undefined;
@@ -508,7 +497,7 @@ export interface KeepAwakeDefaults {
   continueCooldownMs?: number | undefined;
   confirmGraceMs?: number | undefined;
   continuePatterns?: readonly RegExp[] | undefined;
-  confirmStatuses?: readonly string[] | undefined;
+  stepLimitSteps?: number | undefined;
 }
 
 const STOP_STATUS: Record<"turn_completed" | "max_nudges" | "max_continues" | "deadline", KeepAliveStatus> = {
@@ -583,6 +572,7 @@ export class KeepAwakeSupervisor {
     // disagree about which turn they describe.
     const now = signals ? signals.serverNow : this.now();
     this.store.noteCheck(keepAliveId, now, signals?.updatedTime ?? null, failure || undefined);
+    const probe = await this.inspectCompletion(record, signals, now);
     const decision = decideKeepAwake({
       now,
       anchorTime: record.anchorTime,
@@ -593,7 +583,8 @@ export class KeepAwakeSupervisor {
       cooldownMs: record.cooldownMs,
       maxNudges: record.maxNudges,
       deadlineAt: record.deadlineAt,
-      confirmation: await this.detectConfirmation(record, signals, now),
+      awaitingConfirmation: probe.awaitingConfirmation,
+      completionIsAnswer: probe.completionIsAnswer,
       continueCount: record.continueCount ?? 0,
       maxContinues: record.maxContinues ?? DEFAULT_MAX_CONTINUES,
       lastContinueAt: record.lastContinueAt ?? null,
@@ -727,26 +718,36 @@ export class KeepAwakeSupervisor {
    * sitting on a confirmation prompt, so probing the transcript then would double the traffic for
    * nothing.
    */
-  private async detectConfirmation(record: KeepAlive, signals: ThreadSignals | null, now: number): Promise<ConfirmationSource | null> {
-    if (!signals) return null;
-    if (record.autoContinue === false || this.defaults.autoContinue === false) return null;
+  private async inspectCompletion(record: KeepAlive, signals: ThreadSignals | null, now: number): Promise<{ awaitingConfirmation: boolean; completionIsAnswer: boolean }> {
+    // Nothing learned means nothing changes: the watch keeps behaving exactly as it did before.
+    const inconclusive = { awaitingConfirmation: false, completionIsAnswer: true };
+    if (!signals) return inconclusive;
+    if (record.autoContinue === false || this.defaults.autoContinue === false) return inconclusive;
     const outcome = signals.lastTurnOutcome;
-    const closed = outcome !== null && outcome.completedTime !== null && outcome.completedTime >= record.anchorTime;
-    const silentFor = signals.updatedTime === null ? 0 : now - signals.updatedTime;
-    // A turn parked on the button is this turn's outcome and it is not "completed". That status is
-    // the cheapest evidence there is: unlike the prompt text it needs no extra request. A parked
-    // turn that stamped no completion is trusted only once it is as quiet as a stall, so a stale
-    // status from an earlier turn can never interrupt one that is still working.
-    const parked = closed || (outcome !== null && outcome.completedTime === null && silentFor >= record.idleMs);
-    if (parked && isConfirmationStatus(outcome?.status, this.defaults.confirmStatuses ?? [])) return "status";
-    if (!this.runtime.readTail) return null;
-    if (!closed && silentFor < (this.defaults.confirmGraceMs ?? DEFAULT_CONFIRM_GRACE_MS)) return null;
+    const closed = Boolean(outcome && outcome.completedTime !== null && outcome.completedTime >= record.anchorTime);
+    const confirmGraceMs = this.defaults.confirmGraceMs ?? DEFAULT_CONFIRM_GRACE_MS;
+    const quiet = signals.updatedTime !== null && now - signals.updatedTime >= confirmGraceMs;
+    if (!closed && !quiet) return inconclusive;
+    // Kept as insurance. If Notion ever does write the prompt into the thread, matching the text is
+    // the most direct evidence available, and it costs one transcript page.
+    if (this.runtime.readTail) {
+      try {
+        if (isStepLimitConfirmation(await this.runtime.readTail(record.conversationId), this.defaults.continuePatterns ?? [])) {
+          return { awaitingConfirmation: true, completionIsAnswer: false };
+        }
+      } catch {
+        // A failed transcript read is not evidence of anything; the next poll tries again.
+      }
+    }
+    if (!closed || !this.runtime.readFinalStep || !outcome?.finalStepId) return inconclusive;
     try {
-      const tail = await this.runtime.readTail(record.conversationId);
-      return isStepLimitConfirmation(tail, this.defaults.continuePatterns ?? []) ? "text" : null;
+      const shape = await this.runtime.readFinalStep(record.conversationId, outcome.finalStepId);
+      if (!isUnfinishedFinalStep(shape)) return inconclusive;
+      // Unfinished either way, so the watch must not stop; the step count only decides whether the
+      // answer is a Continue click or an ordinary nudge.
+      return { awaitingConfirmation: isStepLimitStop(shape, outcome.stepCount, this.defaults.stepLimitSteps ?? DEFAULT_STEP_LIMIT_STEPS), completionIsAnswer: false };
     } catch {
-      // A failed transcript read is not evidence of anything; the next poll tries again.
-      return null;
+      return inconclusive;
     }
   }
 

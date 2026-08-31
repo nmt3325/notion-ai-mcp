@@ -360,9 +360,22 @@ Notion AI は長いタスクの途中でターンを閉じずに止まること�
 
 ロックされた thread へのナッジはそのままでは拒否されるため、lease を握ったまま止まっているターンに対しては送信の直前に自動で中断を行います（`NOTION_KEEP_AWAKE_INTERRUPT=0` で無効化）。送信が空ストリームで拒否された場合も、中断して1度だけ再送します。拒否されたナッジは step を残さないので、再送で作業が二重になることはありません。
 
-Notion 自体が長いエージェントターンを途中で止めて `This task is taking a lot of steps. Please confirm you want the agent to keep going.` と表示し、Continue クリックを待つことがあります。この停止は `last_turn_outcome` が閉じた形で記録されるため、以前は見張りが「正常終了」と判定して監視を終了していました。Continue ボタンはクライアント描画で、実体の `pending_input` はストリームされる transcript の中にしかないため、thread レコードをポーリングする見張りからはボタンそのものが見えません。そこで「ターンの終了ステータスが completed 以外で閉じている（≒ボタン待ち）」を第一信号、「最新ステップの本文が確認プロンプトと一致」を第二信号として使います。どちらかを満たしたときだけ `[KEEP-AWAKE CONTINUE n/max]` の短い承認メッセージを自動送信します（Web の Continue ボタン相当）。ステータス判定は thread レコードだけで済むので追加リクエストゼロです。ボタンが出ていない場合は従来の4条件のままで、沈黙が閾値を超えたときにナッジします。本文は「承認だけ」で、新しい指示を与えないことを明記します。判定はターンが閉じたか治まったときだけ行い、生成中のスレッドを追加で読みに行きません。
+Notion 自体が長いエージェントターンを途中で止めて `This task is taking a lot of steps. Please confirm you want the agent to keep going.` と表示し、Continue クリックを待つことがあります。この停止は `last_turn_outcome` が閉じた形で記録されるため、以前は見張りが「正常終了」と判定して監視を終了していました。現在はこの停止をレコードの形から見分けて、`[KEEP-AWAKE CONTINUE n/max]` の短い承認メッセージを自動送信します（Web の Continue ボタン相当）。本文は「承認だけ」で、新しい指示を与えないことを明記します。判定はターンが閉じたか治まったときだけ行い、生成中のスレッドを追加で読みに行きません。
 
-Continue の回数はナッジ予算とは別カウンタで、既定は最大 10 回・クールダウン 15 秒・プロンプト書き込みから 10 秒の猟予後に送信します。`keep_me_awake` の `autoContinue: false` で監視単位に無効化でき、`maxContinues` で上限を変えられます。既定値は `NOTION_KEEP_AWAKE_AUTO_CONTINUE` / `NOTION_KEEP_AWAKE_MAX_CONTINUES` / `NOTION_KEEP_AWAKE_CONTINUE_COOLDOWN_MS` / `NOTION_KEEP_AWAKE_CONFIRM_GRACE_MS`、文言やステータス名が将来変わった場合の追加は `NOTION_KEEP_AWAKE_CONTINUE_PATTERNS`（1行1パターン、大文字小文字無視）と `NOTION_KEEP_AWAKE_CONFIRM_STATUSES`（カンマ区切りのステータス名）で調整します。
+Continue の回数はナッジ予算とは別カウンタで、既定は最大 10 回・クールダウン 15 秒・プロンプト書き込みから 10 秒の猟予後に送信します。`keep_me_awake` の `autoContinue: false` で監視単位に無効化でき、`maxContinues` で上限を変えられます。既定値は `NOTION_KEEP_AWAKE_AUTO_CONTINUE` / `NOTION_KEEP_AWAKE_MAX_CONTINUES` / `NOTION_KEEP_AWAKE_CONTINUE_COOLDOWN_MS` / `NOTION_KEEP_AWAKE_CONFIRM_GRACE_MS`、文言が将来変わった場合の追加パターンは `NOTION_KEEP_AWAKE_CONTINUE_PATTERNS`（1行1パターン、大文字小文字無視）で調整します。
+
+検知はプロンプトの文言一致ではなくスレッドレコードの形で行います。Notion はこの確認プロンプトを SSE の `pending_input` としてクライアントに送るだけで、ステップとしては保存しません（実測: 該当スレッドの全ステップを走査しても文言は AI の thinking 内の自己言及 1 件のみで、`thread` レコードには存在しない）。そのため文言一致だけでは実機で発火しません。
+
+代わりに、ターンが `last_turn_outcome.status = completed` で閉じているのに最終ステップ（`final_step_id`）が答えで終わっていない場合を「止まったターン」と判定します。答えを返したターンは必ずテキストを持つ `agent-inference` ステップで終わり、途中で止められたターンは `state: "streaming"` のままのツール呼び出しで終わります。実測値は次のとおりです。
+
+| ターン | status | step_count | 最終ステップ |
+| --- | --- | --- | --- |
+| ステップ上限で停止 | completed | 2992 | `agent-tool-result` / streaming / テキストなし |
+| 通常完走 | completed | 99 | `agent-inference` / テキストあり |
+
+未完で閉じたターンは、`step_count` が `NOTION_KEEP_AWAKE_STEP_LIMIT_STEPS`（既定 2000）以上ならステップ上限と見て Continue を送り、それ未満なら早死にと見て通常のナッジを送ります。どちらの場合も `completed` を完走扱いにせず監視を続けます。文言一致は、将来 Notion がプロンプトを本文に書き込むようになった場合の保険として残しています。
+
+最終ステップの読み取りは 1 レコードの追加取得で、しかも監視対象が沈黙したときだけ実行するので、ポーリング 1 回分とほぼ同じコストです。
 
 ### `interrupt_conversation`
 
