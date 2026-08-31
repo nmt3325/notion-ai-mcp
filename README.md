@@ -9,6 +9,7 @@ stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion 
 - `get_chat_result`: 待機打ち切り後・タイムアウト後の回答を job または thread 本文から回収する
 - `list_chat_jobs`: バックグラウンドで走らせた chat job の状態・conversationId を一覧する
 - `keep_me_awake`: 長いタスクの途中で止まったターンを検知して継続を促す短いメッセージを自動送信する
+- `interrupt_conversation`: thread が握ったままの inference lease を解除して、稼動中扱いで拒否される送信を通す
 - `list_conversations`: Notion AI の workflow/chat thread をページング取得する
 - `get_conversation`: 指定 thread の user-visible な user/assistant メッセージを取得する
 - `rename_conversation`: active workspace内のthreadを検証してタイトル変更する
@@ -357,6 +358,16 @@ Notion AI は長いタスクの途中でターンを閉じずに止まること�
 
 既定値は `NOTION_KEEP_AWAKE_*` で変えられ、`NOTION_KEEP_AWAKE=0` で機能ごと無効化できます。
 
+ロックされた thread へのナッジはそのままでは拒否されるため、lease を握ったまま止まっているターンに対しては送信の直前に自動で中断を行います（`NOTION_KEEP_AWAKE_INTERRUPT=0` で無効化）。送信が空ストリームで拒否された場合も、中断して1度だけ再送します。拒否されたナッジは step を残さないので、再送で作業が二重になることはありません。
+
+### `interrupt_conversation`
+
+Notion は生成中のターンについて thread に `current_inference_id` を立て、その間の追加送信を HTTP 200 のまま空ストリームで拒否します。生成が途中で死んでも lease は残るので、止まったチャットは「送信して起こす」ことすらできません。`interrupt_conversation` は Web クライアントの停止ボタンが永続化しているのと同じ状態変更（`current_inference_id` と `current_inference_lease_expiration` の null 化）だけを行い、thread を再び受信可能にします。専用の停止 endpoint は存在しません。
+
+2026-08-31 の実アカウント検証では、生成中の thread（`current_inference_id` あり）で解除に成功し、直後の同一 thread への送信が拒否されず通ることを確認しました。
+
+まだ書き続けているターンを中断すると残りの出力は失われるため、迷ったら先に `get_conversation` で状況を読んでください。
+
 ## ツール注釈（annotations）
 
 全23ツールが MCP の tool annotations（`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`）を明示的に宣言します。MCP 仕様の既定値は `readOnlyHint: false` / `destructiveHint: true` / `openWorldHint: true` なので、注釈を省いたツールはクライアントから「書き込み・破壊的」と解釈されます。Notion AI は read tool と write tool の2グループしか持たず（`runReadToolsAutomatically` / `runWriteToolsAutomatically`）、その分類は実質 `readOnlyHint` だけで決まるため、読み取り専用ツールに `readOnlyHint: true` を明示しないと delete 系と区別されません。
@@ -365,7 +376,7 @@ Notion AI は長いタスクの途中でターンを閉じずに止まること�
 | --- | --- | --- |
 | 読み取り専用 | `get_chat_result` `list_chat_jobs` `list_conversations` `get_conversation` `list_workspaces` `get_current_workspace` `list_mcp_connections` `get_mcp_connection_status` `check_mcp_oauth_support` `list_preconfigured_mcp_servers` | `readOnlyHint: true` / `destructiveHint: false` / `idempotentHint: true` |
 | 追加のみの書き込み | `upload_attachment` `switch_workspace` `create_workspace` `add_mcp_connection` `start_mcp_oauth` `complete_mcp_oauth` `connect_preconfigured_mcp_server` | `readOnlyHint: false` / `destructiveHint: false` |
-| 破壊的 | `notion_ai_chat` `download_attachment` `rename_conversation` `update_mcp_connection` `remove_mcp_connection` `delete_conversation` | `readOnlyHint: false` / `destructiveHint: true` |
+| 破壊的 | `notion_ai_chat` `interrupt_conversation` `download_attachment` `rename_conversation` `update_mcp_connection` `remove_mcp_connection` `delete_conversation` | `readOnlyHint: false` / `destructiveHint: true` |
 
 - `notion_ai_chat` は Agent mode（`readOnly: false`）でワークスペースを編集・削除できるため破壊的に分類しています。読み取りだけで使う場合は `readOnly: true` を渡してください。
 - `download_attachment` は `overwrite: true` でローカルファイルを上書きできるため破壊的です。

@@ -106,7 +106,8 @@ export function createServer(client: NotionClient): McpServer {
     new KeepAliveStore(client.keepAliveStatePath()),
     {
       readSignals: (conversationId) => client.threadSignals(conversationId),
-      sendNudge: async (conversationId, prompt) => { await client.startChat({ prompt, conversationId }); }
+      sendNudge: async (conversationId, prompt) => { await client.startChat({ prompt, conversationId }); },
+      interrupt: async (conversationId) => (await client.interruptTurn(conversationId)).cleared
     },
     keepAwakeSettings
   );
@@ -231,6 +232,18 @@ export function createServer(client: NotionClient): McpServer {
       ...(input.message ? { message: input.message } : {})
     });
     return result(record, `Watching ${record.conversationId}. Nudges after ${seconds(record.idleMs)}s of silence, at most ${record.maxNudges} times, until ${new Date(record.deadlineAt).toISOString()}. Stop it with stop_keep_me_awake and keepAliveId ${record.keepAliveId}.`);
+  });
+
+  server.registerTool("interrupt_conversation", {
+    title: "Interrupt a Notion AI turn",
+    description: "Clear the inference lease Notion holds on a thread while a turn runs, so the thread accepts a new message again. A send against a leased thread comes back as an empty stream, which is exactly what a turn that died mid-generation leaves behind, and this persists the same state change as the web client's stop button. Interrupting a turn that is still writing abandons the rest of its output, so read the thread first when in doubt.",
+    inputSchema: { conversationId: z.string().uuid() },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }
+  }, async ({ conversationId }) => {
+    const outcome = await client.interruptTurn(conversationId);
+    return result(outcome, outcome.cleared
+      ? `Interrupted inference ${outcome.inferenceId}; the thread accepts a new message now.`
+      : "No inference lease was held, so the thread already accepts a new message.");
   });
 
   server.registerTool("check_keep_alive", {

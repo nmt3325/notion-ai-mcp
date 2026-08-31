@@ -9,6 +9,7 @@ import { normalizeModelName, normalizeReasoningEffort } from "./models.js";
 import { McpConnectionManager } from "./mcp-connections.js";
 import { prepareAttachmentInput, readResponseBuffer, writeAttachmentOutput, type AttachmentInput, type PreparedAttachment } from "./attachments.js";
 import { agentTranscriptError, applyAgentTranscriptPatches, createAgentTranscriptState, isAgentTranscriptTurnComplete, latestAgentTranscriptText } from "./agent-transcript.js";
+import type { InterruptResult } from "./types.js";
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 const SEC_CH_UA = '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"';
@@ -341,7 +342,7 @@ export function parseInferenceLines(lines: string[]): ParsedInferenceStream {
 export function emptyAnswerMessage(spaceId: string, session: { rehydrated?: boolean | undefined }, eventTypes: Record<string, number>): string {
   const seen = Object.entries(eventTypes).map(([type, count]) => `${type}=${count}`).join(", ") || "no events";
   const hint = session.rehydrated
-    ? "Notion rejected the resumed thread state, so start a new chat without conversationId."
+    ? "Notion rejected the resumed thread state because the thread still holds an inference lease. Call interrupt_conversation for this conversationId and send again, or start a new chat without conversationId."
     : "The workspace may be out of AI credits or the turn was dropped before generation; check list_workspaces, switch_workspace, then retry.";
   return `Notion AI streamed no answer text (workspace ${spaceId}; stream events: ${seen}). ${hint}`;
 }
@@ -536,6 +537,8 @@ export class NotionClient {
     return {
       threadId,
       updatedTime: asNumber(record.updated_time),
+      currentInferenceId: asString(record.current_inference_id),
+      leaseExpiration: asNumber(record.current_inference_lease_expiration),
       serverNow,
       messageCount: arrayOfStrings(record.messages).length,
       lastTurnOutcome: parseTurnOutcome(data.last_turn_outcome),
@@ -543,7 +546,37 @@ export class NotionClient {
     };
   }
 
-  keepAwakeDefaults(): { idleMs: number; pollMs: number; cooldownMs: number; maxNudges: number; deadlineMs: number; enabled: boolean } {
+  /**
+   * Clears the thread's inference lease so a new turn can be submitted.
+   *
+   * Notion locks a thread while an inference holds `current_inference_id` and a lease expiration, and
+   * a second runInferenceTranscript against a locked thread answers 200 with an empty stream. The web
+   * client's stop button aborts its own stream and clears both columns; this reproduces the persisted
+   * half so a turn that died without finishing can be interrupted from outside the browser.
+   */
+  async interruptTurn(threadId: string): Promise<InterruptResult> {
+    const account = await this.account();
+    const signals = await this.threadSignals(threadId);
+    if (!signals.currentInferenceId) {
+      return { threadId, cleared: false, inferenceId: "", leaseExpiration: signals.leaseExpiration };
+    }
+    await this.fetchJson("saveTransactionsFanout", {
+      requestId: randomUUID(),
+      transactions: [{
+        id: randomUUID(),
+        spaceId: account.spaceId,
+        operations: [{
+          pointer: { table: "thread", id: threadId, spaceId: account.spaceId },
+          path: [],
+          command: "update",
+          args: { current_inference_id: null, current_inference_lease_expiration: null }
+        }]
+      }]
+    });
+    return { threadId, cleared: true, inferenceId: signals.currentInferenceId, leaseExpiration: signals.leaseExpiration };
+  }
+
+  keepAwakeDefaults(): { interrupt: boolean; idleMs: number; pollMs: number; cooldownMs: number; maxNudges: number; deadlineMs: number; enabled: boolean } {
     return { ...this.config.keepAwake };
   }
 

@@ -101,6 +101,7 @@ test("Streamable HTTP server requires bearer auth and executes MCP tools", async
       "get_conversation",
       "get_current_workspace",
       "get_mcp_connection_status",
+      "interrupt_conversation",
       "keep_alive_kick",
       "keep_me_awake",
       "list_chat_jobs",

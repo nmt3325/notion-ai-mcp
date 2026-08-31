@@ -18,6 +18,7 @@ export const EXPECTED_TOOLS = [
   "get_conversation",
   "get_current_workspace",
   "get_mcp_connection_status",
+  "interrupt_conversation",
   "keep_alive_kick",
   "keep_me_awake",
   "list_chat_jobs",
@@ -265,6 +266,7 @@ const READ_ONLY_TOOLS = [
 const DESTRUCTIVE_TOOLS = [
   "delete_conversation",
   "download_attachment",
+  "interrupt_conversation",
   "notion_ai_chat",
   "remove_mcp_connection",
   "rename_conversation",

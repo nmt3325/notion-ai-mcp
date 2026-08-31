@@ -533,3 +533,24 @@ Notion AI を MCP 経由で呼び出す場合、client は server に何も告�
 `{version, jobs[], sessions[]}` で保存する。同一 directory への temp ファイカを `rename` する原子的書き込み、
 24時間で prune、保存本文は20000文字・prompt preview は500文字で切る。プロセス再起動後に `running` のまま
 残っていた job は、監視するプロセスがもういないので `orphaned` に降格する。
+
+
+### inference lease と中断
+
+thread record の top-level に `current_inference_id`（TEXT）と `current_inference_lease_expiration`（REAL）がある。
+生成中はここに inference id が入り、この間に `runInferenceTranscript` へ同じ thread を投げても HTTP 200 のまま
+event 0 件のストリームが返る（本文が来ないので client 側では空回答エラーになる）。専用の停止 endpoint は無く、
+Web クライアントの停止ボタンは in-process の `abortController.abort()` に加えて、この2カラムの null 化を
+`saveTransactionsFanout` で永続化しているだけである。したがって別プロセスからの中断はこの transaction だけで足りる。
+
+```
+POST /api/v3/saveTransactionsFanout
+{"requestId":"<uuid>","transactions":[{"id":"<uuid>","spaceId":"<space>","operations":[
+  {"pointer":{"table":"thread","id":"<threadId>","spaceId":"<space>"},"path":[],"command":"update",
+   "args":{"current_inference_id":null,"current_inference_lease_expiration":null}}]}]}
+```
+
+- lease は `current_inference_lease_expiration` が未来なら有効、過去なら陳腕化と見る（client 側の
+  `stale_inference_lease` 診断も同じ判定で、期限切れは自然解放される）。expiration が null で id だけ残る状態も観測される。
+- 2026-08-31 実測: 生成中 thread で解除後に `current_inference_id` が空になり、同一 thread への送信が通った。
+- 拒否された送信は thread_message を増やさないので、`updated_time` を偽装リセットしない。

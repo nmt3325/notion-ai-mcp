@@ -29,7 +29,7 @@ export interface NotionConfig {
   /** Registry of keep-awake watchdogs. Undefined disables persistence. */
   keepAliveFilePath?: string | undefined;
   /** Defaults for keep_me_awake. */
-  keepAwake: { idleMs: number; pollMs: number; cooldownMs: number; maxNudges: number; deadlineMs: number; enabled: boolean };
+  keepAwake: { interrupt: boolean; idleMs: number; pollMs: number; cooldownMs: number; maxNudges: number; deadlineMs: number; enabled: boolean };
 }
 
 function optional(name: string, fallback = ""): string {
@@ -98,7 +98,8 @@ export function loadConfig(): NotionConfig {
     // Every nudge is a real turn and costs credits, so the budget and the deadline are not optional.
     maxNudges: integer("NOTION_KEEP_AWAKE_MAX_NUDGES", 40, 1, 500),
     deadlineMs: integer("NOTION_KEEP_AWAKE_DEADLINE_MS", 3 * 60 * 60 * 1000, 60_000, 24 * 60 * 60 * 1000),
-    enabled: flag("NOTION_KEEP_AWAKE", true)
+    enabled: flag("NOTION_KEEP_AWAKE", true),
+    interrupt: flag("NOTION_KEEP_AWAKE_INTERRUPT", true)
   };
   return {
     apiBase: optional("NOTION_API_BASE", "https://www.notion.so/api/v3").replace(/\/$/, ""),
