@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AccountContext } from "./types.js";
 import { defaultStateFilePath } from "./chat-jobs.js";
-import { DEFAULT_CONFIRM_GRACE_MS, DEFAULT_CONTINUE_COOLDOWN_MS, DEFAULT_MAX_CONTINUES, parseConfirmationPatterns, type KeepAwakeDefaults } from "./keep-awake.js";
+import { DEFAULT_CONFIRM_GRACE_MS, DEFAULT_STEP_LIMIT_STEPS, DEFAULT_CONTINUE_COOLDOWN_MS, DEFAULT_MAX_CONTINUES, parseConfirmationPatterns, type KeepAwakeDefaults } from "./keep-awake.js";
 
 export interface NotionConfig {
   apiBase: string;
@@ -108,7 +108,10 @@ export function loadConfig(): NotionConfig {
     maxContinues: integer("NOTION_KEEP_AWAKE_MAX_CONTINUES", DEFAULT_MAX_CONTINUES, 0, 100),
     continueCooldownMs: integer("NOTION_KEEP_AWAKE_CONTINUE_COOLDOWN_MS", DEFAULT_CONTINUE_COOLDOWN_MS, 0, 600_000),
     confirmGraceMs: integer("NOTION_KEEP_AWAKE_CONFIRM_GRACE_MS", DEFAULT_CONFIRM_GRACE_MS, 0, 600_000),
-    continuePatterns: parseConfirmationPatterns(process.env.NOTION_KEEP_AWAKE_CONTINUE_PATTERNS)
+    continuePatterns: parseConfirmationPatterns(process.env.NOTION_KEEP_AWAKE_CONTINUE_PATTERNS),
+    // The step-limit stop closes the turn as completed, so the step count is what separates it from
+    // a turn that died early: on a live thread the prompt landed at 2992 steps.
+    stepLimitSteps: integer("NOTION_KEEP_AWAKE_STEP_LIMIT_STEPS", DEFAULT_STEP_LIMIT_STEPS, 1, 1_000_000)
   };
   return {
     apiBase: optional("NOTION_API_BASE", "https://www.notion.so/api/v3").replace(/\/$/, ""),

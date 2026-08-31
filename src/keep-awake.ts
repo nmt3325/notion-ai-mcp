@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { KeepAlive, KeepAliveStatus, ThreadSignals } from "./types.js";
+import type { FinalStepShape, KeepAlive, KeepAliveStatus, ThreadSignals } from "./types.js";
 
 export const KEEP_ALIVE_STATE_VERSION = 1;
 
@@ -18,6 +18,13 @@ export const FINISHED_KEEP_ALIVE_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_MAX_CONTINUES = 10;
 export const DEFAULT_CONTINUE_COOLDOWN_MS = 15_000;
 export const DEFAULT_CONFIRM_GRACE_MS = 10_000;
+
+/**
+ * Step count above which a closed-but-unfinished turn reads as Notion's step limit rather than a
+ * crash. Measured on live threads: the turn that stopped on the prompt closed at 2992 steps, an
+ * ordinary finish at 99.
+ */
+export const DEFAULT_STEP_LIMIT_STEPS = 2_000;
 
 export type LeaseState = "free" | "held" | "stale";
 
@@ -73,6 +80,24 @@ export function parseConfirmationPatterns(raw: string | undefined): RegExp[] {
     .map((line) => new RegExp(line.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
 }
 
+/**
+ * True when a closed turn did not end on an answer.
+ *
+ * The step-limit prompt is never written to the thread, so the only durable trace of a turn Notion
+ * stopped is the step it ended on: a finished answer is an agent-inference step carrying text, while
+ * a turn that was cut off ends on a tool call that is still marked streaming.
+ */
+export function isUnfinishedFinalStep(shape: FinalStepShape | null | undefined): boolean {
+  if (!shape) return false;
+  return !shape.hasAnswerText;
+}
+
+/** True when an unfinished close ran long enough to be the step limit rather than an early death. */
+export function isStepLimitStop(shape: FinalStepShape | null | undefined, stepCount: number | null, threshold = DEFAULT_STEP_LIMIT_STEPS): boolean {
+  if (!isUnfinishedFinalStep(shape)) return false;
+  return stepCount !== null && stepCount >= threshold;
+}
+
 export type KeepAwakeDecision =
   | { action: "wait"; reason: "healthy" | "cooldown" | "signals_unavailable" | "confirm_grace" }
   | { action: "continue"; reason: "awaiting_confirmation" }
@@ -91,6 +116,8 @@ export interface KeepAwakeDecisionInput {
   deadlineAt: number;
   /** The newest step is Notion's step-limit prompt, so the turn is one confirmation from resuming. */
   awaitingConfirmation?: boolean | undefined;
+  /** False when the closed turn did not end on an answer, so the completion must not stop the watch. */
+  completionIsAnswer?: boolean | undefined;
   continueCount?: number | undefined;
   maxContinues?: number | undefined;
   lastContinueAt?: number | null | undefined;
@@ -127,7 +154,9 @@ export function decideKeepAwake(input: KeepAwakeDecisionInput): KeepAwakeDecisio
   }
 
   const outcome = input.signals.lastTurnOutcome;
-  if (outcome && outcome.status === "completed" && outcome.completedTime !== null && outcome.completedTime >= input.anchorTime) {
+  // Notion stamps "completed" on a turn it stopped itself, so a completion that did not end on an
+  // answer is not a finish at all: it is a dead turn that still needs continuing.
+  if (outcome && outcome.status === "completed" && outcome.completedTime !== null && outcome.completedTime >= input.anchorTime && input.completionIsAnswer !== false) {
     return { action: "stop", reason: "turn_completed" };
   }
 
@@ -446,6 +475,8 @@ export interface KeepAwakeRuntime {
   sendNudge: (conversationId: string, prompt: string) => Promise<void>;
   /** Newest user-visible text on the thread, used to spot Notion's step-limit prompt. */
   readTail?: ((conversationId: string) => Promise<string>) | undefined;
+  /** Shape of the step a closed turn ended on: the durable half of the web client's Continue prompt. */
+  readFinalStep?: ((conversationId: string, stepId: string) => Promise<FinalStepShape | null>) | undefined;
   /** Clears the thread's inference lease. Resolves true when a lease was actually cleared. */
   interrupt?: ((conversationId: string) => Promise<boolean>) | undefined;
   now?: (() => number) | undefined;
@@ -466,6 +497,7 @@ export interface KeepAwakeDefaults {
   continueCooldownMs?: number | undefined;
   confirmGraceMs?: number | undefined;
   continuePatterns?: readonly RegExp[] | undefined;
+  stepLimitSteps?: number | undefined;
 }
 
 const STOP_STATUS: Record<"turn_completed" | "max_nudges" | "max_continues" | "deadline", KeepAliveStatus> = {
@@ -540,6 +572,7 @@ export class KeepAwakeSupervisor {
     // disagree about which turn they describe.
     const now = signals ? signals.serverNow : this.now();
     this.store.noteCheck(keepAliveId, now, signals?.updatedTime ?? null, failure || undefined);
+    const probe = await this.inspectCompletion(record, signals, now);
     const decision = decideKeepAwake({
       now,
       anchorTime: record.anchorTime,
@@ -550,7 +583,8 @@ export class KeepAwakeSupervisor {
       cooldownMs: record.cooldownMs,
       maxNudges: record.maxNudges,
       deadlineAt: record.deadlineAt,
-      awaitingConfirmation: await this.awaitingConfirmation(record, signals, now),
+      awaitingConfirmation: probe.awaitingConfirmation,
+      completionIsAnswer: probe.completionIsAnswer,
       continueCount: record.continueCount ?? 0,
       maxContinues: record.maxContinues ?? DEFAULT_MAX_CONTINUES,
       lastContinueAt: record.lastContinueAt ?? null,
@@ -684,19 +718,36 @@ export class KeepAwakeSupervisor {
    * sitting on a confirmation prompt, so probing the transcript then would double the traffic for
    * nothing.
    */
-  private async awaitingConfirmation(record: KeepAlive, signals: ThreadSignals | null, now: number): Promise<boolean> {
-    if (!signals || !this.runtime.readTail) return false;
-    if (record.autoContinue === false || this.defaults.autoContinue === false) return false;
+  private async inspectCompletion(record: KeepAlive, signals: ThreadSignals | null, now: number): Promise<{ awaitingConfirmation: boolean; completionIsAnswer: boolean }> {
+    // Nothing learned means nothing changes: the watch keeps behaving exactly as it did before.
+    const inconclusive = { awaitingConfirmation: false, completionIsAnswer: true };
+    if (!signals) return inconclusive;
+    if (record.autoContinue === false || this.defaults.autoContinue === false) return inconclusive;
     const outcome = signals.lastTurnOutcome;
     const closed = Boolean(outcome && outcome.completedTime !== null && outcome.completedTime >= record.anchorTime);
     const confirmGraceMs = this.defaults.confirmGraceMs ?? DEFAULT_CONFIRM_GRACE_MS;
     const quiet = signals.updatedTime !== null && now - signals.updatedTime >= confirmGraceMs;
-    if (!closed && !quiet) return false;
+    if (!closed && !quiet) return inconclusive;
+    // Kept as insurance. If Notion ever does write the prompt into the thread, matching the text is
+    // the most direct evidence available, and it costs one transcript page.
+    if (this.runtime.readTail) {
+      try {
+        if (isStepLimitConfirmation(await this.runtime.readTail(record.conversationId), this.defaults.continuePatterns ?? [])) {
+          return { awaitingConfirmation: true, completionIsAnswer: false };
+        }
+      } catch {
+        // A failed transcript read is not evidence of anything; the next poll tries again.
+      }
+    }
+    if (!closed || !this.runtime.readFinalStep || !outcome?.finalStepId) return inconclusive;
     try {
-      return isStepLimitConfirmation(await this.runtime.readTail(record.conversationId), this.defaults.continuePatterns ?? []);
+      const shape = await this.runtime.readFinalStep(record.conversationId, outcome.finalStepId);
+      if (!isUnfinishedFinalStep(shape)) return inconclusive;
+      // Unfinished either way, so the watch must not stop; the step count only decides whether the
+      // answer is a Continue click or an ordinary nudge.
+      return { awaitingConfirmation: isStepLimitStop(shape, outcome.stepCount, this.defaults.stepLimitSteps ?? DEFAULT_STEP_LIMIT_STEPS), completionIsAnswer: false };
     } catch {
-      // A failed transcript read is not evidence of anything; the next poll tries again.
-      return false;
+      return inconclusive;
     }
   }
 

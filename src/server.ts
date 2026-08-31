@@ -118,6 +118,7 @@ export function createKeepAwakeSupervisor(client: NotionClient): KeepAwakeSuperv
         const last = conversation.messages.at(-1);
         return last && last.role === "assistant" ? last.text : "";
       },
+      readFinalStep: async (_conversationId, stepId) => client.finalStepShape(stepId),
       interrupt: async (conversationId) => (await client.interruptTurn(conversationId)).cleared
     },
     client.keepAwakeDefaults()
@@ -223,7 +224,7 @@ export function createServer(client: NotionClient, shared?: { keepAwake?: KeepAw
       "Watch a Notion AI conversation and re-send a short continuation message whenever its turn stops without finishing.",
       "The heartbeat is the thread updated_time, which equals the created_time of the newest step.",
       "A frozen heartbeat alone is ambiguous, so a turn whose last_turn_outcome closed as completed at or after registration ends the watch instead of being nudged; only a freeze with no matching completion is treated as a dead turn.",
-      "A turn that stopped on Notion's own step-limit prompt (\"This task is taking a lot of steps. Please confirm you want the agent to keep going.\") is answered with a short Continue message instead of a nudge, which is what the web client's Continue button does; those answers have their own budget, maxContinues.",
+      "Notion never stores the text of that prompt, so a stop on its step-limit prompt is recognised from the thread record instead: the turn closes as completed but its final step is a tool call left unfinished, and a high step count separates it from a turn that died early. Those stops are answered with a short Continue message, which is what the web client's Continue button sends, and they have their own budget, maxContinues.",
       "Call this from inside the long task that needs protecting and pass that same conversation id, then keep working. Every nudge is a real turn and costs credits, so the budget and the deadline always apply."
     ].join(" "),
     inputSchema: {

@@ -3,9 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { buildContinue, buildNudge, decideKeepAwake, isLockedError, isStepLimitConfirmation, KeepAliveStore, KeepAwakeSupervisor, leaseState, MIN_IDLE_MS, parseConfirmationPatterns } from "../src/keep-awake.js";
+import { buildContinue, buildNudge, decideKeepAwake, DEFAULT_STEP_LIMIT_STEPS, isLockedError, isStepLimitConfirmation, isStepLimitStop, isUnfinishedFinalStep, KeepAliveStore, KeepAwakeSupervisor, leaseState, MIN_IDLE_MS, parseConfirmationPatterns } from "../src/keep-awake.js";
 import type { KeepAwakeDefaults } from "../src/keep-awake.js";
-import type { ThreadSignals } from "../src/types.js";
+import type { FinalStepShape, ThreadSignals } from "../src/types.js";
 
 const CONVERSATION = "22222222-2222-4222-8222-222222222222";
 /** A real updated_time from a live thread, so the arithmetic in these tests is the arithmetic in production. */
@@ -13,7 +13,7 @@ const BASE = 1_788_140_086_830;
 const IDLE = MIN_IDLE_MS;
 const COOLDOWN = 60_000;
 
-function signals(input: { updatedTime: number | null; serverNow: number; outcome?: { status: string; completedTime: number | null } | undefined; lease?: { inferenceId: string; expiration: number | null } | undefined }): ThreadSignals {
+function signals(input: { updatedTime: number | null; serverNow: number; outcome?: { status: string; completedTime: number | null; stepCount?: number | undefined } | undefined; lease?: { inferenceId: string; expiration: number | null } | undefined }): ThreadSignals {
   return {
     threadId: CONVERSATION,
     updatedTime: input.updatedTime,
@@ -23,7 +23,7 @@ function signals(input: { updatedTime: number | null; serverNow: number; outcome
     currentInferenceId: input.lease?.inferenceId ?? "",
     leaseExpiration: input.lease?.expiration ?? null,
     lastTurnOutcome: input.outcome
-      ? { status: input.outcome.status, completedTime: input.outcome.completedTime, stepCount: 35, inferenceId: "inference-1", finalStepId: "step-1" }
+      ? { status: input.outcome.status, completedTime: input.outcome.completedTime, stepCount: input.outcome.stepCount ?? 35, inferenceId: "inference-1", finalStepId: "step-1" }
       : null
   };
 }
@@ -37,6 +37,7 @@ function decide(input: {
   maxNudges?: number;
   deadlineAt?: number;
   awaitingConfirmation?: boolean;
+  completionIsAnswer?: boolean;
   continueCount?: number;
   maxContinues?: number;
   lastContinueAt?: number | null;
@@ -52,6 +53,7 @@ function decide(input: {
     maxNudges: input.maxNudges ?? 40,
     deadlineAt: input.deadlineAt ?? BASE + 3_600_000,
     awaitingConfirmation: input.awaitingConfirmation ?? false,
+    completionIsAnswer: input.completionIsAnswer ?? true,
     continueCount: input.continueCount ?? 0,
     maxContinues: input.maxContinues ?? 10,
     lastContinueAt: input.lastContinueAt ?? null
@@ -385,18 +387,21 @@ function continueHarness(initial: ThreadSignals) {
   let current = initial;
   let clock = initial.serverNow;
   let tail = "";
+  let finalStep: FinalStepShape | null = null;
   const sent: string[] = [];
   const store = new KeepAliveStore(null);
   const supervisor = new KeepAwakeSupervisor(store, {
     readSignals: async () => current,
     sendNudge: async (_conversationId, prompt) => { sent.push(prompt); },
     readTail: async () => tail,
+    readFinalStep: async () => finalStep,
     now: () => clock
   }, CONTINUE_DEFAULTS);
   return {
     supervisor,
     sent,
     setTail(next: string): void { tail = next; },
+    setFinalStep(next: FinalStepShape | null): void { finalStep = next; },
     advance(next: ThreadSignals): void { current = next; clock = next.serverNow; }
   };
 }
@@ -485,6 +490,78 @@ test("a stall with no confirmation prompt still gets the ordinary nudge", async 
   assert.equal(nudged.decision.action, "nudge");
   assert.equal(nudged.keepAlive?.nudgeCount, 1);
   assert.equal(nudged.keepAlive?.continueCount, 0);
+  assert.match(box.sent[0] ?? "", /\[KEEP-AWAKE 1\/3\]/);
+  box.supervisor.stopAll();
+});
+
+test("a closed turn is judged by the step it ended on, not by its status", () => {
+  // Measured on live threads: a step-limit stop and an ordinary finish both close as "completed", so
+  // the status is useless on its own and the final step is the only thing that separates them.
+  const cutOff: FinalStepShape = { stepId: "step-1", type: "agent-tool-result", state: "streaming", hasAnswerText: false, finishedAt: null };
+  const answered: FinalStepShape = { stepId: "step-2", type: "agent-inference", state: "", hasAnswerText: true, finishedAt: BASE };
+  assert.equal(isUnfinishedFinalStep(cutOff), true);
+  assert.equal(isUnfinishedFinalStep(answered), false);
+  // A step that could not be read is not evidence of a stall; assuming one would nudge forever.
+  assert.equal(isUnfinishedFinalStep(null), false);
+  assert.equal(isStepLimitStop(cutOff, 2992), true);
+  // Unfinished but nowhere near the limit is a turn that died early, and a nudge suits it better.
+  assert.equal(isStepLimitStop(cutOff, 99), false);
+  assert.equal(isStepLimitStop(cutOff, null), false);
+  assert.equal(isStepLimitStop(answered, 2992), false);
+  assert.equal(DEFAULT_STEP_LIMIT_STEPS, 2_000);
+});
+
+test("a completion that did not end on an answer keeps the watch alive", () => {
+  // Without this the watch ends on the step-limit stop, because Notion closes that turn as completed.
+  const dead = decide({
+    now: BASE + IDLE + 60_000,
+    signals: signals({ updatedTime: BASE + 10_000, serverNow: BASE + IDLE + 60_000, outcome: { status: "completed", completedTime: BASE + 10_000 } }),
+    completionIsAnswer: false
+  });
+  assert.deepEqual(dead, { action: "nudge", reason: "stalled", idleMs: IDLE + 50_000 });
+  // The same record backed by a real answer still ends the watch, which is the common case.
+  const finished = decide({
+    now: BASE + IDLE + 60_000,
+    signals: signals({ updatedTime: BASE + 10_000, serverNow: BASE + IDLE + 60_000, outcome: { status: "completed", completedTime: BASE + 10_000 } })
+  });
+  assert.deepEqual(finished, { action: "stop", reason: "turn_completed" });
+});
+
+test("a step-limit stop is answered with Continue even though the prompt is never stored", async () => {
+  // The live thread that hit the prompt, reproduced: completed, 2992 steps, final step a tool call
+  // still marked streaming, and the prompt text itself nowhere in the record.
+  const box = continueHarness(signals({ updatedTime: BASE, serverNow: BASE }));
+  const record = await box.supervisor.start({ conversationId: CONVERSATION, idleMs: IDLE, cooldownMs: COOLDOWN, maxNudges: 3 });
+  box.setFinalStep({ stepId: "step-1", type: "agent-tool-result", state: "streaming", hasAnswerText: false, finishedAt: null });
+  box.advance(signals({ updatedTime: BASE + 20_000, serverNow: BASE + 40_000, outcome: { status: "completed", completedTime: BASE + 20_000, stepCount: 2992 } }));
+  const answered = await box.supervisor.tick(record.keepAliveId);
+  assert.equal(answered.decision.action, "continue");
+  assert.equal(answered.keepAlive?.status, "watching");
+  assert.equal(answered.keepAlive?.continueCount, 1);
+  assert.equal(answered.keepAlive?.nudgeCount, 0);
+  assert.match(box.sent[0] ?? "", /\[KEEP-AWAKE CONTINUE 1\/2\]/);
+
+  // Once the resumed turn ends on a real answer, the ordinary completion rule closes the watch.
+  box.setFinalStep({ stepId: "step-2", type: "agent-inference", state: "", hasAnswerText: true, finishedAt: BASE + 300_000 });
+  box.advance(signals({ updatedTime: BASE + 300_000, serverNow: BASE + 400_000, outcome: { status: "completed", completedTime: BASE + 300_000, stepCount: 3_010 } }));
+  const closed = await box.supervisor.tick(record.keepAliveId);
+  assert.equal(closed.decision.action, "stop");
+  assert.equal(closed.keepAlive?.stopReason, "turn_completed");
+  assert.equal(box.sent.length, 1);
+  box.supervisor.stopAll();
+});
+
+test("a turn that died early is nudged rather than answered with Continue", async () => {
+  // Same unfinished shape, a fraction of the steps: this is a crash, not Notion asking to continue.
+  const box = continueHarness(signals({ updatedTime: BASE, serverNow: BASE }));
+  const record = await box.supervisor.start({ conversationId: CONVERSATION, idleMs: IDLE, cooldownMs: COOLDOWN, maxNudges: 3 });
+  box.setFinalStep({ stepId: "step-1", type: "agent-tool-result", state: "streaming", hasAnswerText: false, finishedAt: null });
+  box.advance(signals({ updatedTime: BASE + 10_000, serverNow: BASE + 10_000 + IDLE + 30_000, outcome: { status: "completed", completedTime: BASE + 10_000, stepCount: 99 } }));
+  const outcome = await box.supervisor.tick(record.keepAliveId);
+  assert.equal(outcome.decision.action, "nudge");
+  assert.equal(outcome.keepAlive?.status, "watching");
+  assert.equal(outcome.keepAlive?.nudgeCount, 1);
+  assert.equal(outcome.keepAlive?.continueCount, 0);
   assert.match(box.sent[0] ?? "", /\[KEEP-AWAKE 1\/3\]/);
   box.supervisor.stopAll();
 });

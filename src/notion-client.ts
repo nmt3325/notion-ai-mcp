@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { basename, extname } from "node:path";
 import { isIP } from "node:net";
-import type { AccountContext, AgentUploadedFile, AttachmentDownloadResult, AttachmentUploadResult, ChatAttachment, ChatJob, ChatJobLookup, ChatJobStatus, ChatResult, ChatSession, ChatStartResult, ChatWaitResult, Conversation, ConversationMessage, ConversationSummary, LegacyAttachmentDownloadInput, ListConversationsResult, ParsedInferenceStream, ThreadSignals, TurnOutcome } from "./types.js";
+import type { FinalStepShape, AccountContext, AgentUploadedFile, AttachmentDownloadResult, AttachmentUploadResult, ChatAttachment, ChatJob, ChatJobLookup, ChatJobStatus, ChatResult, ChatSession, ChatStartResult, ChatWaitResult, Conversation, ConversationMessage, ConversationSummary, LegacyAttachmentDownloadInput, ListConversationsResult, ParsedInferenceStream, ThreadSignals, TurnOutcome } from "./types.js";
 import type { NotionConfig } from "./config.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 import { ChatStateStore } from "./chat-jobs.js";
@@ -544,6 +544,29 @@ export class NotionClient {
       messageCount: arrayOfStrings(record.messages).length,
       lastTurnOutcome: parseTurnOutcome(data.last_turn_outcome),
       credits
+    };
+  }
+
+  /**
+   * Reads the shape of the step a closed turn ended on.
+   *
+   * One extra record read, and only when a watched turn has already gone quiet, so it costs about as
+   * much as the poll it rides along with. It is the only server-side evidence that separates Notion
+   * stopping a turn on its step-limit prompt from the turn genuinely finishing.
+   */
+  async finalStepShape(stepId: string): Promise<FinalStepShape | null> {
+    if (!stepId) return null;
+    const account = await this.account();
+    const payload = await this.fetchJson("syncRecordValuesMain", { requests: [{ pointer: { table: "thread_message", id: stepId, spaceId: account.spaceId }, version: -1 }] });
+    const record = unwrapRecord(object(object(payload.recordMap).thread_message)[stepId]);
+    if (Object.keys(record).length === 0) return null;
+    const step = object(record.step ?? object(record.data).step ?? record.data);
+    return {
+      stepId,
+      type: asString(step.type),
+      state: asString(step.state),
+      hasAnswerText: agentInferenceText(step.value).length > 0,
+      finishedAt: asNumber(step.finishedAt)
     };
   }
 
