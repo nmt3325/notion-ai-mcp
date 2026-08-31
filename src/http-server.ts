@@ -6,7 +6,8 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { loadConfig } from "./config.js";
 import { NotionClient } from "./notion-client.js";
-import { createServer as createMcpServer } from "./server.js";
+import type { KeepAwakeSupervisor } from "./keep-awake.js";
+import { createKeepAwakeSupervisor, createServer as createMcpServer } from "./server.js";
 
 const DEFAULT_BODY_LIMIT = 1024 * 1024;
 
@@ -31,6 +32,8 @@ export interface RemoteMcpHttpServer {
   listen(): Promise<AddressInfo>;
   close(): Promise<void>;
   sessionCount(): number;
+  /** Adopts keep-awake watchdogs an earlier process left in the registry. Returns how many resumed. */
+  resumeKeepAwake(): number;
 }
 
 function integerSetting(name: string, fallback: number): number {
@@ -121,6 +124,14 @@ export function createRemoteMcpHttpServer(options: HttpServerOptions): RemoteMcp
   const sessions = new Map<string, HttpSession>();
   const clientFactory = options.clientFactory ?? (() => new NotionClient(loadConfig()));
   const log = options.logger ?? ((message: string) => process.stderr.write(`${message}\n`));
+  // Notion opens a fresh MCP session for every tool call. A client and a supervisor per session
+  // would give each call its own background-job registry and its own keep-awake timers, so a
+  // watchdog armed by one call would be thrown away the moment that call returned. One of each per
+  // process keeps both alive for as long as the process runs.
+  let sharedClient: NotionClient | null = null;
+  let sharedKeepAwake: KeepAwakeSupervisor | null = null;
+  const client = (): NotionClient => (sharedClient ??= clientFactory());
+  const keepAwake = (): KeepAwakeSupervisor => (sharedKeepAwake ??= createKeepAwakeSupervisor(client()));
 
   const removeExpiredSessions = async (): Promise<void> => {
     const cutoff = Date.now() - options.sessionTtlMs;
@@ -180,7 +191,7 @@ export function createRemoteMcpHttpServer(options: HttpServerOptions): RemoteMcp
           return;
         }
 
-        const mcpServer = createMcpServer(clientFactory());
+        const mcpServer = createMcpServer(client(), { keepAwake: keepAwake() });
         let initializedSessionId = "";
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: randomUUID,
@@ -255,7 +266,8 @@ export function createRemoteMcpHttpServer(options: HttpServerOptions): RemoteMcp
         nodeServer.close((error) => error ? reject(error) : resolve());
       });
     },
-    sessionCount: () => sessions.size
+    sessionCount: () => sessions.size,
+    resumeKeepAwake: () => keepAwake().resume().length
   };
 }
 
@@ -266,6 +278,15 @@ export async function runHttpServer(): Promise<void> {
   process.stderr.write(`notion-ai-mcp-http: listening on http://${address.address}:${address.port}${options.path}\n`);
   if (options.host !== "127.0.0.1" && options.host !== "::1" && options.host !== "localhost") {
     process.stderr.write("notion-ai-mcp-http: use a TLS reverse proxy before exposing this listener to the internet\n");
+  }
+
+  // A watchdog armed before a restart still carries its own deadline, so adopting it here turns a
+  // restart into a pause in the polling instead of a silently dropped watch.
+  try {
+    const resumed = remote.resumeKeepAwake();
+    if (resumed > 0) process.stderr.write(`notion-ai-mcp-http: resumed ${resumed} keep-awake watchdog(s)\n`);
+  } catch (error) {
+    process.stderr.write(`notion-ai-mcp-http: keep-awake resume skipped: ${error instanceof Error ? error.message : String(error)}\n`);
   }
 
   let closing = false;
