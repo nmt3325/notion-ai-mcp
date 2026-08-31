@@ -285,6 +285,19 @@ export class KeepAliveStore {
 
   watching(): KeepAlive[] { return [...this.records.values()].filter((record) => record.status === "watching").map((record) => ({ ...record })); }
 
+  orphaned(): KeepAlive[] { return [...this.records.values()].filter((record) => record.status === "orphaned").map((record) => ({ ...record })); }
+
+  /** Re-arms a watchdog that a restart orphaned, so a live process can adopt it. */
+  revive(keepAliveId: string): KeepAlive | null {
+    const record = this.records.get(keepAliveId);
+    if (!record || record.status !== "orphaned") return null;
+    record.status = "watching";
+    delete record.finishedAt;
+    delete record.stopReason;
+    this.persist();
+    return { ...record };
+  }
+
   noteCheck(keepAliveId: string, at: number, updatedTime: number | null, error?: string | undefined): KeepAlive | null {
     const record = this.records.get(keepAliveId);
     if (!record) return null;
@@ -476,6 +489,31 @@ export class KeepAwakeSupervisor {
     const updated = this.store.reanchor(keepAliveId, signals.updatedTime ?? signals.serverNow);
     this.schedule(keepAliveId, record.pollMs);
     return updated;
+  }
+
+  /**
+   * Adopts watchdogs left behind by an earlier process.
+   *
+   * Every entry still marked watching in the registry belongs to a process whose polling timers died
+   * with it, so loading downgrades it to orphaned. Only a process that intends to keep polling may
+   * take those entries back, which is why this is an explicit call and not part of the constructor.
+   */
+  resume(): KeepAlive[] {
+    if (!this.defaults.enabled) return [];
+    const now = this.now();
+    const resumed: KeepAlive[] = [];
+    for (const record of this.store.orphaned()) {
+      // A watchdog whose deadline passed while nobody was watching has nothing left to do.
+      if (record.deadlineAt <= now) {
+        this.store.finish(record.keepAliveId, "expired", now, "deadline");
+        continue;
+      }
+      const revived = this.store.revive(record.keepAliveId);
+      if (!revived) continue;
+      this.schedule(revived.keepAliveId, revived.pollMs);
+      resumed.push(revived);
+    }
+    return resumed;
   }
 
   stop(keepAliveId: string): KeepAlive | null {

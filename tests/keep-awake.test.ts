@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -325,4 +325,44 @@ test("interrupting can be switched off, and a refused nudge keeps its budget", a
   assert.equal(outcome.keepAlive?.nudgeCount, 0);
   assert.match(outcome.keepAlive?.lastError ?? "", /no events/);
   box.supervisor.stopAll();
+});
+
+test("resume adopts watchdogs orphaned by a restart and expires the ones whose deadline passed", () => {
+  const directory = mkdtempSync(join(tmpdir(), "keep-awake-resume-"));
+  const file = join(directory, "keep-alives.json");
+  const now = Date.now();
+  const entry = (keepAliveId: string, deadlineAt: number): Record<string, unknown> => ({
+    keepAliveId,
+    conversationId: CONVERSATION,
+    status: "watching",
+    anchorTime: now,
+    createdAt: now,
+    deadlineAt,
+    idleMs: IDLE,
+    pollMs: 30_000,
+    cooldownMs: COOLDOWN,
+    maxNudges: 4,
+    nudgeCount: 0,
+    language: "ja"
+  });
+  try {
+    writeFileSync(file, JSON.stringify({ version: 1, keepAlives: [entry("alive", now + 3_600_000), entry("late", now - 1)] }));
+    const store = new KeepAliveStore(file);
+    // A registry a dead process left behind must never claim its watchdogs are still polling.
+    assert.equal(store.get("alive")?.status, "orphaned");
+    const defaults: KeepAwakeDefaults = { interrupt: false, idleMs: IDLE, pollMs: 30_000, cooldownMs: COOLDOWN, maxNudges: 4, deadlineMs: 3_600_000, enabled: true };
+    const supervisor = new KeepAwakeSupervisor(store, {
+      readSignals: async () => { throw new Error("resume must not read the thread"); },
+      sendNudge: async () => { throw new Error("resume must not nudge"); },
+      now: () => now
+    }, defaults);
+    assert.deepEqual(supervisor.resume().map((record) => record.keepAliveId), ["alive"]);
+    assert.equal(store.get("alive")?.status, "watching");
+    assert.equal(store.get("late")?.status, "expired");
+    // Resuming twice must not hand the same watchdog to a second polling loop.
+    assert.deepEqual(supervisor.resume(), []);
+    supervisor.stopAll();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

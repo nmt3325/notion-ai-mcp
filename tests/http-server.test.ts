@@ -128,3 +128,40 @@ test("Streamable HTTP server requires bearer auth and executes MCP tools", async
     await remote.close();
   }
 });
+
+test("every session is served by one shared client so background state outlives a single call", async () => {
+  let built = 0;
+  const remote = createRemoteMcpHttpServer({
+    host: "127.0.0.1",
+    port: 0,
+    path: "/mcp",
+    bearerToken,
+    sessionTtlMs: 60_000,
+    maxSessions: 5,
+    clientFactory: () => { built += 1; return fakeClient(); },
+    logger: () => undefined
+  });
+  const address = await remote.listen();
+  const endpoint = new URL(`http://127.0.0.1:${address.port}/mcp`);
+  const connect = async (): Promise<Client> => {
+    const transport = new StreamableHTTPClientTransport(endpoint, { requestInit: { headers: { authorization: `Bearer ${bearerToken}` } } });
+    const client = new Client({ name: "notion-ai-http-test", version: "1.0.0" });
+    // SDK 1.29 declarations conflict under exactOptionalPropertyTypes, while
+    // the client transport implements the Transport contract at runtime.
+    await client.connect(transport as unknown as Transport);
+    return client;
+  };
+  const first = await connect();
+  const second = await connect();
+  try {
+    assert.equal(remote.sessionCount(), 2);
+    // Notion opens a new MCP session for every tool call, so a client per session would give each
+    // call its own chat-job registry and its own keep-awake timers.
+    assert.equal(built, 1);
+    assert.equal(remote.resumeKeepAwake(), 0);
+  } finally {
+    await first.close();
+    await second.close();
+    await remote.close();
+  }
+});

@@ -96,21 +96,32 @@ function result(value: unknown, text?: string): { content: Array<{ type: "text";
   };
 }
 
-export function createServer(client: NotionClient): McpServer {
-  const server = new McpServer({ name: "notion-ai-mcp", version: SERVER_VERSION });
-  const defaults = client.chatDefaults();
-  const keepAwakeSettings = client.keepAwakeDefaults();
-  // A nudge is an ordinary chat turn on the watched conversation, started in the background so the
-  // watchdog loop never blocks on the answer it just asked for.
-  const keepAwake = new KeepAwakeSupervisor(
+/**
+ * Builds the keep-awake supervisor for a client.
+ *
+ * A nudge is an ordinary chat turn on the watched conversation, started in the background so the
+ * watchdog loop never blocks on the answer it just asked for.
+ *
+ * The polling timers live in this object, so a transport that builds one MCP server per request has
+ * to create this once per process and hand the same instance to every server it builds.
+ */
+export function createKeepAwakeSupervisor(client: NotionClient): KeepAwakeSupervisor {
+  return new KeepAwakeSupervisor(
     new KeepAliveStore(client.keepAliveStatePath()),
     {
       readSignals: (conversationId) => client.threadSignals(conversationId),
       sendNudge: async (conversationId, prompt) => { await client.startChat({ prompt, conversationId }); },
       interrupt: async (conversationId) => (await client.interruptTurn(conversationId)).cleared
     },
-    keepAwakeSettings
+    client.keepAwakeDefaults()
   );
+}
+
+export function createServer(client: NotionClient, shared?: { keepAwake?: KeepAwakeSupervisor | undefined }): McpServer {
+  const server = new McpServer({ name: "notion-ai-mcp", version: SERVER_VERSION });
+  const defaults = client.chatDefaults();
+  const keepAwakeSettings = client.keepAwakeDefaults();
+  const keepAwake = shared?.keepAwake ?? createKeepAwakeSupervisor(client);
   const seconds = (value: number): number => Math.round(value / 1000);
   const canonicalModelIds = new Set(Object.values(BUILTIN_ALIASES));
   const modelHint = listModels().filter((entry) => entry.pickable || canonicalModelIds.has(entry.modelId)).map((entry) => `${entry.modelId} (${entry.aliases.join(", ")})`).join("; ");

@@ -95,7 +95,7 @@ node dist/src/index.js
 | `NOTION_REQUEST_TIMEOUT_MS` | 任意 | 内部 API request timeout（workspace操作にも適用）。既定 300000 ms |
 | `NOTION_MAX_WORKSPACE_RETRIES` | 任意 | credit枯渇時のworkspaceローテーション上限。既定5、`0`で無効 |
 | `NOTION_CHAT_WAIT_MS` | 任意 | `notion_ai_chat` が inline で待つ上限。既定 45000 ms（1000〜55000）。MCP client の約60秒制限より短く保つ |
-| `NOTION_STATE_FILE` | 任意 | chat job と継続session の保存先（mode 0600）。既定 `~/.notion-ai-mcp/state.json`、`off` で保存無効 |
+| `NOTION_STATE_FILE` | 任意 | chat job と継続session の保存先（mode 0600）。既定 `~/.notion-ai-mcp/state.json`、`off` で保存無効。read_only なコンテナでは `/data/state.json` のような書き込み可能なパスを指定する |
 | `NOTION_SESSION_REHYDRATE` | 任意 | 未知の `conversationId` を thread から復元して継続する。既定有効、`0` で無効 |
 | `NOTION_DEFAULT_WEB_SEARCH` | 任意 | 新規 chat の web 検索。既定 有効（`0` で無効） |
 | `NOTION_DEFAULT_WORKSPACE_SEARCH` | 任意 | 新規 chat の workspace 検索。既定 有効（`0` で無効） |
@@ -402,6 +402,9 @@ Notion AI 側の生成は数分続くことがありますが、MCP client は�
   `orphaned` として残るので、`get_chat_result` で thread から回収してください。
 - job と session は `NOTION_STATE_FILE`（既定 `~/.notion-ai-mcp/state.json`、mode 0600、24時間保持）に
   原子的に保存されます。`NOTION_STATE_FILE=off` で完全にメモリ内のみに切り替えられます。
+- HTTP モードは client と keep-awake supervisor をプロセスに1つだけ生成し、全 session で共有します。
+  MCP client がツール呼び出しごとに新しい session を張っても、background job と watchdog は消えません。
+  起動時に registry の watching 記録（restart で orphaned に降格したもの）を deadline 内なら再開します。
 - client が `progressToken` を送っている場合、10秒ごとに `notifications/progress` を送出して
   進行中であることを伝えます（対応 client は待機を延長できます）。
 

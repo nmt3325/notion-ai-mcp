@@ -37,6 +37,8 @@ services:
     restart: unless-stopped
     environment:
       NOTION_ATTACHMENT_ROOT: /data
+      # read_only: true なのでルートFSには書けない。状態ファイルは書き込み可能な /data に置く。
+      NOTION_STATE_FILE: ${NOTION_STATE_FILE:-/data/state.json}
       NOTION_MCP_REGISTRY_FILE: ${NOTION_MCP_REGISTRY_FILE:-/data/mcp-connections.json}
       NOTION_MCP_HTTP_HOST: 0.0.0.0
       NOTION_MCP_HTTP_PORT: "3000"
@@ -60,6 +62,8 @@ services:
     command: ["node", "dist/src/index.js"]
     environment:
       NOTION_ATTACHMENT_ROOT: /data
+      # read_only: true なのでルートFSには書けない。状態ファイルは書き込み可能な /data に置く。
+      NOTION_STATE_FILE: ${NOTION_STATE_FILE:-/data/state.json}
       NOTION_MCP_REGISTRY_FILE: ${NOTION_MCP_REGISTRY_FILE:-/data/mcp-connections.json}
     stdin_open: true
     tty: false
