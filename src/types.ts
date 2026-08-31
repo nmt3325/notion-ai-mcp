@@ -59,6 +59,11 @@ export interface KeepAlive {
   cooldownMs:number;
   maxNudges:number;
   nudgeCount:number;
+  /** Answer Notion's step-limit prompt automatically, the way the web client's Continue button does. */
+  autoContinue?:boolean|undefined;
+  maxContinues?:number|undefined;
+  continueCount?:number|undefined;
+  lastContinueAt?:number|undefined;
   language:"ja"|"en";
   doneToken?:string|undefined;
   message?:string|undefined;

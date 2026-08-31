@@ -10,6 +10,7 @@ import { McpConnectionManager } from "./mcp-connections.js";
 import { prepareAttachmentInput, readResponseBuffer, writeAttachmentOutput, type AttachmentInput, type PreparedAttachment } from "./attachments.js";
 import { agentTranscriptError, applyAgentTranscriptPatches, createAgentTranscriptState, isAgentTranscriptTurnComplete, latestAgentTranscriptText } from "./agent-transcript.js";
 import type { InterruptResult } from "./types.js";
+import type { KeepAwakeDefaults } from "./keep-awake.js";
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 const SEC_CH_UA = '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"';
@@ -576,7 +577,7 @@ export class NotionClient {
     return { threadId, cleared: true, inferenceId: signals.currentInferenceId, leaseExpiration: signals.leaseExpiration };
   }
 
-  keepAwakeDefaults(): { interrupt: boolean; idleMs: number; pollMs: number; cooldownMs: number; maxNudges: number; deadlineMs: number; enabled: boolean } {
+  keepAwakeDefaults(): KeepAwakeDefaults {
     return { ...this.config.keepAwake };
   }
 
