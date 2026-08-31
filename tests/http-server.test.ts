@@ -5,6 +5,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { NotionClient } from "../src/notion-client.js";
 import { createRemoteMcpHttpServer } from "../src/http-server.js";
+import { EXPECTED_TOOL_NAMES } from "../src/tool-names.js";
 
 const bearerToken = "test-only-not-a-secret-bearer-token-0000000000000000";
 
@@ -88,37 +89,7 @@ test("Streamable HTTP server requires bearer auth and executes MCP tools", async
     await client.connect(transport as unknown as Transport);
     assert.equal(remote.sessionCount(), 1);
     const tools = await client.listTools();
-    assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), [
-      "add_mcp_connection",
-      "check_keep_alive",
-      "check_mcp_oauth_support",
-      "complete_mcp_oauth",
-      "connect_preconfigured_mcp_server",
-      "create_workspace",
-      "delete_conversation",
-      "download_attachment",
-      "get_chat_result",
-      "get_conversation",
-      "get_current_workspace",
-      "get_mcp_connection_status",
-      "interrupt_conversation",
-      "keep_alive_kick",
-      "keep_me_awake",
-      "list_chat_jobs",
-      "list_conversations",
-      "list_keep_alives",
-      "list_mcp_connections",
-      "list_preconfigured_mcp_servers",
-      "list_workspaces",
-      "notion_ai_chat",
-      "remove_mcp_connection",
-      "rename_conversation",
-      "start_mcp_oauth",
-      "stop_keep_me_awake",
-      "switch_workspace",
-      "update_mcp_connection",
-      "upload_attachment"
-    ]);
+    assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), [...EXPECTED_TOOL_NAMES]);
     const result = await client.callTool({ name: "notion_ai_chat", arguments: { prompt: "Hello" } });
     assert.equal(result.content[0]?.type === "text" ? result.content[0].text : "", "Remote mock answer");
     await transport.terminateSession();

@@ -4,38 +4,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { NotionClient } from "../src/notion-client.js";
 import { createServer, toMcpAuth } from "../src/server.js";
+import { EXPECTED_TOOL_NAMES } from "../src/tool-names.js";
 
-export const EXPECTED_TOOLS = [
-  "add_mcp_connection",
-  "check_keep_alive",
-  "check_mcp_oauth_support",
-  "complete_mcp_oauth",
-  "connect_preconfigured_mcp_server",
-  "create_workspace",
-  "delete_conversation",
-  "download_attachment",
-  "get_chat_result",
-  "get_conversation",
-  "get_current_workspace",
-  "get_mcp_connection_status",
-  "interrupt_conversation",
-  "keep_alive_kick",
-  "keep_me_awake",
-  "list_chat_jobs",
-  "list_conversations",
-  "list_keep_alives",
-  "list_mcp_connections",
-  "list_preconfigured_mcp_servers",
-  "list_workspaces",
-  "notion_ai_chat",
-  "remove_mcp_connection",
-  "rename_conversation",
-  "start_mcp_oauth",
-  "stop_keep_me_awake",
-  "switch_workspace",
-  "update_mcp_connection",
-  "upload_attachment"
-];
+export const EXPECTED_TOOLS = [...EXPECTED_TOOL_NAMES];
 
 function fakeClient(): { client: NotionClient; chatCalls: Array<Record<string, unknown>>; added: Array<Record<string, unknown>>; uploaded: Array<Record<string, unknown>>; downloaded: Array<Record<string, unknown>>; lookups: Array<Record<string, unknown>>; waits: Array<number | undefined> } {
   const chatCalls: Array<Record<string, unknown>> = [];

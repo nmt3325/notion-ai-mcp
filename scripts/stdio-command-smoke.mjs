@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { EXPECTED_TOOL_NAMES } from "../dist/src/tool-names.js";
 
 const cleanEnv = Object.fromEntries(Object.entries(process.env).filter((entry) => typeof entry[1] === "string"));
 const transport = new StdioClientTransport({
@@ -24,7 +25,11 @@ try {
   for (const required of ["notion_ai_chat", "upload_attachment", "download_attachment", "add_mcp_connection", "remove_mcp_connection", "start_mcp_oauth", "complete_mcp_oauth", "rename_conversation", "delete_conversation", "get_chat_result", "list_chat_jobs"]) {
     assert.ok(names.includes(required), `missing required tool: ${required}`);
   }
-  assert.equal(names.length, 23, `expected 23 tools, got ${names.length}`);
+  const expected = [...EXPECTED_TOOL_NAMES].sort();
+  const missing = expected.filter((name) => !names.includes(name));
+  const unexpected = names.filter((name) => !expected.includes(name));
+  // A count drifts on every new tool and says nothing about which one moved.
+  assert.deepEqual({ missing, unexpected }, { missing: [], unexpected: [] });
   process.stdout.write(`${JSON.stringify({ started: true, transport: "stdio", toolCount: names.length, tools: names }, null, 2)}\n`);
 } finally {
   await client.close().catch(() => undefined);
