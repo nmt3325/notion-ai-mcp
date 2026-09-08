@@ -661,7 +661,10 @@ export class KeepAwakeSupervisor {
         ? this.runtime.sendContinue(record.conversationId, this.cancellations.get(keepAliveId)?.signal)
         : this.runtime.sendNudge(record.conversationId, prompt, this.cancellations.get(keepAliveId)?.signal);
       const lease = signals ? leaseState(signals) : "free";
-      const canInterrupt = this.defaults.interrupt && Boolean(this.runtime.interrupt);
+      // Native Continue resumes the very checkpoint that lease is holding, so clearing the lease
+      // first would discard the work the continuation exists to resume.
+      const resumesCheckpoint = isContinue && Boolean(this.runtime.sendContinue);
+      const canInterrupt = this.defaults.interrupt && Boolean(this.runtime.interrupt) && !resumesCheckpoint;
       let interrupted = false;
       try {
         if (canInterrupt && lease !== "free") interrupted = await this.interruptLease(record.conversationId);
@@ -776,8 +779,22 @@ export class KeepAwakeSupervisor {
     const newerInference = Boolean(signals.currentInferenceId && outcome?.inferenceId && signals.currentInferenceId !== outcome.inferenceId);
     const closed = Boolean(!newerInference && outcome?.status === "completed" && outcome.completedTime !== null && outcome.completedTime >= anchor);
     const quiet = signals.updatedTime !== null && now - signals.updatedTime >= (this.defaults.confirmGraceMs ?? DEFAULT_CONFIRM_GRACE_MS);
-    if (newerInference || (!closed && !quiet)) return ordinary;
     const autoContinue = record.autoContinue !== false && this.defaults.autoContinue !== false;
+    if (newerInference || (!closed && !quiet)) {
+      // A real step-limit pause never releases the inference lease, so no outcome is written for
+      // the turn and the probe below never runs. Notion answers a text nudge with an empty stream
+      // while that lease is held, so the saved checkpoint is the only way back. The extra read is
+      // deferred until the heartbeat has been frozen long enough to be nudge-worthy anyway.
+      const frozen = signals.updatedTime !== null && now - signals.updatedTime >= record.idleMs;
+      if (frozen && this.runtime.readContinuation) {
+        try {
+          if (await this.runtime.readContinuation(record.conversationId)) {
+            return { awaitingConfirmation: autoContinue, completionIsAnswer: false, confirmationBlocked: !autoContinue };
+          }
+        } catch { /* Evidence is best effort; an ordinary stall still falls through to the nudge. */ }
+      }
+      return ordinary;
+    }
     if (this.runtime.readTail && !this.runtime.readContinuation && (closed || !outcome)) {
       try {
         if (isStepLimitConfirmation(await this.runtime.readTail(record.conversationId), this.defaults.continuePatterns ?? [])) {

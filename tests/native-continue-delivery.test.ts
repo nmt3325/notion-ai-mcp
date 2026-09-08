@@ -193,3 +193,52 @@ test("native evidence stops reading once the turn cannot be under the limit", as
     assert.ok(used <= 3, `expected a bounded scan, used ${used} reads`);
   } finally { f.cleanup(); }
 });
+
+// Reproduces the observed live failure: Notion never released the inference lease at the step limit,
+// so no outcome was written for the running turn, the completion probe returned early and the
+// heartbeat rule answered with a text nudge that Notion refused with an empty stream.
+const paused = (f: any) => { f.thread.current_inference_id = "paused-execution"; f.thread.data.last_turn_outcome.completed_time = BASE - 60000; };
+test("a held inference lease at the step limit is continued natively instead of nudged", async () => {
+  const f = await fixture(); f.close(); paused(f); f.mode("accepted");
+  let nudges = 0; f.client.sendChatNudge = async () => { nudges++; return { acceptedAt: BASE + 200500 }; };
+  const supervisor = createKeepAwakeSupervisor(f.client);
+  try {
+    const watch = await supervisor.start({ conversationId: f.id }); const steps = f.thread.messages.length; f.advance();
+    const result = await supervisor.tick(watch.keepAliveId);
+    assert.equal(result.decision.action, "continue"); assert.equal(result.keepAlive?.continueCount, 1);
+    assert.equal(result.keepAlive?.nudgeCount, 0); assert.equal(nudges, 0);
+    assert.equal(f.thread.messages.length, steps); assert.deepEqual(f.requests[0].transcript, []);
+  } finally { supervisor.stopAll(); f.cleanup(); }
+});
+test("the paused checkpoint is never cleared before the native continuation", async () => {
+  const f = await fixture(); f.close(); paused(f); f.mode("accepted");
+  let interrupts = 0;
+  f.client.keepAwakeDefaults = () => ({ enabled: true, interrupt: true, autoContinue: true, idleMs: 120000, pollMs: 3600000, cooldownMs: 60000, maxNudges: 4, deadlineMs: 3600000 });
+  (f.client as any).interruptTurn = async () => { interrupts++; return { cleared: true, ended: false }; };
+  const supervisor = createKeepAwakeSupervisor(f.client);
+  try {
+    const watch = await supervisor.start({ conversationId: f.id }); f.advance();
+    const result = await supervisor.tick(watch.keepAliveId);
+    assert.equal(result.decision.action, "continue"); assert.equal(interrupts, 0); assert.equal(result.keepAlive?.continueCount, 1);
+  } finally { supervisor.stopAll(); f.cleanup(); }
+});
+test("a held lease below the limit still falls back to the ordinary nudge", async () => {
+  const f = await fixture(); f.close(99); paused(f);
+  let nudges = 0; f.client.sendChatNudge = async () => { nudges++; return { acceptedAt: BASE + 200500 }; };
+  const supervisor = createKeepAwakeSupervisor(f.client);
+  try {
+    const watch = await supervisor.start({ conversationId: f.id }); f.advance();
+    const result = await supervisor.tick(watch.keepAliveId);
+    assert.equal(result.decision.action, "nudge"); assert.equal(nudges, 1); assert.equal(f.requests.length, 0);
+  } finally { supervisor.stopAll(); f.cleanup(); }
+});
+test("a live heartbeat is not charged a native evidence read", async () => {
+  const f = await fixture(); f.close(); paused(f); f.thread.data.last_turn_outcome.status = "in_progress";
+  const supervisor = createKeepAwakeSupervisor(f.client);
+  try {
+    const watch = await supervisor.start({ conversationId: f.id });
+    const before = f.reads();
+    const result = await supervisor.tick(watch.keepAliveId);
+    assert.equal(result.decision.action, "wait"); assert.equal(f.reads(), before); assert.equal(f.requests.length, 0);
+  } finally { supervisor.stopAll(); f.cleanup(); }
+});
