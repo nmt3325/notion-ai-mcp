@@ -54,11 +54,7 @@ export function isLockedError(message: string): boolean {
  * answer that merely talks about steps is not the prompt.
  */
 const CONFIRMATION_PATTERNS: readonly RegExp[] = [
-  /taking a lot of steps/i,
-  /confirm[^.?!]{0,80}keep going/i,
-  /keep going\?/i,
-  /続行しますか/,
-  /続行してよ(い|ろしい)/
+  /(?:^|\n)This task is taking a lot of steps\.\s*Please confirm you want the agent to keep going\.?$/i
 ];
 
 const CONFIRMATION_TAIL_LENGTH = 400;
@@ -67,8 +63,8 @@ export function isStepLimitConfirmation(text: string, extra: readonly RegExp[] =
   const tail = text.trim().slice(-CONFIRMATION_TAIL_LENGTH);
   if (!tail) return false;
   if ([...CONFIRMATION_PATTERNS, ...extra].some((pattern) => pattern.test(tail))) return true;
-  // The Japanese wording moves around far more than the English one, so it is matched by parts.
-  return tail.includes("ステップ") && (tail.includes("続行") || tail.includes("続け"));
+  // Ordinary approval questions must never be promoted to step-limit consent.
+  return false;
 }
 
 /** Extra prompts to treat as the step-limit confirmation: one literal per line, case-insensitive. */
@@ -89,7 +85,7 @@ export function parseConfirmationPatterns(raw: string | undefined): RegExp[] {
  */
 export function isUnfinishedFinalStep(shape: FinalStepShape | null | undefined): boolean {
   if (!shape) return false;
-  return !shape.hasAnswerText;
+  return shape.type !== "agent-inference" || !shape.hasAnswerText || shape.hasToolUse === true || /^(streaming|pending|blocked|awaiting_permission)$/.test(shape.state);
 }
 
 /** True when an unfinished close ran long enough to be the step limit rather than an early death. */
@@ -99,7 +95,7 @@ export function isStepLimitStop(shape: FinalStepShape | null | undefined, stepCo
 }
 
 export type KeepAwakeDecision =
-  | { action: "wait"; reason: "healthy" | "cooldown" | "signals_unavailable" | "confirm_grace" }
+  | { action: "wait"; reason: "healthy" | "cooldown" | "signals_unavailable" | "confirm_grace" | "awaiting_confirmation" }
   | { action: "continue"; reason: "awaiting_confirmation" }
   | { action: "nudge"; reason: "stalled"; idleMs: number }
   | { action: "stop"; reason: "turn_completed" | "max_nudges" | "max_continues" | "deadline" };
@@ -117,7 +113,8 @@ export interface KeepAwakeDecisionInput {
   /** The newest step is Notion's step-limit prompt, so the turn is one confirmation from resuming. */
   awaitingConfirmation?: boolean | undefined;
   /** False when the closed turn did not end on an answer, so the completion must not stop the watch. */
-  completionIsAnswer?: boolean | undefined;
+  completionIsAnswer?: boolean | null | undefined;
+  confirmationBlocked?: boolean | undefined;
   continueCount?: number | undefined;
   maxContinues?: number | undefined;
   lastContinueAt?: number | null | undefined;
@@ -136,7 +133,8 @@ export interface KeepAwakeDecisionInput {
 export function decideKeepAwake(input: KeepAwakeDecisionInput): KeepAwakeDecision {
   if (input.now >= input.deadlineAt) return { action: "stop", reason: "deadline" };
   // A read that failed is not silence. Nudging blind would fire into a perfectly healthy turn.
-  if (!input.signals) return { action: "wait", reason: "signals_unavailable" };
+  if (!input.signals || input.completionIsAnswer === null) return { action: "wait", reason: "signals_unavailable" };
+  if (input.confirmationBlocked) return { action: "wait", reason: "awaiting_confirmation" };
 
   // Notion closes the turn when it asks to keep going, so this has to be checked before the
   // completion rule: otherwise the watch ends on the prompt and nobody ever presses Continue.
@@ -156,7 +154,7 @@ export function decideKeepAwake(input: KeepAwakeDecisionInput): KeepAwakeDecisio
   const outcome = input.signals.lastTurnOutcome;
   // Notion stamps "completed" on a turn it stopped itself, so a completion that did not end on an
   // answer is not a finish at all: it is a dead turn that still needs continuing.
-  if (outcome && outcome.status === "completed" && outcome.completedTime !== null && outcome.completedTime >= input.anchorTime && input.completionIsAnswer !== false) {
+  if (outcome && outcome.status === "completed" && outcome.completedTime !== null && outcome.completedTime >= Math.max(input.anchorTime, input.signals.lastUserMessageTime ?? 0) && input.completionIsAnswer !== false && (!input.signals.currentInferenceId || !outcome.inferenceId || input.signals.currentInferenceId === outcome.inferenceId)) {
     return { action: "stop", reason: "turn_completed" };
   }
 
@@ -434,6 +432,7 @@ export class KeepAliveStore {
     if (!record) return null;
     record.nudgeCount += 1;
     record.lastNudgeAt = at;
+    record.anchorTime = Math.max(record.anchorTime, at);
     this.persist();
     return { ...record };
   }
@@ -444,6 +443,7 @@ export class KeepAliveStore {
     if (!record) return null;
     record.continueCount = (record.continueCount ?? 0) + 1;
     record.lastContinueAt = at;
+    record.anchorTime = Math.max(record.anchorTime, at);
     this.persist();
     return { ...record };
   }
@@ -454,6 +454,7 @@ export class KeepAliveStore {
     record.anchorTime = anchorTime;
     // A kick says the caller is still working, so a cooldown from an earlier nudge must not carry over.
     delete record.lastNudgeAt;
+    delete record.lastContinueAt;
     if (deadlineAt !== undefined) record.deadlineAt = deadlineAt;
     this.persist();
     return { ...record };
@@ -472,7 +473,7 @@ export class KeepAliveStore {
 
 export interface KeepAwakeRuntime {
   readSignals: (conversationId: string) => Promise<ThreadSignals>;
-  sendNudge: (conversationId: string, prompt: string) => Promise<void>;
+  sendNudge: (conversationId: string, prompt: string, signal?: AbortSignal) => Promise<void | { acceptedAt: number }>;
   /** Newest user-visible text on the thread, used to spot Notion's step-limit prompt. */
   readTail?: ((conversationId: string) => Promise<string>) | undefined;
   /** Shape of the step a closed turn ended on: the durable half of the web client's Continue prompt. */
@@ -510,6 +511,8 @@ const STOP_STATUS: Record<"turn_completed" | "max_nudges" | "max_continues" | "d
 /** Polls watched conversations and sends a nudge only when a turn stopped without closing. */
 export class KeepAwakeSupervisor {
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly checks = new Map<string, Promise<{ decision: KeepAwakeDecision; keepAlive: KeepAlive | null }>>();
+  private readonly cancellations = new Map<string, AbortController>();
 
   constructor(
     private readonly store: KeepAliveStore,
@@ -541,7 +544,10 @@ export class KeepAwakeSupervisor {
     // to be a server value too. A first read that fails means the watchdog cannot be calibrated, and
     // arming it anyway would either nudge a healthy chat or never nudge at all.
     const signals = await this.runtime.readSignals(input.conversationId);
-    const anchorTime = signals.updatedTime ?? signals.serverNow;
+    // Re-check after I/O: simultaneous registrations must share a single timer.
+    const concurrent = this.store.watching().find((record) => record.conversationId === input.conversationId);
+    if (concurrent) return concurrent;
+    const anchorTime = signals.lastUserMessageTime ?? signals.updatedTime ?? signals.serverNow;
     const record = this.store.create({
       conversationId: input.conversationId,
       anchorTime,
@@ -561,18 +567,31 @@ export class KeepAwakeSupervisor {
     return record;
   }
 
-  async tick(keepAliveId: string): Promise<{ decision: KeepAwakeDecision; keepAlive: KeepAlive | null }> {
+  tick(keepAliveId: string): Promise<{ decision: KeepAwakeDecision; keepAlive: KeepAlive | null }> {
+    const existing = this.checks.get(keepAliveId);
+    if (existing) return existing;
+    this.cancellations.set(keepAliveId, new AbortController());
+    const check = this.tickOnce(keepAliveId).finally(() => { this.checks.delete(keepAliveId); this.cancellations.delete(keepAliveId); });
+    this.checks.set(keepAliveId, check);
+    return check;
+  }
+
+  private async tickOnce(keepAliveId: string): Promise<{ decision: KeepAwakeDecision; keepAlive: KeepAlive | null }> {
     const record = this.store.get(keepAliveId);
     if (!record || record.status !== "watching") return { decision: { action: "wait", reason: "healthy" }, keepAlive: record };
+    const current = (): boolean => { const live = this.store.get(keepAliveId); return live?.status === "watching" && live.anchorTime === record.anchorTime; };
+    const cancelled = () => ({ decision: { action: "wait", reason: "healthy" } as KeepAwakeDecision, keepAlive: this.store.get(keepAliveId) });
     let signals: ThreadSignals | null = null;
     let failure = "";
     try { signals = await this.runtime.readSignals(record.conversationId); }
     catch (error) { failure = error instanceof Error ? error.message : String(error); }
     // One read gives both signals from the same record, so the heartbeat and the outcome can never
     // disagree about which turn they describe.
+    if (!current()) return cancelled();
     const now = signals ? signals.serverNow : this.now();
     this.store.noteCheck(keepAliveId, now, signals?.updatedTime ?? null, failure || undefined);
     const probe = await this.inspectCompletion(record, signals, now);
+    if (!current()) return cancelled();
     const decision = decideKeepAwake({
       now,
       anchorTime: record.anchorTime,
@@ -585,12 +604,31 @@ export class KeepAwakeSupervisor {
       deadlineAt: record.deadlineAt,
       awaitingConfirmation: probe.awaitingConfirmation,
       completionIsAnswer: probe.completionIsAnswer,
+      confirmationBlocked: probe.confirmationBlocked,
       continueCount: record.continueCount ?? 0,
       maxContinues: record.maxContinues ?? DEFAULT_MAX_CONTINUES,
       lastContinueAt: record.lastContinueAt ?? null,
       ...(this.defaults.continueCooldownMs === undefined ? {} : { continueCooldownMs: this.defaults.continueCooldownMs }),
       ...(this.defaults.confirmGraceMs === undefined ? {} : { confirmGraceMs: this.defaults.confirmGraceMs })
     });
+    // Revalidate just before a write or terminal classification. The heartbeat may have advanced
+    // while the final-step probe was in flight, or the user may have started a newer turn.
+    if (decision.action === "nudge" || decision.action === "continue" || (decision.action === "stop" && decision.reason === "turn_completed")) {
+      try {
+        const fresh = await this.runtime.readSignals(record.conversationId);
+        if (!current()) return cancelled();
+        this.store.noteCheck(keepAliveId, fresh.serverNow, fresh.updatedTime);
+        if (fresh.serverNow >= record.deadlineAt) {
+          this.cancel(keepAliveId);
+          this.store.finish(keepAliveId, "expired", fresh.serverNow, "deadline");
+          return { decision: { action: "stop", reason: "deadline" }, keepAlive: this.store.get(keepAliveId) };
+        }
+        if (fresh.updatedTime !== signals?.updatedTime || fresh.currentInferenceId !== signals?.currentInferenceId || fresh.lastUserMessageTime !== signals?.lastUserMessageTime || JSON.stringify(fresh.lastTurnOutcome) !== JSON.stringify(signals?.lastTurnOutcome)) return cancelled();
+      } catch (error) {
+        this.store.noteCheck(keepAliveId, now, signals?.updatedTime ?? null, error instanceof Error ? error.message : String(error));
+        return { decision: { action: "wait", reason: "signals_unavailable" }, keepAlive: this.store.get(keepAliveId) };
+      }
+    }
     if (decision.action === "stop") {
       this.cancel(keepAliveId);
       this.store.finish(keepAliveId, STOP_STATUS[decision.reason], now, decision.reason);
@@ -620,16 +658,18 @@ export class KeepAwakeSupervisor {
       let interrupted = false;
       try {
         if (canInterrupt && lease !== "free") interrupted = await this.interruptLease(record.conversationId);
-        await this.runtime.sendNudge(record.conversationId, prompt);
-        this.noteDelivery(keepAliveId, now, isContinue);
+        if (!current()) return cancelled();
+        const receipt = await this.runtime.sendNudge(record.conversationId, prompt, this.cancellations.get(keepAliveId)?.signal);
+        this.noteDelivery(keepAliveId, receipt?.acceptedAt ?? now, isContinue);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         // A rejected nudge leaves no step behind, so one retry behind an interrupt cannot duplicate work.
-        if (canInterrupt && !interrupted && isLockedError(message)) {
+        if (current() && canInterrupt && !interrupted && isLockedError(message)) {
           try {
             await this.interruptLease(record.conversationId);
-            await this.runtime.sendNudge(record.conversationId, prompt);
-            this.noteDelivery(keepAliveId, now, isContinue);
+            if (!current()) return cancelled();
+            const receipt = await this.runtime.sendNudge(record.conversationId, prompt, this.cancellations.get(keepAliveId)?.signal);
+            this.noteDelivery(keepAliveId, receipt?.acceptedAt ?? now, isContinue);
             return { decision, keepAlive: this.store.get(keepAliveId) };
           } catch (retryError) {
             const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
@@ -648,8 +688,10 @@ export class KeepAwakeSupervisor {
   async kick(keepAliveId: string): Promise<KeepAlive | null> {
     const record = this.store.get(keepAliveId);
     if (!record || record.status !== "watching") return record;
+    this.cancellations.get(keepAliveId)?.abort();
     const signals = await this.runtime.readSignals(record.conversationId);
-    const updated = this.store.reanchor(keepAliveId, signals.updatedTime ?? signals.serverNow);
+    if (this.store.get(keepAliveId)?.status !== "watching") return this.store.get(keepAliveId);
+    const updated = this.store.reanchor(keepAliveId, signals.lastUserMessageTime ?? signals.updatedTime ?? signals.serverNow);
     this.schedule(keepAliveId, record.pollMs);
     return updated;
   }
@@ -683,6 +725,7 @@ export class KeepAwakeSupervisor {
     const record = this.store.get(keepAliveId);
     if (!record) return null;
     this.cancel(keepAliveId);
+    this.cancellations.get(keepAliveId)?.abort();
     if (record.status !== "watching") return record;
     return this.store.finish(keepAliveId, "stopped", this.now(), "stopped_by_caller");
   }
@@ -700,7 +743,7 @@ export class KeepAwakeSupervisor {
     const timer = setTimeout(() => {
       void this.tick(keepAliveId)
         .then((outcome) => { if (outcome.keepAlive?.status === "watching") this.schedule(keepAliveId, outcome.keepAlive.pollMs); })
-        .catch(() => { this.schedule(keepAliveId, pollMs); });
+        .catch(() => { if (this.store.get(keepAliveId)?.status === "watching") this.schedule(keepAliveId, pollMs); });
     }, pollMs);
     timer.unref?.();
     this.timers.set(keepAliveId, timer);
@@ -718,37 +761,37 @@ export class KeepAwakeSupervisor {
    * sitting on a confirmation prompt, so probing the transcript then would double the traffic for
    * nothing.
    */
-  private async inspectCompletion(record: KeepAlive, signals: ThreadSignals | null, now: number): Promise<{ awaitingConfirmation: boolean; completionIsAnswer: boolean }> {
-    // Nothing learned means nothing changes: the watch keeps behaving exactly as it did before.
-    const inconclusive = { awaitingConfirmation: false, completionIsAnswer: true };
-    if (!signals) return inconclusive;
-    if (record.autoContinue === false || this.defaults.autoContinue === false) return inconclusive;
+  private async inspectCompletion(record: KeepAlive, signals: ThreadSignals | null, now: number): Promise<{ awaitingConfirmation: boolean; completionIsAnswer: boolean | null; confirmationBlocked?: boolean }> {
+    const ordinary = { awaitingConfirmation: false, completionIsAnswer: true };
+    if (!signals) return ordinary;
     const outcome = signals.lastTurnOutcome;
-    const closed = Boolean(outcome && outcome.completedTime !== null && outcome.completedTime >= record.anchorTime);
-    const confirmGraceMs = this.defaults.confirmGraceMs ?? DEFAULT_CONFIRM_GRACE_MS;
-    const quiet = signals.updatedTime !== null && now - signals.updatedTime >= confirmGraceMs;
-    if (!closed && !quiet) return inconclusive;
-    // Kept as insurance. If Notion ever does write the prompt into the thread, matching the text is
-    // the most direct evidence available, and it costs one transcript page.
-    if (this.runtime.readTail) {
+    const anchor = Math.max(record.anchorTime, signals.lastUserMessageTime ?? 0);
+    const newerInference = Boolean(signals.currentInferenceId && outcome?.inferenceId && signals.currentInferenceId !== outcome.inferenceId);
+    const closed = Boolean(!newerInference && outcome?.status === "completed" && outcome.completedTime !== null && outcome.completedTime >= anchor);
+    const quiet = signals.updatedTime !== null && now - signals.updatedTime >= (this.defaults.confirmGraceMs ?? DEFAULT_CONFIRM_GRACE_MS);
+    if (newerInference || (!closed && !quiet)) return ordinary;
+    const autoContinue = record.autoContinue !== false && this.defaults.autoContinue !== false;
+    if (this.runtime.readTail && (closed || !outcome)) {
       try {
         if (isStepLimitConfirmation(await this.runtime.readTail(record.conversationId), this.defaults.continuePatterns ?? [])) {
-          return { awaitingConfirmation: true, completionIsAnswer: false };
+          return { awaitingConfirmation: autoContinue, completionIsAnswer: false, confirmationBlocked: !autoContinue };
         }
-      } catch {
-        // A failed transcript read is not evidence of anything; the next poll tries again.
-      }
+      } catch { /* Text is supplementary; the durable final-step probe below remains authoritative. */ }
     }
-    if (!closed || !this.runtime.readFinalStep || !outcome?.finalStepId) return inconclusive;
+    if (!closed || !this.runtime.readFinalStep) return ordinary;
+    // A missing/unreadable record is unknown, never evidence of successful completion.
+    const unknown = { awaitingConfirmation: false, completionIsAnswer: null };
+    if (!outcome?.finalStepId) return unknown;
     try {
       const shape = await this.runtime.readFinalStep(record.conversationId, outcome.finalStepId);
-      if (!isUnfinishedFinalStep(shape)) return inconclusive;
-      // Unfinished either way, so the watch must not stop; the step count only decides whether the
-      // answer is a Continue click or an ordinary nudge.
-      return { awaitingConfirmation: isStepLimitStop(shape, outcome.stepCount, this.defaults.stepLimitSteps ?? DEFAULT_STEP_LIMIT_STEPS), completionIsAnswer: false };
-    } catch {
-      return inconclusive;
-    }
+      if (!shape || !shape.type) return unknown;
+      if (/^(pending|blocked|awaiting_permission)$/.test(shape.state)) {
+        return { awaitingConfirmation: false, completionIsAnswer: false, confirmationBlocked: true };
+      }
+      if (!isUnfinishedFinalStep(shape)) return ordinary;
+      const stepLimit = isStepLimitStop(shape, outcome.stepCount, this.defaults.stepLimitSteps ?? DEFAULT_STEP_LIMIT_STEPS);
+      return { awaitingConfirmation: stepLimit && autoContinue, completionIsAnswer: false, confirmationBlocked: stepLimit && !autoContinue };
+    } catch { return unknown; }
   }
 
   /** Clears a held inference lease, reproducing the persisted half of the web client's stop button. */

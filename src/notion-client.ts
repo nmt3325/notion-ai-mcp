@@ -38,6 +38,9 @@ interface ChatOptions {
   attachments?: ChatAttachment[] | undefined;
   fileIds?: string[] | undefined;
   _retryCount?: number | undefined;
+  /** Internal durable message identity for delivery acknowledgment. */
+  _userStepId?: string | undefined;
+  _signal?: AbortSignal | undefined;
 }
 
 type AgentUploadTarget = { type: "user" } | { type: "thread"; threadId: string };
@@ -412,6 +415,8 @@ export class NotionClient {
   private accountPromise: Promise<AccountContext> | null = null;
   private readonly sessions = new Map<string, ChatSession>();
   private readonly state: ChatStateStore;
+  private readonly userAnchors = new Map<string, { lastId: string; userId: string; time: number | null }>();
+  private readonly pendingNudges = new Map<string, { stepId: string; jobId: string }>();
   private readonly transcriptUploads = new Map<string, TranscriptUploadRecord>();
   private workspaceManager: WorkspaceManager | null = null;
   private mcpManager: McpConnectionManager | null = null;
@@ -520,7 +525,7 @@ export class NotionClient {
    * The current time is taken from the Date response header, because completed_time and updated_time
    * are Notion's stamps and comparing them against a local clock makes the result depend on skew.
    */
-  async threadSignals(threadId: string): Promise<ThreadSignals> {
+  async threadSignals(threadId: string, options: { includeUserMessage?: boolean } = {}): Promise<ThreadSignals> {
     const account = await this.account();
     const response = await this.request("syncRecordValuesMain", { requests: [{ pointer: { table: "thread", id: threadId, spaceId: account.spaceId }, version: -1 }] }, false);
     const header = Date.parse(response.headers.get("date") ?? "");
@@ -543,8 +548,38 @@ export class NotionClient {
       serverNow,
       messageCount: arrayOfStrings(record.messages).length,
       lastTurnOutcome: parseTurnOutcome(data.last_turn_outcome),
-      credits
+      credits,
+      ...(options.includeUserMessage ? { lastUserMessageTime: await this.latestUserMessageTime(threadId, arrayOfStrings(record.messages)) } : {})
     };
+  }
+
+  /** Latest persisted user timestamp, cached by the last scanned message ID. */
+  private async latestUserMessageTime(threadId: string, ids: string[]): Promise<number | null> {
+    const cached = this.userAnchors.get(threadId);
+    const previous = cached && ids.includes(cached.userId) ? ids.indexOf(cached.lastId) : -1;
+    let userId = previous >= 0 ? cached!.userId : "";
+    let time = previous >= 0 ? cached!.time : null;
+    // Read only appended IDs after the first scan. Long tool loops must not re-fetch their history.
+    const unseen = ids.slice(previous + 1);
+    let found = false;
+    for (let end = unseen.length; end > 0 && !found; end -= 64) {
+      const batch = unseen.slice(Math.max(0, end - 64), end);
+      const records = await this.fetchThreadMessages(batch);
+      for (const id of [...batch].reverse()) {
+        const record = unwrapRecord(records[id]);
+        const step = object(record.step ?? object(record.data).step ?? record.data);
+        if (!step.type) throw new Error("Latest user-turn anchor is temporarily unavailable");
+        if (step.type !== "user") continue;
+        time = asNumber(record.created_time);
+        if (time === null) throw new Error("Latest user step has no server timestamp");
+        userId = id; found = true; break;
+      }
+    }
+    if (ids.length) {
+      this.userAnchors.set(threadId, { lastId: ids[ids.length - 1]!, userId, time });
+      if (this.userAnchors.size > 200) this.userAnchors.delete(this.userAnchors.keys().next().value!);
+    }
+    return time;
   }
 
   /**
@@ -565,7 +600,8 @@ export class NotionClient {
       stepId,
       type: asString(step.type),
       state: asString(step.state),
-      hasAnswerText: agentInferenceText(step.value).length > 0,
+      hasAnswerText: asString(step.type) === "agent-inference" && agentInferenceText(step.value).trim().length > 0,
+      hasToolUse: Array.isArray(step.value) && step.value.some((part) => object(part).type === "tool_use"),
       finishedAt: asNumber(step.finishedAt)
     };
   }
@@ -664,10 +700,10 @@ export class NotionClient {
 
   private buildContext(account: AccountContext, datetime: string, hasAttachments = false): JsonObject { return { timezone: account.timezone, userName: account.userName, userId: account.userId, userEmail: account.userEmail, spaceName: account.spaceName, spaceId: account.spaceId, spaceViewId: account.spaceViewId, currentDatetime: datetime, surface: hasAttachments ? "workflows" : "ai_module" }; }
 
-  private buildInferenceBody(account: AccountContext, prompt: string, model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, session: ChatSession, attachments: TranscriptUploadRecord[] = [], reasoningEffort?: string | undefined): JsonObject {
+  private buildInferenceBody(account: AccountContext, prompt: string, model: string, webSearch: boolean, workspaceSearch: boolean, readOnly: boolean, session: ChatSession, attachments: TranscriptUploadRecord[] = [], reasoningEffort?: string | undefined, userStepId: string = randomUUID()): JsonObject {
     const sub = session.turnCount > 0;
     const now = new Date().toISOString();
-    const userStep: JsonObject = { id: randomUUID(), type: "user", value: [[prompt]], userId: account.userId, createdAt: now };
+    const userStep: JsonObject = { id: userStepId, type: "user", value: [[prompt]], userId: account.userId, createdAt: now };
     const attachmentSteps = attachments.map((attachment) => {
       if (attachment.processed) {
         const metadata: JsonObject = { ...attachment.processed.metadata, attachmentSource: "user_upload" };
@@ -740,6 +776,7 @@ export class NotionClient {
       if (!restored) throw new Error(`Conversation ${requested} was not found in this workspace, so it cannot be continued. Start a new chat without conversationId, or switch to the workspace that owns it.`);
       rehydrated = true;
     }
+    options._signal?.throwIfAborted();
     const conversationId = requested || randomUUID();
     const job = this.state.createJob({
       conversationId, model, ...(reasoningEffort ? { reasoningEffort } : {}), prompt: options.prompt,
@@ -753,6 +790,55 @@ export class NotionClient {
       ...(rehydrated ? { rehydrated: true } : {}),
       hint: `Notion AI is generating in the background. Collect the answer with get_chat_result (jobId ${job.jobId} or conversationId ${conversationId}).`
     };
+  }
+
+  /**
+   * Deliver a watchdog message, not merely enqueue a background job. A 200/empty stream is a
+   * rejection, whereas our exact user-step ID appearing in the thread is a durable acknowledgment.
+   * Generation continues in its job; the watchdog never waits for the final answer.
+   * An ambiguous timeout retains the submission so a retry observes it rather than sending twice.
+   */
+  async sendChatNudge(conversationId: string, prompt: string, signal?: AbortSignal, waitMs = 30_000): Promise<{ acceptedAt: number }> {
+    signal?.throwIfAborted();
+    let pending = this.pendingNudges.get(conversationId);
+    if (!pending) {
+      const stepId = randomUUID();
+      const started = await this.startChat({ conversationId, prompt, _userStepId: stepId, _signal: signal });
+      pending = { stepId, jobId: started.jobId };
+      this.pendingNudges.set(conversationId, pending);
+    }
+    const account = await this.account();
+    const deadline = Date.now() + Math.max(1, waitMs);
+    let readError = "";
+    do {
+      signal?.throwIfAborted();
+      let readSucceeded = false;
+      try {
+        const response = await this.request("syncRecordValuesMain", { requests: [
+          { pointer: { table: "thread", id: conversationId, spaceId: account.spaceId }, version: -1 },
+          { pointer: { table: "thread_message", id: pending.stepId, spaceId: account.spaceId }, version: -1 }
+        ] }, false);
+        const payload = object(await response.json());
+        const maps = object(payload.recordMap);
+        const thread = unwrapRecord(object(maps.thread)[conversationId]);
+        const message = unwrapRecord(object(maps.thread_message)[pending.stepId]);
+        readSucceeded = Object.keys(thread).length > 0;
+        const acceptedAt = asNumber(message.created_time);
+        if (arrayOfStrings(thread.messages).includes(pending.stepId) && object(message.step).type === "user" && acceptedAt !== null) {
+          this.pendingNudges.delete(conversationId);
+          return { acceptedAt };
+        }
+      } catch (error) { readError = error instanceof Error ? error.message : String(error); }
+      const job = this.state.job(pending.jobId);
+      // Only a successful absence check permits a failed submission to be retried.
+      if (readSucceeded && job?.status === "failed") {
+        this.pendingNudges.delete(conversationId);
+        throw new Error(job.error || "Notion rejected the watchdog message");
+      }
+      if (Date.now() >= deadline) break;
+      await sleep(Math.min(500, Math.max(1, deadline - Date.now())));
+    } while (Date.now() <= deadline);
+    throw new Error(`Watchdog delivery not yet confirmed; the pending submission is retained without resending.${readError ? ` Last verification error: ${readError}` : ""}`);
   }
 
   private async runChatJob(jobId: string, options: ChatOptions): Promise<void> {
@@ -937,7 +1023,8 @@ export class NotionClient {
     if (fileIds.length > 0 && transcriptFiles.length === 0) throw new Error("Uploaded file IDs cannot be added to a legacy chat unless they are inference-transcript attachment handles. Start a new chat without conversationId.");
     if (transcriptFiles.some((file) => file.usedInChat)) throw new Error("An inference-transcript attachment handle can only be attached once");
     const prompt = promptWithLegacyAttachments(options.prompt, options.attachments ?? []);
-    const body = this.buildInferenceBody(account, prompt, effectiveModel, options.webSearch ?? this.config.defaultWebSearch, options.workspaceSearch ?? this.config.defaultWorkspaceSearch, options.readOnly ?? this.config.defaultReadOnly, session, transcriptFiles, reasoningEffort);
+    const body = this.buildInferenceBody(account, prompt, effectiveModel, options.webSearch ?? this.config.defaultWebSearch, options.workspaceSearch ?? this.config.defaultWorkspaceSearch, options.readOnly ?? this.config.defaultReadOnly, session, transcriptFiles, reasoningEffort, options._userStepId);
+    options._signal?.throwIfAborted();
     const response = await this.request("runInferenceTranscript", body, true);
     if (!response.body) throw new Error("runInferenceTranscript returned no response stream");
     const parsed = await parseInferenceStream(response.body);

@@ -343,30 +343,32 @@ Notion AI は長いタスクの途中でターンを閉じずに止まること�
 | --- | --- |
 | heartbeat | `thread.updated_time`。最新ステップの `created_time` と一致します |
 | stall判定 | `now - updated_time > idleMs`（既定 120s、下限 60s） |
-| 正常終了 | `last_turn_outcome.status == "completed"` かつ `completed_time >= anchorTime` → ナッジせず監視終了 |
+| 正常終了 | `last_turn_outcome.status == "completed"` かつ `completed_time >= 直近ユーザー発言時刻`、最終ステップが完成した回答 → ナッジせず監視終了 |
 | 異常停止 | 上記を満たさず heartbeat が止まったもの → ナッジ |
 
 `updated_time` が止まる理由は「正常終了」と「ターン途中死」の2つあり、見た目は同じです。`last_turn_outcome` はターンが閉じたときだけ書かれるので、この2つを分ける唯一の手がかりになります。正常終了のチェックを stall 判定より先に置くのは、閉じたターンも heartbeat を凍結させるためです。逆にすると完了したチャットを永久につつき続けます。
 
-`anchorTime` は登録時の `updated_time` です。ユーザー発言を探しに行かないのは、登録がターンの内側で起きるので安全側に倒れることと、サーバ時刻同士の比較で clock skew を踏まないことの2点が理由です。現在時刻は `syncRecordValuesMain` の `Date` レスポンスヘッダを使います。heartbeat と outcome は同じ 1 回の読み取りから取るので、両者が別のターンを指してしまうことがありません。
+`anchorTime` は直近のユーザーステップのサーバー側 `created_time` を基準にします。追加されたステップだけを追跡するキャッシュにより、長いツールループでも毎回全履歴を読み直しません。ナッジ / Continue の受領確認後は、そのユーザーステップの時刻へ anchor を進めて台帳に保存します。新しいユーザー発言や別の実行中 inference があるとき、前ターンの完了情報だけで監視を終了しません。現在時刻は `syncRecordValuesMain` の `Date` レスポンスヘッダを使います。
 
-新しい指示を投げた直後は `keep_alive_kick` で anchor を打ち直してください。前のターンの完了記録で監視が早期終了するのを防います。
+新しい指示の検知は自動です。`keep_alive_kick` は手動で anchor を更新し、ナッジと Continue の両方のクールダウンを解除したい場合に使えます。並行した登録・手動チェック・タイマーチェックは重複実行を抑制し、停止中に待っていた読み取りが戻っても遅れて送信しません。送信や正常終了の確定直前にも heartbeat・最新ユーザー発言・実行中 inference・期限を再確認します。
 
-ナッジ本文は `[KEEP-AWAKE n/max]` タグ付きの短文で、「中断箇所から続行」「ユーザーに質問しない」を明記します。素の `continue` を避けているのは、新しい作業を発明されたり質問でターンを潰されたりするためです。`doneToken` を渡すと全ナッジに引用され、監視対象側から完了を申告できます。`message` で本文を差し替えられます。
+ナッジ本文は `[KEEP-AWAKE n/max]` タグ付きの短文で、「中断箇所から続行」「ユーザーに質問しない」を明記します。素の `continue` を避けているのは、新しい作業を発明されたり質問でターンを潰されたりするためです。`doneToken` を渡すと全ナッジに完了申告用の目印として引用されます。トークンの文字列一致を追加の停止条件にはせず、正常終了は上記の条件で判定します。`message` で本文を差し替えられます。
 
 ナッジは1回ごとに実ターンとしてクレジットを消費します。`maxNudges`、`cooldownSeconds`、`deadlineMinutes` は常に効き、`stop_keep_me_awake` を `keepAliveId` なしで呼べば全停止できます。監視台帳は `state.json` の隣の `keep-alives.json` に永続化され、再起動前から生き残っていたものは `orphaned` として残るので、タイマーが死んだ監視を生きていると見間違えません。
 
 既定値は `NOTION_KEEP_AWAKE_*` で変えられ、`NOTION_KEEP_AWAKE=0` で機能ごと無効化できます。
 
-ロックされた thread へのナッジはそのままでは拒否されるため、lease を握ったまま止まっているターンに対しては送信の直前に自動で中断を行います（`NOTION_KEEP_AWAKE_INTERRUPT=0` で無効化）。送信が空ストリームで拒否された場合も、中断して1度だけ再送します。拒否されたナッジは step を残さないので、再送で作業が二重になることはありません。
+送信ジョブの作成や HTTP 200 だけでは、ナッジを「送信済み」と数えません。送信時に固定したユーザーステップ ID が対象 thread に登録され、対応する `thread_message` が保存されたことを確認してから、カウンタ・クールダウン・anchor を更新します。回答の生成終了までは待ちません。
 
-Notion 自体が長いエージェントターンを途中で止めて `This task is taking a lot of steps. Please confirm you want the agent to keep going.` と表示し、Continue クリックを待つことがあります。この停止は `last_turn_outcome` が閉じた形で記録されるため、以前は見張りが「正常終了」と判定して監視を終了していました。現在はこの停止をレコードの形から見分けて、`[KEEP-AWAKE CONTINUE n/max]` の短い承認メッセージを自動送信します（Web の Continue ボタン相当）。本文は「承認だけ」で、新しい指示を与えないことを明記します。判定はターンが閉じたか治まったときだけ行い、生成中のスレッドを追加で読みに行きません。
+ロックされた thread へのナッジはそのままでは拒否されるため、lease を握ったまま止まっているターンに対しては送信直前に中断します（`NOTION_KEEP_AWAKE_INTERRUPT=0` で無効化）。非同期ジョブが空ストリームで失敗した場合も、保存済みユーザーステップがないことを確認してから、中断して1度だけ再送します。確認が一時的に失敗した場合は同一プロセス内で未確定の送信 ID を保持し、次の確認で別のナッジを重ねません。失敗・未確定の送信は予算を消費せず、`lastError` に理由を残します。
 
-Continue の回数はナッジ予算とは別カウンタで、既定は最大 10 回・クールダウン 15 秒・プロンプト書き込みから 10 秒の猟予後に送信します。`keep_me_awake` の `autoContinue: false` で監視単位に無効化でき、`maxContinues` で上限を変えられます。既定値は `NOTION_KEEP_AWAKE_AUTO_CONTINUE` / `NOTION_KEEP_AWAKE_MAX_CONTINUES` / `NOTION_KEEP_AWAKE_CONTINUE_COOLDOWN_MS` / `NOTION_KEEP_AWAKE_CONFIRM_GRACE_MS`、文言が将来変わった場合の追加パターンは `NOTION_KEEP_AWAKE_CONTINUE_PATTERNS`（1行1パターン、大文字小文字無視）で調整します。
+Notion 自体が長いエージェントターンを途中で止めて `This task is taking a lot of steps. Please confirm you want the agent to keep going.` と表示し、Continue クリックを待つことがあります。この停止は `last_turn_outcome` が閉じた形で記録されるため、以前は見張りが「正常終了」と判定して監視を終了していました。現在はこの停止をレコードの形から見分けて、`[KEEP-AWAKE CONTINUE n/max]` の短い承認メッセージを自動送信します（ステップ上限からの継続専用。DOM ボタンのクリックではありません）。本文は「承認だけ」で、新しい指示を与えないことを明記します。判定はターンが閉じたか治まったときだけ行い、生成中のスレッドを追加で読みに行きません。
+
+Continue の回数はナッジ予算とは別カウンタで、既定は最大 10 回・クールダウン 15 秒・プロンプト書き込みから 10 秒の猟予後に送信します。`keep_me_awake` の `autoContinue: false` で監視単位に無効化でき、`maxContinues` で上限を変えられます。無効化しても通常の未完了停止へのナッジは動作します。ステップ上限の確認中は自動承認せず待機します。一般的な「続行しますか」「keep going?」は自動承認の対象ではなく、最終ステップが `pending` / `blocked` / `awaiting_permission` の場合も承認せず待機します。既定値は `NOTION_KEEP_AWAKE_AUTO_CONTINUE` / `NOTION_KEEP_AWAKE_MAX_CONTINUES` / `NOTION_KEEP_AWAKE_CONTINUE_COOLDOWN_MS` / `NOTION_KEEP_AWAKE_CONFIRM_GRACE_MS`、文言が将来変わった場合の追加パターンは `NOTION_KEEP_AWAKE_CONTINUE_PATTERNS`（1行1パターン、大文字小文字無視）で調整します。
 
 検知はプロンプトの文言一致ではなくスレッドレコードの形で行います。Notion はこの確認プロンプトを SSE の `pending_input` としてクライアントに送るだけで、ステップとしては保存しません（実測: 該当スレッドの全ステップを走査しても文言は AI の thinking 内の自己言及 1 件のみで、`thread` レコードには存在しない）。そのため文言一致だけでは実機で発火しません。
 
-代わりに、ターンが `last_turn_outcome.status = completed` で閉じているのに最終ステップ（`final_step_id`）が答えで終わっていない場合を「止まったターン」と判定します。答えを返したターンは必ずテキストを持つ `agent-inference` ステップで終わり、途中で止められたターンは `state: "streaming"` のままのツール呼び出しで終わります。実測値は次のとおりです。
+代わりに、ターンが `last_turn_outcome.status = completed` で閉じているのに最終ステップ（`final_step_id`）が答えで終わっていない場合を「止まったターン」と判定します。正常回答の根拠はテキストを持つ `agent-inference` であり、ツール呼び出しを同時に含むコメントや `streaming` 状態のステップを完了回答とは扱いません。最終ステップの欠損・読み取りエラーは「完了」でも「停止」でもなく未確定として再確認します。以前の検証で得た値は次のとおりです。
 
 | ターン | status | step_count | 最終ステップ |
 | --- | --- | --- | --- |
@@ -375,7 +377,9 @@ Continue の回数はナッジ予算とは別カウンタで、既定は最大 1
 
 未完で閉じたターンは、`step_count` が `NOTION_KEEP_AWAKE_STEP_LIMIT_STEPS`（既定 2000）以上ならステップ上限と見て Continue を送り、それ未満なら早死にと見て通常のナッジを送ります。どちらの場合も `completed` を完走扱いにせず監視を続けます。文言一致は、将来 Notion がプロンプトを本文に書き込むようになった場合の保険として残しています。
 
-最終ステップの読み取りは 1 レコードの追加取得で、しかも監視対象が沈黙したときだけ実行するので、ポーリング 1 回分とほぼ同じコストです。
+最終ステップは 1 レコードの追加取得です。確認は現在のターンが閉じた場合や沈黙時に限ります。文言照合用の履歴取得は補助で、保存された最終ステップを優先します。2000 ステップの閾値は互換性のため残した推定値で、公式の停止理由フィールドではありません。
+
+実ブラウザでの送信拒否・自然停止・再開と回帰テストの検証記録: [keep-awake 検証記録](docs/keep-awake-verification.md)。
 
 ### `interrupt_conversation`
 

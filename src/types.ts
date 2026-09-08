@@ -36,6 +36,8 @@ export interface TurnOutcome { status:string; completedTime:number|null; stepCou
 export interface ThreadSignals { threadId:string; updatedTime:number|null; serverNow:number; messageCount:number; lastTurnOutcome:TurnOutcome|null; credits:number|null;
   currentInferenceId: string;
   leaseExpiration: number | null;
+  /** Server timestamp of the latest persisted user step (watchdog reads). */
+  lastUserMessageTime?: number | null | undefined;
 }
 
 /**
@@ -46,7 +48,7 @@ export interface ThreadSignals { threadId:string; updatedTime:number|null; serve
  * the status alone cannot tell a finished answer from a turn that was cut off. A real answer ends on
  * an agent-inference step carrying text; a cut-off turn ends on a tool call still marked streaming.
  */
-export interface FinalStepShape { stepId:string; type:string; state:string; hasAnswerText:boolean; finishedAt:number|null }
+export interface FinalStepShape { stepId:string; type:string; state:string; hasAnswerText:boolean; finishedAt:number|null; hasToolUse?:boolean|undefined }
 
 export interface InterruptResult {
   threadId: string;
@@ -60,7 +62,7 @@ export interface KeepAlive {
   keepAliveId:string;
   conversationId:string;
   status:KeepAliveStatus;
-  /** Heartbeat value at registration. A turn that closed at or after this belongs to the watched work. */
+  /** Latest user-turn anchor, advanced after acknowledged nudge/Continue delivery. */
   anchorTime:number;
   createdAt:number;
   deadlineAt:number;

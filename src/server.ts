@@ -109,10 +109,10 @@ export function createKeepAwakeSupervisor(client: NotionClient): KeepAwakeSuperv
   return new KeepAwakeSupervisor(
     new KeepAliveStore(client.keepAliveStatePath()),
     {
-      readSignals: (conversationId) => client.threadSignals(conversationId),
-      sendNudge: async (conversationId, prompt) => { await client.startChat({ prompt, conversationId }); },
-      // Notion's step-limit prompt is an ordinary assistant step, so the newest user-visible message
-      // is where the watchdog sees it. One page is enough: only the tail can be the pause.
+      readSignals: (conversationId) => client.threadSignals(conversationId, { includeUserMessage: true }),
+      sendNudge: (conversationId, prompt, signal) => client.sendChatNudge(conversationId, prompt, signal),
+      // Supplementary exact-text detection if Notion persists the step-limit prompt.
+      // Completion classification still uses the durable final-step record.
       readTail: async (conversationId) => {
         const conversation = await client.getConversation(conversationId, 1);
         const last = conversation.messages.at(-1);

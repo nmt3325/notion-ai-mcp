@@ -223,11 +223,12 @@ test("a watchdog is persisted and a live one is orphaned after a restart", () =>
   try {
     const path = join(directory, "keep-alives.json");
     const store = new KeepAliveStore(path);
+    const timestamp = Date.now();
     const created = store.create({
       conversationId: CONVERSATION,
-      anchorTime: BASE,
-      createdAt: BASE,
-      deadlineAt: BASE + 3_600_000,
+      anchorTime: timestamp,
+      createdAt: timestamp,
+      deadlineAt: timestamp + 3_600_000,
       idleMs: IDLE,
       pollMs: 30_000,
       cooldownMs: COOLDOWN,
@@ -239,7 +240,7 @@ test("a watchdog is persisted and a live one is orphaned after a restart", () =>
     const reloaded = new KeepAliveStore(path).get(created.keepAliveId);
     assert.equal(reloaded?.status, "orphaned");
     assert.equal(reloaded?.doneToken, "DONE::KA-2");
-    assert.equal(reloaded?.anchorTime, BASE);
+    assert.equal(reloaded?.anchorTime, timestamp);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -408,7 +409,9 @@ function continueHarness(initial: ThreadSignals) {
 
 test("the step-limit prompt is recognised and ordinary answers are not", () => {
   assert.equal(isStepLimitConfirmation(STEP_LIMIT_PROMPT), true);
-  assert.equal(isStepLimitConfirmation("23件目: 改善 / 50件\n\nこのタスクはステップ数が多くなっています。続行を承認してください。"), true);
+  assert.equal(isStepLimitConfirmation(`23 items processed\n\n${STEP_LIMIT_PROMPT}`), true);
+  // Unverified translated prose is not sufficient to grant step-limit consent.
+  assert.equal(isStepLimitConfirmation("このタスクはステップ数が多くなっています。続行を承認してください。"), false);
   // A finished answer that merely talks about steps must not be mistaken for the prompt.
   assert.equal(isStepLimitConfirmation("Done. I searched 40 keywords in a lot of steps and wrote the summary."), false);
   assert.equal(isStepLimitConfirmation(""), false);
@@ -459,6 +462,7 @@ test("the supervisor answers the prompt and keeps its nudge budget intact", asyn
 
   // Once the resumed turn closes for real, the ordinary completion rule ends the watch.
   box.setTail("40件目: まとめ / 50件。以上で全て完了です。");
+  box.setFinalStep({ stepId: "step-1", type: "agent-inference", state: "", hasAnswerText: true, finishedAt: BASE + 300_000 });
   box.advance(signals({ updatedTime: BASE + 300_000, serverNow: BASE + 400_000, outcome: { status: "completed", completedTime: BASE + 300_000 } }));
   const closed = await box.supervisor.tick(record.keepAliveId);
   assert.equal(closed.decision.action, "stop");
@@ -473,8 +477,8 @@ test("auto-continue can be switched off per watchdog", async () => {
   box.setTail(STEP_LIMIT_PROMPT);
   box.advance(signals({ updatedTime: BASE + 20_000, serverNow: BASE + 40_000, outcome: { status: "completed", completedTime: BASE + 20_000 } }));
   const outcome = await box.supervisor.tick(record.keepAliveId);
-  assert.equal(outcome.decision.action, "stop");
-  assert.equal(outcome.keepAlive?.stopReason, "turn_completed");
+  assert.deepEqual(outcome.decision, { action: "wait", reason: "awaiting_confirmation" });
+  assert.equal(outcome.keepAlive?.status, "watching");
   assert.equal(box.sent.length, 0);
   box.supervisor.stopAll();
 });
