@@ -178,9 +178,8 @@ function doneLine(token: string | undefined, language: "ja" | "en"): string {
 /**
  * Builds the text sent to the stalled conversation.
  *
- * A bare "continue" invites the model to invent new work or to ask the user a question, and both
- * waste the turn. The machine tag makes the message identifiable, and the wording keeps the model
- * on the interrupted step.
+ * The machine tag makes each delivery identifiable. All non-final built-in nudges share the
+ * same short prompt; only the final nudge switches to the wrap-up instruction.
  */
 export function buildNudge(input: {
   nudgeCount: number;
@@ -192,17 +191,11 @@ export function buildNudge(input: {
 }): string {
   const header = `[KEEP-AWAKE ${input.nudgeCount}/${input.maxNudges}]`;
   if (input.custom) return `${header} ${input.custom}`;
-  const seconds = Math.round(input.idleMs / 1000);
   const done = doneLine(input.doneToken, input.language);
   const isFinal = input.nudgeCount >= input.maxNudges;
-  if (input.language === "en") {
-    if (isFinal) return `${header} FINAL nudge. Do not start new work.\nSummarise what is done, what is left, and how to resume.${done}`;
-    if (input.nudgeCount >= 3) return `${header} STALLED for ${seconds}s again. Do not repeat the same step.\nSplit it smaller or switch approach. Never ask the user a question.${done}`;
-    return `${header} Automatic nudge, not a new instruction. Resume from where you stopped.\nWrite one line about the next step, then go straight to a tool call. Do not ask the user anything.${done}`;
-  }
+  if (isFinal && input.language === "en") return `${header} FINAL nudge. Do not start new work.\nSummarise what is done, what is left, and how to resume.${done}`;
   if (isFinal) return `${header} FINAL 最後のナッジ。新しい作業は始めない。\n完了分・未完了分・再開手順をまとめる。${done}`;
-  if (input.nudgeCount >= 3) return `${header} STALLED ${seconds}秒また停止した。同じ手順を繰り返さない。\n工程をより小さく分割するか別の手段に切り替える。ユーザーには質問しない。${done}`;
-  return `${header} 自動ナッジ。新しい指示ではない。中断した箇所から作業を続行して。\n次にやることを1行書いたら、すぐツール呼び出しに移る。ユーザーへの質問・確認はしない。${done}`;
+  return `${header}\n次にやることを1行書いたら、作業を続行して。${done}`;
 }
 
 /**

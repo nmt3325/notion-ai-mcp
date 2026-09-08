@@ -127,15 +127,55 @@ test("a read that failed is never treated as silence", () => {
   );
 });
 
-test("the nudge text carries the counter, the done token and no question for the user", () => {
-  const first = buildNudge({ nudgeCount: 1, maxNudges: 40, idleMs: 150_000, language: "ja", doneToken: "DONE::KA-7f3a" });
-  assert.match(first, /\[KEEP-AWAKE 1\/40\]/);
-  assert.match(first, /DONE::KA-7f3a/);
-  const stalled = buildNudge({ nudgeCount: 4, maxNudges: 40, idleMs: 150_000, language: "en" });
-  assert.match(stalled, /STALLED/);
-  assert.match(stalled, /Never ask the user/);
-  const last = buildNudge({ nudgeCount: 40, maxNudges: 40, idleMs: 150_000, language: "en" });
-  assert.match(last, /FINAL/);
+test("all non-final built-in nudges use the same requested message", () => {
+  for (const language of ["ja", "en"] as const) {
+    for (const nudgeCount of [1, 2, 3, 4, 39]) {
+      for (const idleMs of [60_001, 150_000, 900_000]) {
+        assert.equal(
+          buildNudge({ nudgeCount, maxNudges: 40, idleMs, language }),
+          `[KEEP-AWAKE ${nudgeCount}/40]\n次にやることを1行書いたら、作業を続行して。`
+        );
+      }
+    }
+  }
+});
+
+test("non-final nudges still append the unchanged done-token sentence", () => {
+  for (const language of ["ja", "en"] as const) {
+    const done = language === "ja"
+      ? "\nすでに完了しているなら、説明を足さず DONE::KA-7f3a だけを返す。"
+      : "\nIf the task is already done, reply with DONE::KA-7f3a and nothing else.";
+    for (const nudgeCount of [1, 2, 3, 4, 39]) {
+      assert.equal(
+        buildNudge({ nudgeCount, maxNudges: 40, idleMs: 150_000, language, doneToken: "DONE::KA-7f3a" }),
+        `[KEEP-AWAKE ${nudgeCount}/40]\n次にやることを1行書いたら、作業を続行して。${done}`
+      );
+    }
+  }
+});
+
+test("final nudges retain their original wording and optional done-token sentence", () => {
+  for (const language of ["ja", "en"] as const) {
+    for (const maxNudges of [1, 2, 3, 40]) {
+      for (const nudgeCount of [maxNudges, maxNudges + 1]) {
+        for (const doneToken of [undefined, "DONE::KA-7f3a"]) {
+          const body = language === "ja"
+            ? "FINAL 最後のナッジ。新しい作業は始めない。\n完了分・未完了分・再開手順をまとめる。"
+            : "FINAL nudge. Do not start new work.\nSummarise what is done, what is left, and how to resume.";
+          const done = !doneToken ? "" : language === "ja"
+            ? `\nすでに完了しているなら、説明を足さず ${doneToken} だけを返す。`
+            : `\nIf the task is already done, reply with ${doneToken} and nothing else.`;
+          assert.equal(
+            buildNudge({ nudgeCount, maxNudges, idleMs: 150_000, language, doneToken }),
+            `[KEEP-AWAKE ${nudgeCount}/${maxNudges}] ${body}${done}`
+          );
+        }
+      }
+    }
+  }
+});
+
+test("an explicit custom nudge message remains an override", () => {
   const custom = buildNudge({ nudgeCount: 2, maxNudges: 9, idleMs: 1_000, language: "ja", custom: "resume the build" });
   assert.equal(custom, "[KEEP-AWAKE 2/9] resume the build");
 });
