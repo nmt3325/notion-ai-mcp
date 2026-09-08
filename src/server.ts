@@ -111,6 +111,8 @@ export function createKeepAwakeSupervisor(client: NotionClient): KeepAwakeSuperv
     {
       readSignals: (conversationId) => client.threadSignals(conversationId, { includeUserMessage: true }),
       sendNudge: (conversationId, prompt, signal) => client.sendChatNudge(conversationId, prompt, signal),
+      sendContinue: (conversationId, signal) => client.sendChatContinue(conversationId, signal),
+      readContinuation: (conversationId) => client.nativeContinuationState(conversationId),
       // Supplementary exact-text detection if Notion persists the step-limit prompt.
       // Completion classification still uses the durable final-step record.
       readTail: async (conversationId) => {
@@ -223,8 +225,8 @@ export function createServer(client: NotionClient, shared?: { keepAwake?: KeepAw
     description: [
       "Watch a Notion AI conversation and re-send a short continuation message whenever its turn stops without finishing.",
       "The heartbeat is the thread updated_time, which equals the created_time of the newest step.",
-      "A frozen heartbeat alone is ambiguous, so a turn whose last_turn_outcome closed as completed at or after registration ends the watch instead of being nudged; only a freeze with no matching completion is treated as a dead turn.",
-      "Notion never stores the text of that prompt, so a stop on its step-limit prompt is recognised from the thread record instead: the turn closes as completed but its final step is a tool call left unfinished, and a high step count separates it from a turn that died early. Those stops are answered with a short Continue message, which is what the web client's Continue button sends, and they have their own budget, maxContinues.",
+      "A frozen heartbeat alone is ambiguous, so a turn whose last_turn_outcome closed with a finished answer at or after the latest user message or accepted continuation ends the watch instead of being nudged; only a freeze with no matching completion is treated as a dead turn.",
+      "Notion never stores the text of that prompt, so a stop on its step-limit prompt is recognised from the thread record instead: the turn closes as completed but its final step is a tool call left unfinished, and the iterations of that turn have reached the limit the banner counts (100 for script agents, 50 for triggered runs, 15 otherwise). Those stops are answered by resuming the saved checkpoint with the same request the Continue button sends, which adds no user message and grants no tool, and they have their own budget, maxContinues.",
       "Call this from inside the long task that needs protecting and pass that same conversation id, then keep working. Every nudge is a real turn and costs credits, so the budget and the deadline always apply."
     ].join(" "),
     inputSchema: {

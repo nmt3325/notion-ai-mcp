@@ -474,7 +474,11 @@ export class KeepAliveStore {
 export interface KeepAwakeRuntime {
   readSignals: (conversationId: string) => Promise<ThreadSignals>;
   sendNudge: (conversationId: string, prompt: string, signal?: AbortSignal) => Promise<void | { acceptedAt: number }>;
-  /** Newest user-visible text on the thread, used to spot Notion's step-limit prompt. */
+  /** Native checkpoint restart; older/custom runtimes retain the text fallback. */
+  sendContinue?: ((conversationId: string, signal?: AbortSignal) => Promise<void | { acceptedAt: number }>) | undefined;
+  /** Native per-execution iteration evidence; null retains the legacy workflow-step fallback. */
+  readContinuation?: ((conversationId: string) => Promise<boolean | null>) | undefined;
+  /** Legacy text fallback; the native Continue banner is not transcript text. */
   readTail?: ((conversationId: string) => Promise<string>) | undefined;
   /** Shape of the step a closed turn ended on: the durable half of the web client's Continue prompt. */
   readFinalStep?: ((conversationId: string, stepId: string) => Promise<FinalStepShape | null>) | undefined;
@@ -653,13 +657,16 @@ export class KeepAwakeSupervisor {
       // Notion holds a lease on the thread while an inference is in flight and answers a second turn
       // with an empty stream instead of an error, so a turn that stopped without releasing its lease
       // has to be interrupted the way the web client's stop button does before a nudge can land.
+      const send = () => isContinue && this.runtime.sendContinue
+        ? this.runtime.sendContinue(record.conversationId, this.cancellations.get(keepAliveId)?.signal)
+        : this.runtime.sendNudge(record.conversationId, prompt, this.cancellations.get(keepAliveId)?.signal);
       const lease = signals ? leaseState(signals) : "free";
       const canInterrupt = this.defaults.interrupt && Boolean(this.runtime.interrupt);
       let interrupted = false;
       try {
         if (canInterrupt && lease !== "free") interrupted = await this.interruptLease(record.conversationId);
         if (!current()) return cancelled();
-        const receipt = await this.runtime.sendNudge(record.conversationId, prompt, this.cancellations.get(keepAliveId)?.signal);
+        const receipt = await send();
         this.noteDelivery(keepAliveId, receipt?.acceptedAt ?? now, isContinue);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -668,7 +675,7 @@ export class KeepAwakeSupervisor {
           try {
             await this.interruptLease(record.conversationId);
             if (!current()) return cancelled();
-            const receipt = await this.runtime.sendNudge(record.conversationId, prompt, this.cancellations.get(keepAliveId)?.signal);
+            const receipt = await send();
             this.noteDelivery(keepAliveId, receipt?.acceptedAt ?? now, isContinue);
             return { decision, keepAlive: this.store.get(keepAliveId) };
           } catch (retryError) {
@@ -771,7 +778,7 @@ export class KeepAwakeSupervisor {
     const quiet = signals.updatedTime !== null && now - signals.updatedTime >= (this.defaults.confirmGraceMs ?? DEFAULT_CONFIRM_GRACE_MS);
     if (newerInference || (!closed && !quiet)) return ordinary;
     const autoContinue = record.autoContinue !== false && this.defaults.autoContinue !== false;
-    if (this.runtime.readTail && (closed || !outcome)) {
+    if (this.runtime.readTail && !this.runtime.readContinuation && (closed || !outcome)) {
       try {
         if (isStepLimitConfirmation(await this.runtime.readTail(record.conversationId), this.defaults.continuePatterns ?? [])) {
           return { awaitingConfirmation: autoContinue, completionIsAnswer: false, confirmationBlocked: !autoContinue };
@@ -789,7 +796,15 @@ export class KeepAwakeSupervisor {
         return { awaitingConfirmation: false, completionIsAnswer: false, confirmationBlocked: true };
       }
       if (!isUnfinishedFinalStep(shape)) return ordinary;
-      const stepLimit = isStepLimitStop(shape, outcome.stepCount, this.defaults.stepLimitSteps ?? DEFAULT_STEP_LIMIT_STEPS);
+      let stepLimit = isStepLimitStop(shape, outcome.stepCount, this.defaults.stepLimitSteps ?? DEFAULT_STEP_LIMIT_STEPS);
+      if (this.runtime.readContinuation) {
+        const native = await this.runtime.readContinuation(record.conversationId);
+        if (native !== null) stepLimit = native;
+      }
+      if (this.runtime.readContinuation && this.runtime.readTail && this.defaults.continuePatterns?.length) {
+        const text = await this.runtime.readTail(record.conversationId);
+        if (this.defaults.continuePatterns.some(pattern => pattern.test(text))) stepLimit = true;
+      }
       return { awaitingConfirmation: stepLimit && autoContinue, completionIsAnswer: false, confirmationBlocked: stepLimit && !autoContinue };
     } catch { return unknown; }
   }

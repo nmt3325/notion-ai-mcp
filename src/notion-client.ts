@@ -1,3 +1,4 @@
+import { buildNativeContinuationRequest, nativeIterationLimitReached } from "./native-continuation.js";
 import { createHash, randomUUID } from "node:crypto";
 import { basename, extname } from "node:path";
 import { isIP } from "node:net";
@@ -40,6 +41,8 @@ interface ChatOptions {
   _retryCount?: number | undefined;
   /** Internal durable message identity for delivery acknowledgment. */
   _userStepId?: string | undefined;
+  /** Internal native Continue identity; never appends a user message. */
+  _continueTraceId?: string | undefined;
   _signal?: AbortSignal | undefined;
 }
 
@@ -417,6 +420,8 @@ export class NotionClient {
   private readonly state: ChatStateStore;
   private readonly userAnchors = new Map<string, { lastId: string; userId: string; time: number | null }>();
   private readonly pendingNudges = new Map<string, { stepId: string; jobId: string }>();
+  private readonly pendingContinuations = new Map<string, { traceId: string; jobId: string }>();
+  private readonly continuationChecks = new Map<string, Promise<{ acceptedAt: number }>>();
   private readonly transcriptUploads = new Map<string, TranscriptUploadRecord>();
   private workspaceManager: WorkspaceManager | null = null;
   private mcpManager: McpConnectionManager | null = null;
@@ -586,8 +591,8 @@ export class NotionClient {
    * Reads the shape of the step a closed turn ended on.
    *
    * One extra record read, and only when a watched turn has already gone quiet, so it costs about as
-   * much as the poll it rides along with. It is the only server-side evidence that separates Notion
-   * stopping a turn on its step-limit prompt from the turn genuinely finishing.
+   * much as the poll it rides along with. It separates answers from unfinished work; native
+   * iteration evidence further distinguishes the Continue banner from other stalls.
    */
   async finalStepShape(stepId: string): Promise<FinalStepShape | null> {
     if (!stepId) return null;
@@ -841,6 +846,97 @@ export class NotionClient {
     throw new Error(`Watchdog delivery not yet confirmed; the pending submission is retained without resending.${readError ? ` Last verification error: ${readError}` : ""}`);
   }
 
+  /** Read the turn's native iteration evidence, counted the way the step-limit banner counts it. */
+  async nativeContinuationState(threadId: string): Promise<boolean | null> {
+    const account = await this.account();
+    const payload = await this.fetchJson("syncRecordValuesMain", { requests: [{ pointer: { table: "thread", id: threadId, spaceId: account.spaceId }, version: -1 }] });
+    const thread = unwrapRecord(object(object(payload.recordMap).thread)[threadId]);
+    const ids = arrayOfStrings(thread.messages);
+    if (!ids.length) return null;
+    const head = await this.fetchThreadMessages(ids.slice(0, 32));
+    let config: JsonObject | undefined;
+    for (const id of ids.slice(0, 32)) {
+      const record = unwrapRecord(head[id]);
+      const step = object(record.step ?? object(record.data).step ?? record.data);
+      if (step.type === "config") config = object(step.value);
+    }
+    if (!config) return null;
+    const reverse: JsonObject[] = [];
+    // Scanning back stops as soon as the turn cannot be under the limit, so a turn with thousands of
+    // saved steps still costs a couple of reads instead of the whole history.
+    const enough = config.enableScriptAgent === true ? 100 : 50;
+    let inferences = 0;
+    let boundary = false;
+    for (let end = ids.length; end > 0 && !boundary; end -= 128) {
+      const batch = ids.slice(Math.max(0, end - 128), end);
+      const records = await this.fetchThreadMessages(batch);
+      for (const id of [...batch].reverse()) {
+        const record = unwrapRecord(records[id]);
+        const step = object(record.step ?? object(record.data).step ?? record.data);
+        if (!step.type) throw new Error("Native continuation evidence is temporarily unavailable");
+        // The latest user step ends the turn the banner is counting.
+        if (step.type === "user") { boundary = true; break; }
+        if (step.type === "agent-inference" || step.type === "agent-trigger") reverse.push(step);
+        if (step.type === "agent-inference" && ++inferences >= enough) { boundary = true; break; }
+      }
+    }
+    return nativeIterationLimitReached(config, reverse.reverse());
+  }
+
+  /** Resume the saved checkpoint, exactly as native Continue does, with single-flight delivery. */
+  async sendChatContinue(conversationId: string, signal?: AbortSignal, waitMs = 30_000): Promise<{ acceptedAt: number }> {
+    signal?.throwIfAborted();
+    const current = this.continuationChecks.get(conversationId);
+    if (current) return current;
+    const work = this.deliverChatContinuation(conversationId, signal, waitMs);
+    this.continuationChecks.set(conversationId, work);
+    try { return await work; }
+    finally { if (this.continuationChecks.get(conversationId) === work) this.continuationChecks.delete(conversationId); }
+  }
+
+  private async deliverChatContinuation(conversationId: string, signal?: AbortSignal, waitMs = 30_000): Promise<{ acceptedAt: number }> {
+    let pending = this.pendingContinuations.get(conversationId);
+    if (!pending) {
+      const traceId = randomUUID();
+      const started = await this.startChat({ conversationId, prompt: "Continue agent execution after max iterations reached", _continueTraceId: traceId, _signal: signal });
+      pending = { traceId, jobId: started.jobId };
+      this.pendingContinuations.set(conversationId, pending);
+    }
+    const account = await this.account();
+    const deadline = Date.now() + Math.max(1, waitMs);
+    let readError = "";
+    do {
+      signal?.throwIfAborted();
+      let readSucceeded = false;
+      try {
+        const response = await this.request("syncRecordValuesMain", { requests: [{ pointer: { table: "thread", id: conversationId, spaceId: account.spaceId }, version: -1 }] }, false);
+        const header = Date.parse(response.headers.get("date") ?? "");
+        const payload = object(await response.json());
+        const thread = unwrapRecord(object(object(payload.recordMap).thread)[conversationId]);
+        readSucceeded = Object.keys(thread).length > 0;
+        const outcome = parseTurnOutcome(object(thread.data).last_turn_outcome);
+        // HTTP 200 and job creation are not receipts. The exact submitted trace must be persisted.
+        const acceptedAt = outcome?.inferenceId === pending.traceId ? outcome.completedTime
+          : asString(thread.current_inference_id) === pending.traceId
+            ? Math.max(asNumber(thread.updated_time) ?? 0, Number.isFinite(header) ? header : 0) : null;
+        signal?.throwIfAborted();
+        if (acceptedAt !== null && acceptedAt > 0) {
+          this.pendingContinuations.delete(conversationId);
+          return { acceptedAt };
+        }
+      } catch (error) { readError = error instanceof Error ? error.message : String(error); }
+      signal?.throwIfAborted();
+      const job = this.state.job(pending.jobId);
+      if (readSucceeded && job?.status === "failed") {
+        this.pendingContinuations.delete(conversationId);
+        throw new Error(job.error || "Notion rejected native Continue");
+      }
+      if (Date.now() >= deadline) break;
+      await sleep(Math.min(500, Math.max(1, deadline - Date.now())));
+    } while (Date.now() <= deadline);
+    throw new Error(`Native Continue delivery not yet confirmed; the pending submission is retained without resending.${readError ? ` Last verification error: ${readError}` : ""}`);
+  }
+
   private async runChatJob(jobId: string, options: ChatOptions): Promise<void> {
     try {
       const result = await this.chat(options);
@@ -972,6 +1068,7 @@ export class NotionClient {
 
   private async _chatInternal(options: ChatOptions): Promise<ChatResult> {
     const account = await this.account();
+    if (options._continueTraceId && (!options.conversationId || options.fileIds?.length || options.attachments?.length)) throw new Error("Native Continue requires an existing thread without new attachments");
     const model = normalizeModelName(options.model, this.config.defaultModel);
     const requestedEffort = normalizeReasoningEffort(model, options.reasoningEffort);
     const fileIds = normalizedFileIds(options.fileIds);
@@ -1017,13 +1114,16 @@ export class NotionClient {
     // answering with that model unless the caller names a different one.
     const effectiveModel = session.rehydrated === true && !options.model ? session.model || model : model;
     if (session.transport === "agent_service") {
+      if (options._continueTraceId) throw new Error("Native Continue is only supported for inference-transcript conversations");
       if (transcriptFiles.length > 0) throw new Error("Inference-transcript attachment handles cannot be used in an Agent Service conversation");
       return this.agentServiceChat(account, effectiveModel, session, options, fileIds, reasoningEffort);
     }
     if (fileIds.length > 0 && transcriptFiles.length === 0) throw new Error("Uploaded file IDs cannot be added to a legacy chat unless they are inference-transcript attachment handles. Start a new chat without conversationId.");
     if (transcriptFiles.some((file) => file.usedInChat)) throw new Error("An inference-transcript attachment handle can only be attached once");
     const prompt = promptWithLegacyAttachments(options.prompt, options.attachments ?? []);
-    const body = this.buildInferenceBody(account, prompt, effectiveModel, options.webSearch ?? this.config.defaultWebSearch, options.workspaceSearch ?? this.config.defaultWorkspaceSearch, options.readOnly ?? this.config.defaultReadOnly, session, transcriptFiles, reasoningEffort, options._userStepId);
+    const body = options._continueTraceId
+      ? buildNativeContinuationRequest(account.spaceId, session.threadId, options._continueTraceId)
+      : this.buildInferenceBody(account, prompt, effectiveModel, options.webSearch ?? this.config.defaultWebSearch, options.workspaceSearch ?? this.config.defaultWorkspaceSearch, options.readOnly ?? this.config.defaultReadOnly, session, transcriptFiles, reasoningEffort, options._userStepId);
     options._signal?.throwIfAborted();
     const response = await this.request("runInferenceTranscript", body, true);
     if (!response.body) throw new Error("runInferenceTranscript returned no response stream");
