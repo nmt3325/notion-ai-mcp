@@ -1,4 +1,4 @@
-researched_at=2026-09-08T15:14:29Z
+researched_at=2026-09-09T13:59:20Z
 method=wget full chunk map plus module-export callsite tracing
 Traceback (most recent call last):
   File "<stdin>", line 32, in <module>
@@ -12,4 +12,4 @@ Traceback (most recent call last):
   File "/usr/lib/python3.12/json/decoder.py", line 353, in raw_decode
     obj, end = self.scan_once(s, idx)
                ^^^^^^^^^^^^^^^^^^^^^^
-json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 5217 (char 5216)
+json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 5135 (char 5134)
