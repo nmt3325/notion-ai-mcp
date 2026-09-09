@@ -34,6 +34,8 @@ export interface RemoteMcpHttpServer {
   sessionCount(): number;
   /** Adopts keep-awake watchdogs an earlier process left in the registry. Returns how many resumed. */
   resumeKeepAwake(): number;
+  /** Starts the one process-wide URL confirmer, without waiting for an MCP initialize call. */
+  startWebConfirmations(): void;
 }
 
 function integerSetting(name: string, fallback: number): number {
@@ -258,6 +260,7 @@ export function createRemoteMcpHttpServer(options: HttpServerOptions): RemoteMcp
       });
     }),
     close: async () => {
+      sharedClient?.stopWebConfirmations();
       clearInterval(cleanupInterval);
       await Promise.all([...sessions.values()].map((session) => session.server.close().catch(() => undefined)));
       sessions.clear();
@@ -267,7 +270,8 @@ export function createRemoteMcpHttpServer(options: HttpServerOptions): RemoteMcp
       });
     },
     sessionCount: () => sessions.size,
-    resumeKeepAwake: () => keepAwake().resume().length
+    resumeKeepAwake: () => keepAwake().resume().length,
+    startWebConfirmations: () => client().startWebConfirmations(log)
   };
 }
 
@@ -275,6 +279,8 @@ export async function runHttpServer(): Promise<void> {
   const options = loadHttpServerOptions();
   const remote = createRemoteMcpHttpServer(options);
   const address = await remote.listen();
+  try { remote.startWebConfirmations(); }
+  catch (error) { await remote.close(); throw error; }
   process.stderr.write(`notion-ai-mcp-http: listening on http://${address.address}:${address.port}${options.path}\n`);
   if (options.host !== "127.0.0.1" && options.host !== "::1" && options.host !== "localhost") {
     process.stderr.write("notion-ai-mcp-http: use a TLS reverse proxy before exposing this listener to the internet\n");

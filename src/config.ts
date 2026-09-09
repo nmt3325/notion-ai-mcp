@@ -5,6 +5,8 @@ import type { AccountContext } from "./types.js";
 import { defaultStateFilePath } from "./chat-jobs.js";
 import { DEFAULT_CONFIRM_GRACE_MS, DEFAULT_STEP_LIMIT_STEPS, DEFAULT_CONTINUE_COOLDOWN_MS, DEFAULT_MAX_CONTINUES, parseConfirmationPatterns, type KeepAwakeDefaults } from "./keep-awake.js";
 
+import type { WebConfirmationOptions } from "./web-confirmation.js";
+
 export interface NotionConfig {
   apiBase: string;
   defaultModel: string;
@@ -31,6 +33,8 @@ export interface NotionConfig {
   keepAliveFilePath?: string | undefined;
   /** Defaults for keep_me_awake. */
   keepAwake: KeepAwakeDefaults;
+  /** Process-wide, built-in Web URL confirmation policy. */
+  webConfirmation?: WebConfirmationOptions | undefined;
 }
 
 function optional(name: string, fallback = ""): string {
@@ -129,6 +133,13 @@ export function loadConfig(): NotionConfig {
     defaultWorkspaceSearch: flag("NOTION_DEFAULT_WORKSPACE_SEARCH", true),
     defaultReadOnly: flag("NOTION_DEFAULT_READ_ONLY", false),
     keepAwake,
+    webConfirmation: {
+      enabled: flag("NOTION_AUTO_CONFIRM_WEB", true),
+      pollMs: integer("NOTION_AUTO_CONFIRM_WEB_POLL_MS", 5_000, 1_000, 300_000),
+      discoveryMs: integer("NOTION_AUTO_CONFIRM_WEB_DISCOVERY_MS", 30_000, 5_000, 600_000),
+      concurrency: integer("NOTION_AUTO_CONFIRM_WEB_CONCURRENCY", 8, 1, 64),
+      ...(persistState && stateFile ? { stateFilePath: join(dirname(stateFile), "web-confirmations.json") } : {})
+    },
     ...(persistState && stateFile ? { stateFilePath: stateFile, keepAliveFilePath: join(dirname(stateFile), "keep-alives.json") } : {}),
     account: {
       tokenV2,

@@ -11,7 +11,11 @@ const KEYS = [
   "NOTION_MAX_WORKSPACE_RETRIES",
   "NOTION_DEFAULT_WEB_SEARCH",
   "NOTION_DEFAULT_WORKSPACE_SEARCH",
-  "NOTION_DEFAULT_READ_ONLY"
+  "NOTION_DEFAULT_READ_ONLY",
+  "NOTION_AUTO_CONFIRM_WEB",
+  "NOTION_AUTO_CONFIRM_WEB_POLL_MS",
+  "NOTION_AUTO_CONFIRM_WEB_DISCOVERY_MS",
+  "NOTION_AUTO_CONFIRM_WEB_CONCURRENCY"
 ] as const;
 
 function withCleanConfigEnvironment(run: () => void): void {
@@ -82,6 +86,32 @@ test("loadConfig still rejects an account file it cannot parse", () => {
       assert.throws(() => loadConfig(), /Cannot read NOTION_ACCOUNT_FILE/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+
+test("Web confirmation is startup-enabled by default and can be disabled", () => {
+  withCleanConfigEnvironment(() => {
+    const defaults = loadConfig().webConfirmation!;
+    assert.equal(defaults.enabled, true);
+    assert.equal(defaults.pollMs, 5000);
+    assert.equal(defaults.discoveryMs, 30000);
+    assert.equal(defaults.concurrency, 8);
+    process.env.NOTION_AUTO_CONFIRM_WEB = "0";
+    assert.equal(loadConfig().webConfirmation!.enabled, false);
+  });
+});
+
+test("Web confirmation configuration rejects invalid flags and intervals", () => {
+  withCleanConfigEnvironment(() => {
+    process.env.NOTION_AUTO_CONFIRM_WEB = "maybe";
+    assert.throws(() => loadConfig(), /NOTION_AUTO_CONFIRM_WEB/);
+    delete process.env.NOTION_AUTO_CONFIRM_WEB;
+    for (const key of ["NOTION_AUTO_CONFIRM_WEB_POLL_MS", "NOTION_AUTO_CONFIRM_WEB_DISCOVERY_MS", "NOTION_AUTO_CONFIRM_WEB_CONCURRENCY"]) {
+      process.env[key] = "0";
+      assert.throws(() => loadConfig(), /safe integer/);
+      delete process.env[key];
     }
   });
 });

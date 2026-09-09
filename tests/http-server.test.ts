@@ -11,6 +11,8 @@ const bearerToken = "test-only-not-a-secret-bearer-token-0000000000000000";
 
 function fakeClient(): NotionClient {
   return {
+    startWebConfirmations: () => undefined,
+    stopWebConfirmations: () => undefined,
     chat: async () => ({
       conversationId: "11111111-1111-4111-8111-111111111111",
       text: "Remote mock answer",

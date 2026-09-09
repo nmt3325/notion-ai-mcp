@@ -648,4 +648,11 @@ export async function runServer(): Promise<void> {
   const client = new NotionClient(loadConfig());
   const server = createServer(client);
   await server.connect(new StdioServerTransport());
+  const previousClose = server.server.onclose;
+  server.server.onclose = () => { client.stopWebConfirmations(); previousClose?.(); };
+  const shutdown = (): void => { client.stopWebConfirmations(); void server.close().catch(() => undefined); };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  try { client.startWebConfirmations(); }
+  catch (error) { shutdown(); throw error; }
 }

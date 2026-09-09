@@ -414,7 +414,11 @@ function parseTurnOutcome(value: unknown): TurnOutcome | null {
   };
 }
 
+import { DEFAULT_WEB_CONFIRMATION, WebConfirmationHttpError, WebConfirmationSupervisor, type WebConfirmationScope } from "./web-confirmation.js";
+
 export class NotionClient {
+  private webConfirmation: WebConfirmationSupervisor | undefined;
+
   private accountPromise: Promise<AccountContext> | null = null;
   private readonly sessions = new Map<string, ChatSession>();
   private readonly state: ChatStateStore;
@@ -454,7 +458,49 @@ export class NotionClient {
     }
   }
 
-  async account(): Promise<AccountContext> { this.accountPromise ??= this.resolveAccount(); return this.accountPromise; }
+  async account(): Promise<AccountContext> {
+    const work = this.accountPromise ??= this.resolveAccount();
+    try { return await work; }
+    catch (error) { if (this.accountPromise === work) this.accountPromise = null; throw error; }
+  }
+
+  /** Uses an immutable workspace snapshot, never switch_workspace, even during concurrent chats. */
+  private async webConfirmationRequest(scope: WebConfirmationScope, endpoint: string, body: JsonObject, stream: boolean, signal: AbortSignal): Promise<Response> {
+    const account = { ...await this.account(), spaceId: scope.spaceId };
+    if (account.userId !== scope.userId) throw new Error("Web confirmation account changed");
+    signal.throwIfAborted();
+    const response = await this.fetchImpl(`${this.config.apiBase}/${endpoint}`, {
+      method: "POST", headers: this.headers(account, stream), body: JSON.stringify(body),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(this.config.requestTimeoutMs)])
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new WebConfirmationHttpError(response.status);
+    }
+    return response;
+  }
+
+  webConfirmationSupervisor(logger?: (event: string) => void): WebConfirmationSupervisor {
+    return this.webConfirmation ??= new WebConfirmationSupervisor({
+      scopes: async signal => {
+        const account = { ...await this.account() };
+        const workspaces = await this.listWorkspaces();
+        signal.throwIfAborted();
+        const spaceIds = new Set([account.spaceId, ...workspaces.map(value => asString(value.spaceId))].filter(Boolean));
+        return [...spaceIds].map(spaceId => ({ spaceId, userId: account.userId }));
+      },
+      post: async (scope, endpoint, body, signal) => object(await (await this.webConfirmationRequest(scope, endpoint, body, false, signal)).json()),
+      confirm: async (scope, body, signal) => {
+        const response = await this.webConfirmationRequest(scope, "runInferenceTranscript", body, true, signal);
+        if (!response.body) throw new Error("Web confirmation response stream is unavailable");
+        return parseInferenceStream(response.body);
+      }
+    }, { ...DEFAULT_WEB_CONFIRMATION, ...this.config.webConfirmation }, logger);
+  }
+
+  startWebConfirmations(logger?: (event: string) => void): void { this.webConfirmationSupervisor(logger).start(); }
+  stopWebConfirmations(): void { this.webConfirmation?.stop(); }
+
 
   private async resolveAccount(): Promise<AccountContext> {
     const configured = this.config.account; if (configured.userId && configured.spaceId && configured.spaceViewId && configured.userName && configured.userEmail && configured.spaceName) return configured as AccountContext;
@@ -1127,7 +1173,13 @@ export class NotionClient {
     options._signal?.throwIfAborted();
     const response = await this.request("runInferenceTranscript", body, true);
     if (!response.body) throw new Error("runInferenceTranscript returned no response stream");
-    const parsed = await parseInferenceStream(response.body);
+    let parsed = await parseInferenceStream(response.body);
+    if (this.webConfirmation && parsed.eventTypes["agent-tool-result"]) {
+      const resumed = await this.webConfirmation.resume(
+        { spaceId: asString(body.spaceId), userId: account.userId }, session.threadId, asString(body.traceId)
+      );
+      if (resumed) parsed = { ...resumed, inputTokens: parsed.inputTokens + resumed.inputTokens, outputTokens: parsed.outputTokens + resumed.outputTokens };
+    }
     if (!parsed.text.trim()) throw new Error(emptyAnswerMessage(account.spaceId, session, parsed.eventTypes));
     for (const file of transcriptFiles) file.usedInChat = true;
     session.turnCount += 1; session.updatedConfigIds.push(randomUUID()); session.model = effectiveModel; session.reasoningEffort = reasoningEffort; this.rememberSession(session);
