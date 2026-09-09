@@ -106,6 +106,35 @@ node dist/src/index.js
 | `NOTION_ATTACHMENT_ROOT` | 任意 | upload元/download先として許可するroot。既定は起動時のworking directory |
 | `NOTION_MAX_ATTACHMENT_BYTES` | 任意 | upload/download 1ファイルの上限。既定 `20971520` (20 MiB) |
 
+## Webアクセス確認の自動承認
+
+**既定で有効**です。stdio / HTTP のプロセス起動時から、接続アカウントの各 workspace の
+会話一覧を全ページ列挙し、進行中・確認待ちの workflow thread を監視します。この MCP で作成した
+会話だけでなく、ブラウザで作成した会話や、再起動前から確認待ちだった会話も対象です。
+`keep_me_awake` の登録や MCP クライアントからの最初の呼び出しは不要です。
+HTTP の接続・再接続ごとに監視を増やさず、プロセス単位で共有します。
+
+- 確認済みの履歴ではなく、最新ターンの `requires_action` と現在の `confirmation:requested` を照合します。
+- 内蔵 `connections.web.loadPage` の **`urlSafety` だけ**を承認します。MCP実行、書き込み、削除、接続設定、混在する別種の許可は承認しません。
+- ブラウザの「Allow once」と同じ `confirmToolStepIds` を送り、保存済みの config/context と対象 step を再利用します。新しいユーザーメッセージや権限設定変更は追加しません。
+- 同じホストの別 URL でも、新しい確認 step として再検証します。会話単位の single-flight で並列呼び出し・重複承認を防止します。
+- workspace を切り替えず、リクエストごとに workspace を固定します。別会話の生成中も監視は継続します。
+- 不明な送信結果は自動再送しません。送信前に `web-confirmations.json`（`NOTION_STATE_FILE` と同じディレクトリ、0600）へ記録し、再起動後も重複を避けます。
+  不明状態が解消しない場合はブラウザで確認してください。`NOTION_STATE_FILE=off` では再起動をまたぐ重複防止は無効です。
+- サーバー停止時は監視と処理中のリクエストを停止します。同じアカウントを複数のサーバープロセスで監視する構成は非推奨です。
+
+| 環境変数 | 既定値 | 内容 |
+|---|---|---|
+| `NOTION_AUTO_CONFIRM_WEB` | `1` | `0` にして再起動すると自動承認を停止 |
+| `NOTION_AUTO_CONFIRM_WEB_POLL_MS` | `5000` | 既知の進行中スレッドの確認間隔 |
+| `NOTION_AUTO_CONFIRM_WEB_DISCOVERY_MS` | `30000` | 新規・既存スレッドを再発見する間隔 |
+| `NOTION_AUTO_CONFIRM_WEB_CONCURRENCY` | `8` | 同時に処理する確認待ちスレッドの上限 |
+
+**注意:** 個々の URL の内容をユーザーに確認せず許可します。Web fetch の URL やクエリに機密情報が
+含まれると外部サイトへ送信される可能性があります。信頼できるプロンプト・ワークスペースだけで使用してください。
+承認・実行再開と、外部サービスでの処理成功は別です。Cookie、URL全文、チャット本文は監視ログへ出力しません。
+この機能は非公式 API の現在の記録形式に依存し、認識できない確認は許可せず停止します。
+
 ## Remote Streamable HTTP
 
 stdio版とは別に、MCP Streamable HTTPエンドポイントを起動できます。HTTP版はBearer認証が必須です。
