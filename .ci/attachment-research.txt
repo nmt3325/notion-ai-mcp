@@ -1,26 +1,26 @@
-researched_at=2026-09-09T13:59:13Z
+researched_at=2026-09-16T15:41:08Z
 method=wget plus webpack-runtime dependency crawl
 
 == Fetch login and initial JavaScript assets ==
-login_bytes=20035
+login_bytes=20034
 initial_asset_count=15
 asset_host=transcend-cdn.com asset_path=/cm/4d6a6beb-faf4-4a4e-9e1c-c7692d5f9c2f/airgap.js
 asset_host=www.notion.so asset_path=/_assets/10512-d06fbb63a3c48f72.js
 asset_host=www.notion.so asset_path=/_assets/13566-5987c77cec56c2a6.js
+asset_host=www.notion.so asset_path=/_assets/47654-cd3df3a442b7f725.js
 asset_host=www.notion.so asset_path=/_assets/49459-7ae169a8581f2b47.js
 asset_host=www.notion.so asset_path=/_assets/56643-254b7f29e5762127.js
-asset_host=www.notion.so asset_path=/_assets/58601-790a9eec8005ad5a.js
 asset_host=www.notion.so asset_path=/_assets/8563-9e3514d19f7f9efe.js
 asset_host=www.notion.so asset_path=/_assets/86379-13d08e09628902af.js
 asset_host=www.notion.so asset_path=/_assets/87022-232a0a62575cae4f.js
-asset_host=www.notion.so asset_path=/_assets/96265-c729f0eddb1a2745.js
-asset_host=www.notion.so asset_path=/_assets/ClientFramework-b0274ee1f73b54ae.js
-asset_host=www.notion.so asset_path=/_assets/RecordMap-354218eb0b2628ac.js
-asset_host=www.notion.so asset_path=/_assets/UISpacePermissionGroupToken-a13c5e0280ffe065.js
-asset_host=www.notion.so asset_path=/_assets/app-bcde807b70f54f48.js
+asset_host=www.notion.so asset_path=/_assets/96265-77b8063ab68907a8.js
+asset_host=www.notion.so asset_path=/_assets/ClientFramework-95b1f546076a5245.js
+asset_host=www.notion.so asset_path=/_assets/RecordMap-4862e773a4b0f765.js
+asset_host=www.notion.so asset_path=/_assets/UISpacePermissionGroupToken-2f698d1ddf0571f6.js
+asset_host=www.notion.so asset_path=/_assets/app-26c0114797c87e7f.js
 asset_host=www.notion.so asset_path=/_assets/contentPreview-adb76a7d89b84398.js
 downloaded_initial_count=15
-downloaded_initial_bytes=5948408
+downloaded_initial_bytes=6046324
 
 == Resolve runtime maps and crawl attachment dependencies ==
 Traceback (most recent call last):
@@ -35,7 +35,7 @@ Traceback (most recent call last):
   File "/usr/lib/python3.12/json/decoder.py", line 353, in raw_decode
     obj, end = self.scan_once(s, idx)
                ^^^^^^^^^^^^^^^^^^^^^^
-json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 5135 (char 5134)
+json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 4948 (char 4947)
 
 == Public source-code queries (wget) ==
 query=getUploadFileUrl
