@@ -711,3 +711,26 @@ Notionへ実ファイルとして送る場合は必ず `upload_attachment` と `
 - Notion quota がない場合、`premium-feature-unavailable` を tool error として返す。
 - browser DOM fallback は持たない。履歴 API が変更された場合は実装更新が必要。
 - MCP client の約60秒制限自体は回避できない。長い生成は `pending` job として返り、`get_chat_result` での回収が必要になる。
+## keep_me_awake を手動操作する
+
+HTTP サーバーに `/keep-awake` を追加しました。`/mcp` と同じ bearer token で、watchdog の一覧・開始・
+停止・即時確認ができます。MCP ツールと同じ supervisor を共有するため、UI から開始した watchdog は
+モデル側からもそのまま見えます。
+
+| メソッド | パス | 用途 |
+| --- | --- | --- |
+| `GET` | `/keep-awake` | 一覧（`?limit=1..100`、既定 20） |
+| `POST` | `/keep-awake` | 監視開始 |
+| `POST` | `/keep-awake/stop-all` | 全停止 |
+| `GET` | `/keep-awake/:id` | 単体取得 |
+| `POST` | `/keep-awake/:id/check` | 即時判定 |
+| `POST` | `/keep-awake/:id/kick` | 強制的に小突く |
+| `POST` | `/keep-awake/:id/stop` | 個別停止 |
+
+ブラウザから呼ぶ場合の許可オリジンは `NOTION_MCP_HTTP_ALLOWED_ORIGINS`（既定は Notion の web
+オリジン）で指定します。UI 開発用に、Notion へ接続しないスタブ
+`npx tsx scripts/keep-awake-ui-fixture.ts` も同梱しています。
+
+詳細は [`docs/keep-awake-manual-control.md`](docs/keep-awake-manual-control.md) を、拡張機能側の UI は
+[Notion-chat-exporter](https://github.com/nmt3325/Notion-chat-exporter) の Keep awake パネルを参照
+してください。

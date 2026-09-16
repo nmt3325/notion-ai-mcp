@@ -8,6 +8,7 @@ import { loadConfig } from "./config.js";
 import { NotionClient } from "./notion-client.js";
 import type { KeepAwakeSupervisor } from "./keep-awake.js";
 import { createKeepAwakeSupervisor, createServer as createMcpServer } from "./server.js";
+import { resolveKeepAwakeRoute, runKeepAwakeRoute } from "./keep-awake-http.js";
 
 const DEFAULT_BODY_LIMIT = 1024 * 1024;
 
@@ -18,6 +19,8 @@ export interface HttpServerOptions {
   bearerToken: string;
   sessionTtlMs: number;
   maxSessions: number;
+  /** Browser origins allowed to read a response. "*" allows every origin. */
+  allowedOrigins?: readonly string[] | undefined;
   clientFactory?: () => NotionClient;
   logger?: (message: string) => void;
 }
@@ -64,7 +67,8 @@ export function loadHttpServerOptions(): HttpServerOptions {
     path: normalizePath(process.env.NOTION_MCP_HTTP_PATH || "/mcp"),
     bearerToken,
     sessionTtlMs: integerSetting("NOTION_MCP_HTTP_SESSION_TTL_MS", 60 * 60 * 1000),
-    maxSessions: integerSetting("NOTION_MCP_HTTP_MAX_SESSIONS", 100)
+    maxSessions: integerSetting("NOTION_MCP_HTTP_MAX_SESSIONS", 100),
+    allowedOrigins: parseAllowedOrigins(process.env.NOTION_MCP_HTTP_ALLOWED_ORIGINS)
   };
 }
 
@@ -116,6 +120,46 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
 }
 
+/**
+ * Browser origins allowed to read a response, before NOTION_MCP_HTTP_ALLOWED_ORIGINS overrides them.
+ *
+ * The keep-awake control surface exists to be driven from the Notion web client, so the pages that
+ * run there are the only origins that need an allowance out of the box.
+ */
+export const DEFAULT_ALLOWED_ORIGINS = ["https://www.notion.so", "https://notion.so", "https://app.notion.com"] as const;
+
+const CORS_REQUEST_HEADERS = "authorization, content-type, mcp-session-id, mcp-protocol-version, last-event-id";
+
+function parseAllowedOrigins(raw: string | undefined): string[] {
+  const entries = (raw ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+  return entries.length > 0 ? entries : [...DEFAULT_ALLOWED_ORIGINS];
+}
+
+/**
+ * Decides whether a browser origin may read a response from this listener.
+ *
+ * Every route still checks the bearer token, so this only decides which page may hold that token,
+ * never what an authenticated caller is allowed to do.
+ */
+export function originAllowed(origin: string, allowed: readonly string[]): boolean {
+  if (!origin) return false;
+  if (allowed.includes("*") || allowed.includes(origin)) return true;
+  // An extension service worker sends an origin that is unique per install, so a configuration can
+  // only match it by scheme.
+  const scheme = origin.split("://")[0] ?? "";
+  return scheme.endsWith("-extension") && allowed.includes(`${scheme}://*`);
+}
+
+function applyCorsHeaders(res: ServerResponse, origin: string): void {
+  res.setHeader("access-control-allow-origin", origin);
+  res.setHeader("vary", "origin");
+  res.setHeader("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("access-control-allow-headers", CORS_REQUEST_HEADERS);
+  // The Streamable HTTP transport keeps its session id in a response header.
+  res.setHeader("access-control-expose-headers", "mcp-session-id");
+  res.setHeader("access-control-max-age", "600");
+}
+
 function requestPath(req: IncomingMessage): string {
   return new URL(req.url || "/", "http://localhost").pathname.replace(/\/+$/, "") || "/";
 }
@@ -124,6 +168,7 @@ export function createRemoteMcpHttpServer(options: HttpServerOptions): RemoteMcp
   if (!options.path.startsWith("/")) throw new Error("HTTP MCP path must start with /");
   if (options.bearerToken.length < 32) throw new Error("HTTP MCP bearer token must contain at least 32 characters");
   const sessions = new Map<string, HttpSession>();
+  const allowedOrigins = options.allowedOrigins?.length ? [...options.allowedOrigins] : [...DEFAULT_ALLOWED_ORIGINS];
   const clientFactory = options.clientFactory ?? (() => new NotionClient(loadConfig()));
   const log = options.logger ?? ((message: string) => process.stderr.write(`${message}\n`));
   // Notion opens a fresh MCP session for every tool call. A client and a supervisor per session
@@ -147,10 +192,60 @@ export function createRemoteMcpHttpServer(options: HttpServerOptions): RemoteMcp
   const nodeServer: Server = createNodeServer(async (req, res) => {
     try {
       const path = requestPath(req);
+      const origin = header(req, "origin");
+      const allowedOrigin = originAllowed(origin, allowedOrigins) ? origin : "";
+      if (allowedOrigin) applyCorsHeaders(res, allowedOrigin);
+      if (req.method === "OPTIONS") {
+        // A preflight never carries the Authorization header it is asking permission for, so it is
+        // answered before the token check and says nothing about the route behind it.
+        res.writeHead(allowedOrigin ? 204 : 403).end();
+        return;
+      }
       if (path === "/healthz") {
         jsonResponse(res, 200, { status: "ok" });
         return;
       }
+
+      // The keep-awake control surface shares this listener and its token, but not its MCP session
+      // handshake: a browser can reach it with one ordinary JSON request.
+      const keepAwakeRoute = resolveKeepAwakeRoute(req.method ?? "GET", path);
+      if (keepAwakeRoute) {
+        if (!authenticated(req, options.bearerToken)) {
+          res.setHeader("www-authenticate", "Bearer");
+          jsonResponse(res, 401, { error: "Unauthorized" });
+          return;
+        }
+        if (keepAwakeRoute.kind === "not_found") {
+          jsonResponse(res, 404, { error: "Not found" });
+          return;
+        }
+        if (keepAwakeRoute.kind === "method_not_allowed") {
+          res.setHeader("allow", keepAwakeRoute.allow);
+          jsonResponse(res, 405, { error: "Method not allowed" });
+          return;
+        }
+        let payload: unknown = {};
+        if (req.method === "POST") {
+          try {
+            payload = await readJsonBody(req);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Invalid JSON request";
+            // stop, check and kick carry no body, so an empty one is not a client error.
+            if (!/empty/i.test(message)) {
+              jsonResponse(res, message.includes("too large") ? 413 : 400, { error: message, code: "invalid_request" });
+              return;
+            }
+          }
+        }
+        const outcome = await runKeepAwakeRoute(
+          keepAwakeRoute.route,
+          { body: payload, query: new URL(req.url ?? "/", "http://localhost").searchParams },
+          { supervisor: keepAwake, defaults: () => client().keepAwakeDefaults() }
+        );
+        jsonResponse(res, outcome.status, outcome.body);
+        return;
+      }
+
       if (path !== options.path) {
         jsonResponse(res, 404, { error: "Not found" });
         return;
