@@ -302,3 +302,35 @@ test("chat recovers an empty permission stream using its original workspace afte
     assert.equal((await client.account()).spaceId, otherScope.spaceId);
   } finally { client.stopWebConfirmations(); }
 });
+
+test("diagnostics name the gate that blocked an approval without logging URLs", async () => {
+  const f = fixture();
+  const thread = f.add("diagnostic");
+  thread.current_inference_id = "diagnostic-initial";
+  thread.data.last_turn_outcome.status = "completed";
+  const supervisor = new WebConfirmationSupervisor(f.runtime, { ...DEFAULT_WEB_CONFIRMATION, debug: true }, value => f.logs.push(value));
+  await supervisor.tick();
+  await until(() => f.logs.some(line => line.includes("outcome_not_requires_action")));
+  supervisor.stop();
+  assert.equal(f.calls.length, 0);
+  const journal = f.logs.join("\n");
+  assert.match(journal, /discovery: accounts=1/);
+  assert.match(journal, /discovery: thread diagnost queued \(status=completed, running=true\)/);
+  assert.match(journal, /poll: targets=1 flights=0 cooling=0 attempts=0/);
+  assert.match(journal, /thread diagnost not eligible: outcome_not_requires_action\(completed\)/);
+  assert.ok(!journal.includes("do-not-log"), "diagnostics must never contain confirmation URLs");
+});
+
+test("diagnostics stay silent unless explicitly enabled", async () => {
+  const f = fixture();
+  const thread = f.add("quiet");
+  thread.current_inference_id = "quiet-initial";
+  thread.data.last_turn_outcome.status = "completed";
+  const supervisor = f.create();
+  await supervisor.tick();
+  await new Promise(resolve => setTimeout(resolve, 25));
+  supervisor.stop();
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.logs.some(line => line.includes("not eligible")), false);
+  assert.equal(f.logs.some(line => line.includes("poll: targets")), false);
+});
