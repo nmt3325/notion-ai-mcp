@@ -7,6 +7,8 @@ type Json = Record<string, unknown>;
 const object = (value: unknown): Json => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Json : {};
 const string = (value: unknown): string => typeof value === "string" ? value : "";
 const strings = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+const short = (id: string): string => id.slice(0, 8);
+const detail = (error: unknown): string => error instanceof Error ? error.message : "unknown error";
 
 export interface WebConfirmationOptions {
   enabled: boolean;
@@ -14,8 +16,10 @@ export interface WebConfirmationOptions {
   discoveryMs: number;
   concurrency: number;
   stateFilePath?: string | undefined;
+  /** Diagnostics: name the gate that stopped an approval. Never logs URLs, arguments or page text. */
+  debug?: boolean | undefined;
 }
-export const DEFAULT_WEB_CONFIRMATION = { enabled: true, pollMs: 5_000, discoveryMs: 30_000, concurrency: 8 };
+export const DEFAULT_WEB_CONFIRMATION = { enabled: true, pollMs: 5_000, discoveryMs: 30_000, concurrency: 8, debug: false };
 export interface WebConfirmationScope { spaceId: string; userId: string }
 export interface WebConfirmationReply { text: string; inputTokens: number; outputTokens: number; eventTypes: Record<string, number> }
 export interface WebConfirmationRuntime {
@@ -117,7 +121,10 @@ export class WebConfirmationSupervisor {
   tick(): Promise<void> {
     if (!this.options.enabled || this.controller.signal.aborted) return Promise.resolve();
     if (this.ticking) return this.ticking;
-    const work = this.cycle().catch(() => { if (!this.controller.signal.aborted) this.log("poll failed; will retry (details redacted)"); });
+    const work = this.cycle().catch((error: unknown) => {
+      if (this.controller.signal.aborted) return;
+      this.log(this.options.debug ? `poll failed; will retry: ${detail(error)}` : "poll failed; will retry (details redacted)");
+    });
     this.ticking = work;
     void work.finally(() => { if (this.ticking === work) this.ticking = undefined; });
     return work;
@@ -129,20 +136,32 @@ export class WebConfirmationSupervisor {
       await this.discover();
     }
     this.controller.signal.throwIfAborted();
+    this.note(`poll: targets=${this.targets.size} flights=${this.flights.size} cooling=${[...this.cooldowns.values()].filter(deadline => deadline > Date.now()).length} attempts=${this.attempts.size}`);
     for (const [key, target] of [...this.targets]) {
       if (this.flights.size >= this.options.concurrency) break;
       if (this.flights.has(key) || (this.cooldowns.get(key) ?? 0) > Date.now()) continue;
       // Round-robin ordering: a busy/large account must not starve later threads.
       this.targets.delete(key); this.targets.set(key, target);
-      void this.resume(target.scope, target.threadId).catch(() => {
-        if (!this.controller.signal.aborted) this.log("thread confirmation paused; details redacted");
+      void this.resume(target.scope, target.threadId).catch((error: unknown) => {
+        if (this.controller.signal.aborted) return;
+        this.log(this.options.debug
+          ? `thread ${short(target.threadId)} confirmation paused: ${detail(error)}`
+          : "thread confirmation paused; details redacted");
       });
     }
+  }
+
+  /** Diagnostics only: thread ids are truncated, and URLs, arguments and page text are never logged. */
+  private note(event: string): void { if (this.options.debug) this.log(event); }
+  private skip(threadId: string, reason: string): null {
+    this.note(`thread ${short(threadId)} not eligible: ${reason}`);
+    return null;
   }
 
   private async discover(): Promise<void> {
     const signal = this.controller.signal;
     const scopes = await this.runtime.scopes(signal);
+    this.note(`discovery: accounts=${scopes.length}`);
     for (const scope of scopes) {
       signal.throwIfAborted();
       try {
@@ -162,7 +181,10 @@ export class WebConfirmationSupervisor {
             if (thread.alive === false || (thread.space_id && thread.space_id !== scope.spaceId)) continue;
             const outcome = object(object(thread.data).last_turn_outcome);
             const key = keyOf(scope, id);
-            if (thread.current_inference_id || outcome.status === "requires_action") this.targets.set(key, { scope, threadId: id });
+            if (thread.current_inference_id || outcome.status === "requires_action") {
+              if (!this.targets.has(key)) this.note(`discovery: thread ${short(id)} queued (status=${string(outcome.status) || "none"}, running=${Boolean(thread.current_inference_id)})`);
+              this.targets.set(key, { scope, threadId: id });
+            }
             else if (!this.flights.has(key)) this.targets.delete(key);
           }
           if (!page.hasMore) break;
@@ -170,8 +192,11 @@ export class WebConfirmationSupervisor {
           if (!next || visited.has(next)) throw new Error("Invalid transcript pagination cursor");
           visited.add(next); cursor = next;
         } while (!signal.aborted);
-      } catch {
-        if (!signal.aborted) this.log("workspace discovery failed; other workspaces continue");
+      } catch (error) {
+        if (signal.aborted) continue;
+        this.log(this.options.debug
+          ? `workspace discovery failed; other workspaces continue: ${detail(error)}`
+          : "workspace discovery failed; other workspaces continue");
       }
     }
   }
@@ -216,17 +241,23 @@ export class WebConfirmationSupervisor {
     }, this.controller.signal);
     const thread = unwrapRecord(object(object(payload.recordMap).thread)[threadId]);
     if (!Object.keys(thread).length) throw new Error("Thread record is unavailable");
-    if (thread.alive === false || thread.space_id !== scope.spaceId || thread.type !== "workflow") return null;
+    if (thread.alive === false || thread.space_id !== scope.spaceId || thread.type !== "workflow") {
+      return this.skip(threadId, `thread_not_eligible(alive=${thread.alive !== false}, space=${thread.space_id === scope.spaceId}, type=${string(thread.type) || "none"})`);
+    }
     const outcome = object(object(thread.data).last_turn_outcome);
-    if (outcome.status !== "requires_action") return null;
+    if (outcome.status !== "requires_action") return this.skip(threadId, `outcome_not_requires_action(${string(outcome.status) || "none"})`);
     // A new execution/user message must not approve a previous turn's stale permission.
-    if (thread.current_inference_id && thread.current_inference_id !== outcome.inference_id) return null;
+    if (thread.current_inference_id && thread.current_inference_id !== outcome.inference_id) return this.skip(threadId, "inference_id_mismatch");
     const ids = strings(thread.messages), finalId = string(outcome.final_step_id), inferenceId = string(outcome.inference_id);
-    if (!finalId || !inferenceId || ids.at(-1) !== finalId) return null;
+    if (!finalId || !inferenceId || ids.at(-1) !== finalId) {
+      return this.skip(threadId, `final_step_not_last(finalStep=${Boolean(finalId)}, inference=${Boolean(inferenceId)}, isLast=${ids.at(-1) === finalId}, steps=${ids.length})`);
+    }
     const final = (await this.messages(scope, [finalId])).get(finalId)!;
-    if (final.type !== "agent-tool-result" || final.state !== "confirmation:requested") return null;
+    if (final.type !== "agent-tool-result" || final.state !== "confirmation:requested") {
+      return this.skip(threadId, `final_step_not_pending_confirmation(type=${string(final.type) || "none"}, state=${string(final.state) || "none"})`);
+    }
     const agentStepId = string(final.agentStepId);
-    if (!agentStepId) return null;
+    if (!agentStepId) return this.skip(threadId, "final_step_missing_agent_step_id");
     const steps: Json[] = [];
     let boundary = false;
     for (let end = ids.length; end > 0 && !boundary; end -= 64) {
@@ -237,7 +268,7 @@ export class WebConfirmationSupervisor {
         if (step.agentStepId === agentStepId && step.traceId === inferenceId && isPendingWebConfirmation(step)) steps.push(step);
       }
     }
-    if (!steps.length) return null;
+    if (!steps.length) return this.skip(threadId, "no_pending_web_url_confirmation_step");
     const config: Json[] = [];
     for (let start = 0; start < ids.length && config.length < 2; start += 32) {
       const records = await this.messages(scope, ids.slice(start, start + 32));
@@ -245,7 +276,10 @@ export class WebConfirmationSupervisor {
         if ((step.type === "config" || step.type === "context") && !config.some(saved => saved.type === step.type)) config.push(step);
       }
     }
-    if (config.length !== 2) throw new Error("Stored config/context unavailable");
+    if (config.length !== 2) {
+      this.note(`thread ${short(threadId)} not eligible: stored_config_context_missing(found=${config.length})`);
+      throw new Error("Stored config/context unavailable");
+    }
     return { thread, config, steps: steps.reverse(), inferenceId,
       fingerprint: JSON.stringify([thread.version, outcome.inference_id, outcome.final_step_id, ids]) };
   }

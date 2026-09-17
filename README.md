@@ -129,6 +129,7 @@ HTTP の接続・再接続ごとに監視を増やさず、プロセス単位で
 | `NOTION_AUTO_CONFIRM_WEB_POLL_MS` | `5000` | 既知の進行中スレッドの確認間隔 |
 | `NOTION_AUTO_CONFIRM_WEB_DISCOVERY_MS` | `30000` | 新規・既存スレッドを再発見する間隔 |
 | `NOTION_AUTO_CONFIRM_WEB_CONCURRENCY` | `8` | 同時に処理する確認待ちスレッドの上限 |
+| `NOTION_AUTO_CONFIRM_WEB_DEBUG` | `0` | `1` で診断ログを stderr に出力（発見件数・監視対象数・承認を止めたゲート名・HTTP ステータス。URL や本文は出力しない） |
 
 **注意:** 個々の URL の内容をユーザーに確認せず許可します。Web fetch の URL やクエリに機密情報が
 含まれると外部サイトへ送信される可能性があります。信頼できるプロンプト・ワークスペースだけで使用してください。

@@ -138,6 +138,7 @@ export function loadConfig(): NotionConfig {
       pollMs: integer("NOTION_AUTO_CONFIRM_WEB_POLL_MS", 5_000, 1_000, 300_000),
       discoveryMs: integer("NOTION_AUTO_CONFIRM_WEB_DISCOVERY_MS", 30_000, 5_000, 600_000),
       concurrency: integer("NOTION_AUTO_CONFIRM_WEB_CONCURRENCY", 8, 1, 64),
+      debug: flag("NOTION_AUTO_CONFIRM_WEB_DEBUG", false),
       ...(persistState && stateFile ? { stateFilePath: join(dirname(stateFile), "web-confirmations.json") } : {})
     },
     ...(persistState && stateFile ? { stateFilePath: stateFile, keepAliveFilePath: join(dirname(stateFile), "keep-alives.json") } : {}),
