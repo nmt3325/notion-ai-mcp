@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { buildContinue, buildNudge, decideKeepAwake, DEFAULT_STEP_LIMIT_STEPS, isLockedError, isStepLimitConfirmation, isStepLimitStop, isUnfinishedFinalStep, KeepAliveStore, KeepAwakeSupervisor, leaseState, MIN_IDLE_MS, parseConfirmationPatterns } from "../src/keep-awake.js";
+import { buildContinue, buildNudge, createDoneToken, decideKeepAwake, DEFAULT_STEP_LIMIT_STEPS, isDoneTokenReply, isLockedError, isStepLimitConfirmation, isStepLimitStop, isUnfinishedFinalStep, KeepAliveStore, KeepAwakeSupervisor, leaseState, MIN_IDLE_MS, parseConfirmationPatterns } from "../src/keep-awake.js";
 import type { KeepAwakeDefaults } from "../src/keep-awake.js";
 import type { FinalStepShape, ThreadSignals } from "../src/types.js";
 
@@ -38,6 +38,7 @@ function decide(input: {
   deadlineAt?: number;
   awaitingConfirmation?: boolean;
   completionIsAnswer?: boolean;
+  doneTokenMatched?: boolean;
   continueCount?: number;
   maxContinues?: number;
   lastContinueAt?: number | null;
@@ -54,6 +55,7 @@ function decide(input: {
     deadlineAt: input.deadlineAt ?? BASE + 3_600_000,
     awaitingConfirmation: input.awaitingConfirmation ?? false,
     completionIsAnswer: input.completionIsAnswer ?? true,
+    doneTokenMatched: input.doneTokenMatched ?? false,
     continueCount: input.continueCount ?? 0,
     maxContinues: input.maxContinues ?? 10,
     lastContinueAt: input.lastContinueAt ?? null
@@ -72,14 +74,24 @@ test("a heartbeat frozen past the idle window is nudged", () => {
   assert.equal(decision.action === "nudge" ? decision.idleMs : 0, 200_000);
 });
 
-test("a turn that closed at or after the anchor stops the watchdog instead of nudging it", () => {
-  // The heartbeat is frozen for far longer than the idle window, but the freeze is the AI waiting for
-  // the user. Without this rule the watchdog would nudge a finished chat forever.
-  const decision = decide({
-    now: BASE + 600_000,
-    signals: signals({ updatedTime: BASE + 5_000, serverNow: BASE + 600_000, outcome: { status: "completed", completedTime: BASE + 5_000 } })
-  });
-  assert.deepEqual(decision, { action: "stop", reason: "turn_completed" });
+test("a completed turn stops only after the exact done token", () => {
+  const completed = signals({ updatedTime: BASE + 5_000, serverNow: BASE + 600_000, outcome: { status: "completed", completedTime: BASE + 5_000 } });
+  assert.deepEqual(
+    decide({ now: BASE + 600_000, signals: completed, doneTokenMatched: true }),
+    { action: "stop", reason: "turn_completed" }
+  );
+  assert.deepEqual(
+    decide({ now: BASE + 600_000, signals: completed, doneTokenMatched: false }),
+    { action: "nudge", reason: "stalled", idleMs: 595_000 }
+  );
+});
+
+test("done-token matching is exact apart from surrounding whitespace", () => {
+  const token = createDoneToken("11111111-2222-4333-8444-555555555555");
+  assert.equal(token, "DONE::KA-111111112222");
+  assert.equal(isDoneTokenReply(`  ${token}\n`, token), true);
+  assert.equal(isDoneTokenReply(`finished: ${token}`, token), false);
+  assert.equal(isDoneTokenReply(`${token}.`, token), false);
 });
 
 test("an outcome left over from the previous turn does not stop the watchdog", () => {
@@ -143,8 +155,8 @@ test("all non-final built-in nudges use the same requested message", () => {
 test("non-final nudges still append the unchanged done-token sentence", () => {
   for (const language of ["ja", "en"] as const) {
     const done = language === "ja"
-      ? "\nすでに完了しているなら、説明を足さず DONE::KA-7f3a だけを返す。"
-      : "\nIf the task is already done, reply with DONE::KA-7f3a and nothing else.";
+      ? "\nタスク全体が完了したときは、説明を足さず DONE::KA-7f3a だけを返す。このトークンを返すまで監視は終了しない。"
+      : "\nWhen the whole task is complete, reply with DONE::KA-7f3a and nothing else. The watch does not end until you return this token.";
     for (const nudgeCount of [1, 2, 3, 4, 39]) {
       assert.equal(
         buildNudge({ nudgeCount, maxNudges: 40, idleMs: 150_000, language, doneToken: "DONE::KA-7f3a" }),
@@ -163,8 +175,8 @@ test("final nudges retain their original wording and optional done-token sentenc
             ? "FINAL 最後のナッジ。新しい作業は始めない。\n完了分・未完了分・再開手順をまとめる。"
             : "FINAL nudge. Do not start new work.\nSummarise what is done, what is left, and how to resume.";
           const done = !doneToken ? "" : language === "ja"
-            ? `\nすでに完了しているなら、説明を足さず ${doneToken} だけを返す。`
-            : `\nIf the task is already done, reply with ${doneToken} and nothing else.`;
+            ? `\nタスク全体が完了したときは、説明を足さず ${doneToken} だけを返す。このトークンを返すまで監視は終了しない。`
+            : `\nWhen the whole task is complete, reply with ${doneToken} and nothing else. The watch does not end until you return this token.`;
           assert.equal(
             buildNudge({ nudgeCount, maxNudges, idleMs: 150_000, language, doneToken }),
             `[KEEP-AWAKE ${nudgeCount}/${maxNudges}] ${body}${done}`
@@ -175,9 +187,9 @@ test("final nudges retain their original wording and optional done-token sentenc
   }
 });
 
-test("an explicit custom nudge message remains an override", () => {
-  const custom = buildNudge({ nudgeCount: 2, maxNudges: 9, idleMs: 1_000, language: "ja", custom: "resume the build" });
-  assert.equal(custom, "[KEEP-AWAKE 2/9] resume the build");
+test("an explicit custom nudge still includes the mandatory done token", () => {
+  const custom = buildNudge({ nudgeCount: 2, maxNudges: 9, idleMs: 1_000, language: "ja", custom: "resume the build", doneToken: "DONE::KA-custom" });
+  assert.equal(custom, "[KEEP-AWAKE 2/9] resume the build\nタスク全体が完了したときは、説明を足さず DONE::KA-custom だけを返す。このトークンを返すまで監視は終了しない。");
 });
 
 const DEFAULTS: KeepAwakeDefaults = { interrupt: false, idleMs: IDLE, pollMs: 30_000, cooldownMs: COOLDOWN, maxNudges: 3, deadlineMs: 3_600_000, enabled: true };
@@ -185,16 +197,19 @@ const DEFAULTS: KeepAwakeDefaults = { interrupt: false, idleMs: IDLE, pollMs: 30
 function harness(initial: ThreadSignals) {
   let current = initial;
   let clock = initial.serverNow;
+  let tail = "";
   const sent: string[] = [];
   const store = new KeepAliveStore(null);
   const supervisor = new KeepAwakeSupervisor(store, {
     readSignals: async () => current,
     sendNudge: async (_conversationId, prompt) => { sent.push(prompt); },
+    readTail: async () => tail,
     now: () => clock
   }, DEFAULTS);
   return {
     supervisor,
     sent,
+    setTail(next: string): void { tail = next; },
     advance(next: ThreadSignals): void { current = next; clock = next.serverNow; }
   };
 }
@@ -221,6 +236,7 @@ test("the supervisor nudges a dead turn once per cooldown and stops when the tur
 
   // The nudge landed and the resumed turn closed cleanly. The heartbeat is stale again, so only the
   // outcome check can tell this apart from another stall.
+  box.setTail(record.doneToken);
   box.advance(signals({ updatedTime: BASE + 380_000, serverNow: BASE + 600_000, outcome: { status: "completed", completedTime: BASE + 380_000 } }));
   const closed = await box.supervisor.tick(record.keepAliveId);
   assert.equal(closed.decision.action, "stop");
@@ -500,8 +516,8 @@ test("the supervisor answers the prompt and keeps its nudge budget intact", asyn
   assert.equal(answered.keepAlive?.nudgeCount, 0);
   assert.match(box.sent[0] ?? "", /\[KEEP-AWAKE CONTINUE 1\/2\]/);
 
-  // Once the resumed turn closes for real, the ordinary completion rule ends the watch.
-  box.setTail("40件目: まとめ / 50件。以上で全て完了です。");
+  // Once the resumed turn returns the exact token, the completion rule ends the watch.
+  box.setTail(record.doneToken);
   box.setFinalStep({ stepId: "step-1", type: "agent-inference", state: "", hasAnswerText: true, finishedAt: BASE + 300_000 });
   box.advance(signals({ updatedTime: BASE + 300_000, serverNow: BASE + 400_000, outcome: { status: "completed", completedTime: BASE + 300_000 } }));
   const closed = await box.supervisor.tick(record.keepAliveId);
@@ -566,7 +582,8 @@ test("a completion that did not end on an answer keeps the watch alive", () => {
   // The same record backed by a real answer still ends the watch, which is the common case.
   const finished = decide({
     now: BASE + IDLE + 60_000,
-    signals: signals({ updatedTime: BASE + 10_000, serverNow: BASE + IDLE + 60_000, outcome: { status: "completed", completedTime: BASE + 10_000 } })
+    signals: signals({ updatedTime: BASE + 10_000, serverNow: BASE + IDLE + 60_000, outcome: { status: "completed", completedTime: BASE + 10_000 } }),
+    doneTokenMatched: true
   });
   assert.deepEqual(finished, { action: "stop", reason: "turn_completed" });
 });
@@ -585,7 +602,8 @@ test("a step-limit stop is answered with Continue even though the prompt is neve
   assert.equal(answered.keepAlive?.nudgeCount, 0);
   assert.match(box.sent[0] ?? "", /\[KEEP-AWAKE CONTINUE 1\/2\]/);
 
-  // Once the resumed turn ends on a real answer, the ordinary completion rule closes the watch.
+  // Once the resumed turn returns the exact token, the completion rule closes the watch.
+  box.setTail(record.doneToken);
   box.setFinalStep({ stepId: "step-2", type: "agent-inference", state: "", hasAnswerText: true, finishedAt: BASE + 300_000 });
   box.advance(signals({ updatedTime: BASE + 300_000, serverNow: BASE + 400_000, outcome: { status: "completed", completedTime: BASE + 300_000, stepCount: 3_010 } }));
   const closed = await box.supervisor.tick(record.keepAliveId);

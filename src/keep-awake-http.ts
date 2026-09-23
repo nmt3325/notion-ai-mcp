@@ -99,7 +99,7 @@ const startSchema = z
     autoContinue: z.boolean().optional(),
     maxContinues: z.number().int().min(0).max(100).optional(),
     language: z.enum(["ja", "en"]).optional(),
-    doneToken: z.string().min(3).max(64).optional(),
+    doneToken: z.string().trim().min(3).max(64).optional(),
     message: z.string().min(1).max(2000).optional()
   })
   .strict();
