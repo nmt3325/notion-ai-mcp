@@ -225,7 +225,7 @@ export function createServer(client: NotionClient, shared?: { keepAwake?: KeepAw
     description: [
       "Watch a Notion AI conversation and re-send a short continuation message whenever its turn stops without finishing.",
       "The heartbeat is the thread updated_time, which equals the created_time of the newest step.",
-      "A successful completion requires the assistant's final non-empty reply line to exactly equal this watch's doneToken. Prose may precede that line; a finished answer without it remains watched and is nudged after the idle window.",
+      "A successful completion requires the assistant's final non-empty reply line to end with this watch's doneToken. Prose may appear before the token, including on the same line; a finished answer without it remains watched and is nudged after the idle window.",
       "Notion never stores the text of that prompt, so a stop on its step-limit prompt is recognised from the thread record instead: the turn closes as completed but its final step is a tool call left unfinished, and the iterations of that turn have reached the limit the banner counts (100 for script agents, 50 for triggered runs, 15 otherwise). Those stops are answered by resuming the saved checkpoint with the same request the Continue button sends, which adds no user message and grants no tool, and they have their own budget, maxContinues.",
       "Call this from inside the long task that needs protecting and pass that same conversation id, then keep working. Every nudge is a real turn and costs credits, so the budget and the deadline always apply."
     ].join(" "),
@@ -239,7 +239,7 @@ export function createServer(client: NotionClient, shared?: { keepAwake?: KeepAw
       autoContinue: z.boolean().optional().describe(`Answer Notion's "This task is taking a lot of steps" prompt automatically, like pressing Continue. Default ${keepAwakeSettings.autoContinue === false ? "off" : "on"}.`),
       maxContinues: z.number().int().min(0).max(100).optional().describe(`Hard cap on those Continue answers, counted apart from nudges. Default ${keepAwakeSettings.maxContinues ?? 10}.`),
       language: z.enum(["ja", "en"]).optional().describe("Language of the built-in nudge text. Default ja."),
-      doneToken: z.string().trim().min(3).max(64).optional().describe("Token required by itself on the assistant reply's final non-empty line to complete the watch. A unique token is generated when omitted, and every nudge quotes it."),
+      doneToken: z.string().trim().min(3).max(64).optional().describe("Token required at the end of the assistant reply's final non-empty line to complete the watch. A unique token is generated when omitted, and every nudge quotes it."),
       message: z.string().min(1).max(2000).optional().describe("Replaces the built-in nudge body. The [KEEP-AWAKE n/max] tag is still prepended.")
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
@@ -260,7 +260,7 @@ export function createServer(client: NotionClient, shared?: { keepAwake?: KeepAw
     const continues = record.autoContinue === false
       ? "Step-limit confirmation prompts are left for you to answer."
       : `Step-limit confirmation prompts are answered with Continue at most ${record.maxContinues ?? 10} times.`;
-    return result(record, `Watching ${record.conversationId}. Completion requires ${record.doneToken} by itself on the final non-empty reply line; every nudge includes it. Nudges after ${seconds(record.idleMs)}s of silence, at most ${record.maxNudges} times, until ${new Date(record.deadlineAt).toISOString()}. ${continues} Stop it with stop_keep_me_awake and keepAliveId ${record.keepAliveId}.`);
+    return result(record, `Watching ${record.conversationId}. Completion requires the final non-empty reply line to end with ${record.doneToken}; every nudge includes it. Nudges after ${seconds(record.idleMs)}s of silence, at most ${record.maxNudges} times, until ${new Date(record.deadlineAt).toISOString()}. ${continues} Stop it with stop_keep_me_awake and keepAliveId ${record.keepAliveId}.`);
   });
 
   server.registerTool("interrupt_conversation", {

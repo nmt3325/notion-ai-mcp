@@ -42,7 +42,7 @@ pre-fill its form without hardcoding them.
 }
 ```
 
-Only `conversationId` is required; omitting `doneToken` generates a unique one and returns it in `keepAlive.doneToken`. Successful completion requires the assistant reply's final non-empty line to equal that token exactly; prose may precede it, and every built-in or custom nudge includes it. Bounds: `idleSeconds` 60–900, `pollSeconds` 5–300,
+Only `conversationId` is required; omitting `doneToken` generates a unique one and returns it in `keepAlive.doneToken`. Successful completion requires the assistant reply's final non-empty line to end with that token; prose may precede it on the same or earlier lines, and every built-in or custom nudge includes it. Bounds: `idleSeconds` 60–900, `pollSeconds` 5–300,
 `cooldownSeconds` 0–1800, `maxNudges` 1–500, `deadlineMinutes` 1–1440, `maxContinues` 0–100,
 `language` `ja`|`en`, `doneToken` 3–64 chars, `message` 1–2000 chars.
 

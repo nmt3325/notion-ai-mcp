@@ -86,11 +86,11 @@ test("a completed turn stops only after the exact done token", () => {
   );
 });
 
-test("done-token matching accepts prose only before an exact final non-empty token line", () => {
+test("done-token matching accepts prose when the final non-empty line ends with the token", () => {
   const token = createDoneToken("11111111-2222-4333-8444-555555555555");
   assert.equal(token, "DONE::KA-111111112222");
   assert.equal(isDoneTokenReply(`作業結果の説明\n  ${token}  \n\n`, token), true);
-  assert.equal(isDoneTokenReply(`finished: ${token}`, token), false);
+  assert.equal(isDoneTokenReply(`作業完了: ${token}`, token), true);
   assert.equal(isDoneTokenReply(`${token}.`, token), false);
   assert.equal(isDoneTokenReply(`${token}\n追加の説明`, token), false);
 });
@@ -156,8 +156,8 @@ test("all non-final built-in nudges use the same requested message", () => {
 test("non-final nudges still append the unchanged done-token sentence", () => {
   for (const language of ["ja", "en"] as const) {
     const done = language === "ja"
-      ? "\nタスク全体が完了したときは、最終回答の最後の空でない行に DONE::KA-7f3a をそのまま置く。このトークンが最後の空でない行に現れるまで監視は終了しない。"
-      : "\nWhen the whole task is complete, put DONE::KA-7f3a by itself on the final non-empty line of your reply. The watch does not end until this token is the final non-empty line.";
+      ? "\nタスク全体が完了したときは、最終回答の最後の空でない行を DONE::KA-7f3a で終える。このトークンで最後の空でない行が終わるまで監視は終了しない。"
+      : "\nWhen the whole task is complete, end the final non-empty line of your reply with DONE::KA-7f3a. The watch does not end until the final non-empty line ends with this token.";
     for (const nudgeCount of [1, 2, 3, 4, 39]) {
       assert.equal(
         buildNudge({ nudgeCount, maxNudges: 40, idleMs: 150_000, language, doneToken: "DONE::KA-7f3a" }),
@@ -176,8 +176,8 @@ test("final nudges retain their original wording and optional done-token sentenc
             ? "FINAL 最後のナッジ。新しい作業は始めない。\n完了分・未完了分・再開手順をまとめる。"
             : "FINAL nudge. Do not start new work.\nSummarise what is done, what is left, and how to resume.";
           const done = !doneToken ? "" : language === "ja"
-            ? `\nタスク全体が完了したときは、最終回答の最後の空でない行に ${doneToken} をそのまま置く。このトークンが最後の空でない行に現れるまで監視は終了しない。`
-            : `\nWhen the whole task is complete, put ${doneToken} by itself on the final non-empty line of your reply. The watch does not end until this token is the final non-empty line.`;
+            ? `\nタスク全体が完了したときは、最終回答の最後の空でない行を ${doneToken} で終える。このトークンで最後の空でない行が終わるまで監視は終了しない。`
+            : `\nWhen the whole task is complete, end the final non-empty line of your reply with ${doneToken}. The watch does not end until the final non-empty line ends with this token.`;
           assert.equal(
             buildNudge({ nudgeCount, maxNudges, idleMs: 150_000, language, doneToken }),
             `[KEEP-AWAKE ${nudgeCount}/${maxNudges}] ${body}${done}`
@@ -190,7 +190,7 @@ test("final nudges retain their original wording and optional done-token sentenc
 
 test("an explicit custom nudge still includes the mandatory done token", () => {
   const custom = buildNudge({ nudgeCount: 2, maxNudges: 9, idleMs: 1_000, language: "ja", custom: "resume the build", doneToken: "DONE::KA-custom" });
-  assert.equal(custom, "[KEEP-AWAKE 2/9] resume the build\nタスク全体が完了したときは、最終回答の最後の空でない行に DONE::KA-custom をそのまま置く。このトークンが最後の空でない行に現れるまで監視は終了しない。");
+  assert.equal(custom, "[KEEP-AWAKE 2/9] resume the build\nタスク全体が完了したときは、最終回答の最後の空でない行を DONE::KA-custom で終える。このトークンで最後の空でない行が終わるまで監視は終了しない。");
 });
 
 const DEFAULTS: KeepAwakeDefaults = { interrupt: false, idleMs: IDLE, pollMs: 30_000, cooldownMs: COOLDOWN, maxNudges: 3, deadlineMs: 3_600_000, enabled: true };
@@ -237,7 +237,7 @@ test("the supervisor nudges a dead turn once per cooldown and stops when the tur
 
   // The nudge landed and the resumed turn closed cleanly. The heartbeat is stale again, so only the
   // outcome check can tell this apart from another stall.
-  box.setTail(`作業結果のまとめ\n${record.doneToken}\n`);
+  box.setTail(`作業結果のまとめ: ${record.doneToken}\n`);
   box.advance(signals({ updatedTime: BASE + 380_000, serverNow: BASE + 600_000, outcome: { status: "completed", completedTime: BASE + 380_000 } }));
   const closed = await box.supervisor.tick(record.keepAliveId);
   assert.equal(closed.decision.action, "stop");

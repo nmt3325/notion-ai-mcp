@@ -24,10 +24,10 @@ export function createDoneToken(seed: string = randomUUID()): string {
   return `DONE::KA-${seed.replace(/-/g, "").slice(0, 12)}`;
 }
 
-/** Completion requires the token on the final non-empty line, so prose may safely precede it. */
+/** Completion requires the final non-empty line to end with the token. */
 export function isDoneTokenReply(text: string, token: string): boolean {
   const lastNonEmptyLine = text.split(/\r?\n/).reverse().find(line => line.trim().length > 0);
-  return lastNonEmptyLine?.trim() === token;
+  return lastNonEmptyLine?.trimEnd().endsWith(token) ?? false;
 }
 
 /**
@@ -125,7 +125,7 @@ export interface KeepAwakeDecisionInput {
   awaitingConfirmation?: boolean | undefined;
   /** False when the closed turn did not end on an answer, so the completion must not stop the watch. */
   completionIsAnswer?: boolean | null | undefined;
-  /** True only when the completed assistant reply's final non-empty line is this watchdog's done token. */
+  /** True only when the completed assistant reply's final non-empty line ends with this watchdog's done token. */
   doneTokenMatched?: boolean | undefined;
   confirmationBlocked?: boolean | undefined;
   continueCount?: number | undefined;
@@ -184,8 +184,8 @@ export function decideKeepAwake(input: KeepAwakeDecisionInput): KeepAwakeDecisio
 function doneLine(token: string | undefined, language: "ja" | "en"): string {
   if (!token) return "";
   return language === "ja"
-    ? `\nタスク全体が完了したときは、最終回答の最後の空でない行に ${token} をそのまま置く。このトークンが最後の空でない行に現れるまで監視は終了しない。`
-    : `\nWhen the whole task is complete, put ${token} by itself on the final non-empty line of your reply. The watch does not end until this token is the final non-empty line.`;
+    ? `\nタスク全体が完了したときは、最終回答の最後の空でない行を ${token} で終える。このトークンで最後の空でない行が終わるまで監視は終了しない。`
+    : `\nWhen the whole task is complete, end the final non-empty line of your reply with ${token}. The watch does not end until the final non-empty line ends with this token.`;
 }
 
 /**

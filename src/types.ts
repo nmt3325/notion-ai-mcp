@@ -77,7 +77,7 @@ export interface KeepAlive {
   continueCount?:number|undefined;
   lastContinueAt?:number|undefined;
   language:"ja"|"en";
-  /** Token required on the final non-empty line for successful completion. */
+  /** Token required at the end of the final non-empty line for successful completion. */
   doneToken:string;
   message?:string|undefined;
   lastNudgeAt?:number|undefined;
