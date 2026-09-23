@@ -77,7 +77,7 @@ export interface KeepAlive {
   continueCount?:number|undefined;
   lastContinueAt?:number|undefined;
   language:"ja"|"en";
-  /** Exact assistant reply required for successful completion. */
+  /** Token required on the final non-empty line for successful completion. */
   doneToken:string;
   message?:string|undefined;
   lastNudgeAt?:number|undefined;
