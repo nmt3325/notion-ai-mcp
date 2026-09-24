@@ -19,6 +19,17 @@ export const DEFAULT_MAX_CONTINUES = 10;
 export const DEFAULT_CONTINUE_COOLDOWN_MS = 15_000;
 export const DEFAULT_CONFIRM_GRACE_MS = 10_000;
 
+/** Every watchdog has a stable, unambiguous completion token. */
+export function createDoneToken(seed: string = randomUUID()): string {
+  return `DONE::KA-${seed.replace(/-/g, "").slice(0, 12)}`;
+}
+
+/** Completion requires the final non-empty line to end with the token. */
+export function isDoneTokenReply(text: string, token: string): boolean {
+  const lastNonEmptyLine = text.split(/\r?\n/).reverse().find(line => line.trim().length > 0);
+  return lastNonEmptyLine?.trimEnd().endsWith(token) ?? false;
+}
+
 /**
  * Step count above which a closed-but-unfinished turn reads as Notion's step limit rather than a
  * crash. Measured on live threads: the turn that stopped on the prompt closed at 2992 steps, an
@@ -114,6 +125,8 @@ export interface KeepAwakeDecisionInput {
   awaitingConfirmation?: boolean | undefined;
   /** False when the closed turn did not end on an answer, so the completion must not stop the watch. */
   completionIsAnswer?: boolean | null | undefined;
+  /** True only when the completed assistant reply's final non-empty line ends with this watchdog's done token. */
+  doneTokenMatched?: boolean | undefined;
   confirmationBlocked?: boolean | undefined;
   continueCount?: number | undefined;
   maxContinues?: number | undefined;
@@ -154,7 +167,7 @@ export function decideKeepAwake(input: KeepAwakeDecisionInput): KeepAwakeDecisio
   const outcome = input.signals.lastTurnOutcome;
   // Notion stamps "completed" on a turn it stopped itself, so a completion that did not end on an
   // answer is not a finish at all: it is a dead turn that still needs continuing.
-  if (outcome && outcome.status === "completed" && outcome.completedTime !== null && outcome.completedTime >= Math.max(input.anchorTime, input.signals.lastUserMessageTime ?? 0) && input.completionIsAnswer !== false && (!input.signals.currentInferenceId || !outcome.inferenceId || input.signals.currentInferenceId === outcome.inferenceId)) {
+  if (outcome && outcome.status === "completed" && outcome.completedTime !== null && outcome.completedTime >= Math.max(input.anchorTime, input.signals.lastUserMessageTime ?? 0) && input.completionIsAnswer !== false && input.doneTokenMatched === true && (!input.signals.currentInferenceId || !outcome.inferenceId || input.signals.currentInferenceId === outcome.inferenceId)) {
     return { action: "stop", reason: "turn_completed" };
   }
 
@@ -171,8 +184,8 @@ export function decideKeepAwake(input: KeepAwakeDecisionInput): KeepAwakeDecisio
 function doneLine(token: string | undefined, language: "ja" | "en"): string {
   if (!token) return "";
   return language === "ja"
-    ? `\nすでに完了しているなら、説明を足さず ${token} だけを返す。`
-    : `\nIf the task is already done, reply with ${token} and nothing else.`;
+    ? `\nタスク全体が完了したときは、最終回答の最後の空でない行を ${token} で終える。このトークンで最後の空でない行が終わるまで監視は終了しない。`
+    : `\nWhen the whole task is complete, end the final non-empty line of your reply with ${token}. The watch does not end until the final non-empty line ends with this token.`;
 }
 
 /**
@@ -190,8 +203,8 @@ export function buildNudge(input: {
   custom?: string | undefined;
 }): string {
   const header = `[KEEP-AWAKE ${input.nudgeCount}/${input.maxNudges}]`;
-  if (input.custom) return `${header} ${input.custom}`;
   const done = doneLine(input.doneToken, input.language);
+  if (input.custom) return `${header} ${input.custom}${done}`;
   const isFinal = input.nudgeCount >= input.maxNudges;
   if (isFinal && input.language === "en") return `${header} FINAL nudge. Do not start new work.\nSummarise what is done, what is left, and how to resume.${done}`;
   if (isFinal) return `${header} FINAL 最後のナッジ。新しい作業は始めない。\n完了分・未完了分・再開手順をまとめる。${done}`;
@@ -237,7 +250,8 @@ export function sanitizeKeepAlive(value: unknown): KeepAlive | null {
   const createdAt = finite(value.createdAt);
   const deadlineAt = finite(value.deadlineAt);
   if (!keepAliveId || !conversationId || !status || anchorTime === null || createdAt === null || deadlineAt === null) return null;
-  const doneToken = text(value.doneToken);
+  const storedDoneToken = text(value.doneToken).trim();
+  const doneToken = storedDoneToken.length >= 3 && storedDoneToken.length <= 64 ? storedDoneToken : createDoneToken(keepAliveId);
   const message = text(value.message);
   const lastNudgeAt = finite(value.lastNudgeAt);
   const lastContinueAt = finite(value.lastContinueAt);
@@ -264,7 +278,7 @@ export function sanitizeKeepAlive(value: unknown): KeepAlive | null {
     maxContinues: finite(value.maxContinues) ?? DEFAULT_MAX_CONTINUES,
     continueCount: finite(value.continueCount) ?? 0,
     language: languageOf(value.language),
-    ...(doneToken ? { doneToken } : {}),
+    doneToken,
     ...(message ? { message } : {}),
     ...(lastNudgeAt !== null ? { lastNudgeAt } : {}),
     ...(lastContinueAt !== null ? { lastContinueAt } : {}),
@@ -351,7 +365,7 @@ export class KeepAliveStore {
     autoContinue: boolean;
     maxContinues: number;
     language: "ja" | "en";
-    doneToken?: string | undefined;
+    doneToken: string;
     message?: string | undefined;
   }): KeepAlive {
     const record: KeepAlive = {
@@ -370,7 +384,7 @@ export class KeepAliveStore {
       maxContinues: input.maxContinues,
       continueCount: 0,
       language: input.language,
-      ...(input.doneToken ? { doneToken: input.doneToken } : {}),
+      doneToken: input.doneToken,
       ...(input.message ? { message: input.message } : {})
     };
     this.records.set(record.keepAliveId, record);
@@ -545,6 +559,11 @@ export class KeepAwakeSupervisor {
     const concurrent = this.store.watching().find((record) => record.conversationId === input.conversationId);
     if (concurrent) return concurrent;
     const anchorTime = signals.lastUserMessageTime ?? signals.updatedTime ?? signals.serverNow;
+    const requestedDoneToken = input.doneToken?.trim();
+    if (requestedDoneToken && (requestedDoneToken.length < 3 || requestedDoneToken.length > 64)) {
+      throw new Error("doneToken must be between 3 and 64 characters after trimming");
+    }
+    const doneToken = requestedDoneToken || createDoneToken();
     const record = this.store.create({
       conversationId: input.conversationId,
       anchorTime,
@@ -557,7 +576,7 @@ export class KeepAwakeSupervisor {
       autoContinue: input.autoContinue ?? this.defaults.autoContinue ?? true,
       maxContinues: input.maxContinues ?? this.defaults.maxContinues ?? DEFAULT_MAX_CONTINUES,
       language: input.language ?? "ja",
-      ...(input.doneToken ? { doneToken: input.doneToken } : {}),
+      doneToken,
       ...(input.message ? { message: input.message } : {})
     });
     this.schedule(record.keepAliveId, record.pollMs);
@@ -601,6 +620,7 @@ export class KeepAwakeSupervisor {
       deadlineAt: record.deadlineAt,
       awaitingConfirmation: probe.awaitingConfirmation,
       completionIsAnswer: probe.completionIsAnswer,
+      doneTokenMatched: probe.doneTokenMatched,
       confirmationBlocked: probe.confirmationBlocked,
       continueCount: record.continueCount ?? 0,
       maxContinues: record.maxContinues ?? DEFAULT_MAX_CONTINUES,
@@ -637,14 +657,14 @@ export class KeepAwakeSupervisor {
             continueCount: (record.continueCount ?? 0) + 1,
             maxContinues: record.maxContinues ?? DEFAULT_MAX_CONTINUES,
             language: record.language,
-            ...(record.doneToken ? { doneToken: record.doneToken } : {})
+            doneToken: record.doneToken
           })
         : buildNudge({
             nudgeCount: record.nudgeCount + 1,
             maxNudges: record.maxNudges,
             idleMs: decision.action === "nudge" ? decision.idleMs : 0,
             language: record.language,
-            ...(record.doneToken ? { doneToken: record.doneToken } : {}),
+            doneToken: record.doneToken,
             ...(record.message ? { custom: record.message } : {})
           });
       // Notion holds a lease on the thread while an inference is in flight and answers a second turn
@@ -764,8 +784,8 @@ export class KeepAwakeSupervisor {
    * sitting on a confirmation prompt, so probing the transcript then would double the traffic for
    * nothing.
    */
-  private async inspectCompletion(record: KeepAlive, signals: ThreadSignals | null, now: number): Promise<{ awaitingConfirmation: boolean; completionIsAnswer: boolean | null; confirmationBlocked?: boolean }> {
-    const ordinary = { awaitingConfirmation: false, completionIsAnswer: true };
+  private async inspectCompletion(record: KeepAlive, signals: ThreadSignals | null, now: number): Promise<{ awaitingConfirmation: boolean; completionIsAnswer: boolean | null; doneTokenMatched: boolean; confirmationBlocked?: boolean }> {
+    const ordinary = { awaitingConfirmation: false, completionIsAnswer: true, doneTokenMatched: false };
     if (!signals) return ordinary;
     const outcome = signals.lastTurnOutcome;
     const anchor = Math.max(record.anchorTime, signals.lastUserMessageTime ?? 0);
@@ -773,6 +793,12 @@ export class KeepAwakeSupervisor {
     const closed = Boolean(!newerInference && outcome?.status === "completed" && outcome.completedTime !== null && outcome.completedTime >= anchor);
     const quiet = signals.updatedTime !== null && now - signals.updatedTime >= (this.defaults.confirmGraceMs ?? DEFAULT_CONFIRM_GRACE_MS);
     const autoContinue = record.autoContinue !== false && this.defaults.autoContinue !== false;
+    let tail: string | null = null;
+    if (closed && this.runtime.readTail) {
+      try { tail = await this.runtime.readTail(record.conversationId); }
+      catch { tail = null; }
+    }
+    const doneTokenMatched = closed && tail !== null && isDoneTokenReply(tail, record.doneToken);
     if (newerInference || (!closed && !quiet)) {
       // A real step-limit pause never releases the inference lease, so no outcome is written for
       // the turn and the probe below never runs. Notion answers a text nudge with an empty stream
@@ -782,7 +808,7 @@ export class KeepAwakeSupervisor {
       if (frozen && this.runtime.readContinuation) {
         try {
           if (await this.runtime.readContinuation(record.conversationId)) {
-            return { awaitingConfirmation: autoContinue, completionIsAnswer: false, confirmationBlocked: !autoContinue };
+            return { awaitingConfirmation: autoContinue, completionIsAnswer: false, doneTokenMatched: false, confirmationBlocked: !autoContinue };
           }
         } catch { /* Evidence is best effort; an ordinary stall still falls through to the nudge. */ }
       }
@@ -790,22 +816,22 @@ export class KeepAwakeSupervisor {
     }
     if (this.runtime.readTail && !this.runtime.readContinuation && (closed || !outcome)) {
       try {
-        if (isStepLimitConfirmation(await this.runtime.readTail(record.conversationId), this.defaults.continuePatterns ?? [])) {
-          return { awaitingConfirmation: autoContinue, completionIsAnswer: false, confirmationBlocked: !autoContinue };
+        if (isStepLimitConfirmation(tail ?? await this.runtime.readTail(record.conversationId), this.defaults.continuePatterns ?? [])) {
+          return { awaitingConfirmation: autoContinue, completionIsAnswer: false, doneTokenMatched: false, confirmationBlocked: !autoContinue };
         }
       } catch { /* Text is supplementary; the durable final-step probe below remains authoritative. */ }
     }
-    if (!closed || !this.runtime.readFinalStep) return ordinary;
+    if (!closed || !this.runtime.readFinalStep) return { ...ordinary, doneTokenMatched };
     // A missing/unreadable record is unknown, never evidence of successful completion.
-    const unknown = { awaitingConfirmation: false, completionIsAnswer: null };
+    const unknown = { awaitingConfirmation: false, completionIsAnswer: null, doneTokenMatched: false };
     if (!outcome?.finalStepId) return unknown;
     try {
       const shape = await this.runtime.readFinalStep(record.conversationId, outcome.finalStepId);
       if (!shape || !shape.type) return unknown;
       if (/^(pending|blocked|awaiting_permission)$/.test(shape.state)) {
-        return { awaitingConfirmation: false, completionIsAnswer: false, confirmationBlocked: true };
+        return { awaitingConfirmation: false, completionIsAnswer: false, doneTokenMatched: false, confirmationBlocked: true };
       }
-      if (!isUnfinishedFinalStep(shape)) return ordinary;
+      if (!isUnfinishedFinalStep(shape)) return { ...ordinary, doneTokenMatched };
       let stepLimit = isStepLimitStop(shape, outcome.stepCount, this.defaults.stepLimitSteps ?? DEFAULT_STEP_LIMIT_STEPS);
       if (this.runtime.readContinuation) {
         const native = await this.runtime.readContinuation(record.conversationId);
@@ -815,7 +841,7 @@ export class KeepAwakeSupervisor {
         const text = await this.runtime.readTail(record.conversationId);
         if (this.defaults.continuePatterns.some(pattern => pattern.test(text))) stepLimit = true;
       }
-      return { awaitingConfirmation: stepLimit && autoContinue, completionIsAnswer: false, confirmationBlocked: stepLimit && !autoContinue };
+      return { awaitingConfirmation: stepLimit && autoContinue, completionIsAnswer: false, doneTokenMatched: false, confirmationBlocked: stepLimit && !autoContinue };
     } catch { return unknown; }
   }
 

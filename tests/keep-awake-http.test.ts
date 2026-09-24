@@ -121,12 +121,13 @@ test("a browser can arm, list, check and stop a watchdog over HTTP", async () =>
     });
     assert.equal(started.status, 201);
     const startedBody = (await started.json()) as {
-      keepAlive: { keepAliveId: string; status: string; idleMs: number; maxNudges: number };
+      keepAlive: { keepAliveId: string; status: string; idleMs: number; maxNudges: number; doneToken: string };
       defaults: { idleSeconds: number; deadlineMinutes: number };
     };
     assert.equal(startedBody.keepAlive.status, "watching");
     assert.equal(startedBody.keepAlive.idleMs, 90_000);
     assert.equal(startedBody.keepAlive.maxNudges, 5);
+    assert.match(startedBody.keepAlive.doneToken, /^DONE::KA-[0-9a-f]{12}$/);
     // The form in the extension is prefilled from these, so they travel in the units it shows.
     assert.equal(startedBody.defaults.idleSeconds, 120);
     assert.equal(startedBody.defaults.deadlineMinutes, 180);

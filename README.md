@@ -373,7 +373,7 @@ Notion AI は長いタスクの途中でターンを閉じずに止まること�
 | --- | --- |
 | heartbeat | `thread.updated_time`。最新ステップの `created_time` と一致します |
 | stall判定 | `now - updated_time > idleMs`（既定 120s、下限 60s） |
-| 正常終了 | `last_turn_outcome.status == "completed"` かつ `completed_time >= 直近ユーザー発言時刻`、最終ステップが完成した回答 → ナッジせず監視終了 |
+| 正常終了 | `last_turn_outcome.status == "completed"` かつ最終回答の最後の空でない行が watchdog 固有の `doneToken` で終了 → ナッジせず監視終了 |
 | 異常停止 | 上記を満たさず heartbeat が止まったもの → ナッジ |
 
 `updated_time` が止まる理由は「正常終了」と「ターン途中死」の2つあり、見た目は同じです。`last_turn_outcome` はターンが閉じたときだけ書かれるので、この2つを分ける唯一の手がかりになります。正常終了のチェックを stall 判定より先に置くのは、閉じたターンも heartbeat を凍結させるためです。逆にすると完了したチャットを永久につつき続けます。
@@ -382,11 +382,11 @@ Notion AI は長いタスクの途中でターンを閉じずに止まること�
 
 新しい指示の検知は自動です。`keep_alive_kick` は手動で anchor を更新し、ナッジと Continue の両方のクールダウンを解除したい場合に使えます。並行した登録・手動チェック・タイマーチェックは重複実行を抑制し、停止中に待っていた読み取りが戻っても遅れて送信しません。送信や正常終了の確定直前にも heartbeat・最新ユーザー発言・実行中 inference・期限を再確認します。
 
-ナッジ本文は `[KEEP-AWAKE n/max]` タグ付きの短文で、「中断箇所から続行」「ユーザーに質問しない」を明記します。素の `continue` を避けているのは、新しい作業を発明されたり質問でターンを潰されたりするためです。`doneToken` を渡すと全ナッジに完了申告用の目印として引用されます。トークンの文字列一致を追加の停止条件にはせず、正常終了は上記の条件で判定します。`message` で本文を差し替えられます。
+ナッジ本文は `[KEEP-AWAKE n/max]` タグ付きの短文で、「中断箇所から続行」と、完了時は最終回答の最後の空でない行を `doneToken` で終えることを明記します。トークンより前には成果報告などの文章を同じ行または前の行に書けます。`doneToken` は省略時に watchdog ごとの一意な値を自動生成し、組み込み文・`message` によるカスタム文のどちらにも必ず追記します。成功扱いで監視を終了する条件は、完成した最終回答の最後の空でない行（末尾空白を除く）がこのトークンで終わることです。通常の完了回答だけでは終了せず、idle 後に再度ナッジします。期限切れ・予算枯渇・手動停止は安全弁として従来どおり終了します。
 
 ナッジは1回ごとに実ターンとしてクレジットを消費します。`maxNudges`、`cooldownSeconds`、`deadlineMinutes` は常に効き、`stop_keep_me_awake` を `keepAliveId` なしで呼べば全停止できます。監視台帳は `state.json` の隣の `keep-alives.json` に永続化され、再起動前から生き残っていたものは `orphaned` として残るので、タイマーが死んだ監視を生きていると見間違えません。
 
-既定値は `NOTION_KEEP_AWAKE_*` で変えられ、`NOTION_KEEP_AWAKE=0` で機能ごと無効化できます。
+既定値は `NOTION_KEEP_AWAKE_*` で変えられ、`NOTION_KEEP_AWAKE=0` で watchdog の監視・ナッジを無効化できます。通常の `notion_ai_chat` ジョブに対する Continue 自動押下は独立して動くため、こちらも止める場合は `NOTION_KEEP_AWAKE_AUTO_CONTINUE=0` を指定します。
 
 送信ジョブの作成や HTTP 200 だけでは、ナッジを「送信済み」と数えません。送信時に固定したユーザーステップ ID が対象 thread に登録され、対応する `thread_message` が保存されたことを確認してから、カウンタ・クールダウン・anchor を更新します。回答の生成終了までは待ちません。
 
@@ -394,7 +394,7 @@ Notion AI は長いタスクの途中でターンを閉じずに止まること�
 
 Notion 自体が長いエージェントターンを途中で止めて `This task is taking a lot of steps. Please confirm you want the agent to keep going.` と表示し、Continue クリックを待つことがあります。この停止は `last_turn_outcome` が閉じた形で記録されるため、以前は見張りが「正常終了」と判定して監視を終了していました。現在はこの停止をレコードの形から見分けて、Web クライアントの Continue ボタンが送るものと同じ継続リクエストを自動送信します。中身は保存済みチェックポイントの再開指示（空の部分トランスクリプト、`createThread:false`、`isPartialTranscript:true`）で、新しいユーザー発言も承認メッセージもツール承認 ID も含みません。DOM を操作するのではなく、ボタンと同じ本文を API に送ります。ネイティブ継続を持たない transport では、従来の `[KEEP-AWAKE CONTINUE n/max]` という短い承認メッセージにフォールバックします。判定はターンが閉じたか治まったときだけ行い、生成中のスレッドを追加で読みに行きません。
 
-Continue の回数はナッジ予算とは別カウンタで、既定は最大 10 回・クールダウン 15 秒・プロンプト書き込みから 10 秒の猟予後に送信します。`keep_me_awake` の `autoContinue: false` で監視単位に無効化でき、`maxContinues` で上限を変えられます。無効化しても通常の未完了停止へのナッジは動作します。ステップ上限の確認中は自動承認せず待機します。一般的な「続行しますか」「keep going?」は自動承認の対象ではなく、最終ステップが `pending` / `blocked` / `awaiting_permission` の場合も承認せず待機します。既定値は `NOTION_KEEP_AWAKE_AUTO_CONTINUE` / `NOTION_KEEP_AWAKE_MAX_CONTINUES` / `NOTION_KEEP_AWAKE_CONTINUE_COOLDOWN_MS` / `NOTION_KEEP_AWAKE_CONFIRM_GRACE_MS`、文言が将来変わった場合の追加パターンは `NOTION_KEEP_AWAKE_CONTINUE_PATTERNS`（1行1パターン、大文字小文字無視）で調整します。
+Continue は `keep_me_awake` の監視登録がなくても `notion_ai_chat` の通常ジョブが自動で押します。元のジョブを実行中のまま native Continue と同じ checkpoint を再開し、再開前後の回答と token 使用量を1件の結果に集約します。回数はナッジ予算とは別で、既定は最大 10 回です。連続する2回目以降には既定15秒のクールダウンを適用します。グローバル既定は `NOTION_KEEP_AWAKE_AUTO_CONTINUE` / `NOTION_KEEP_AWAKE_MAX_CONTINUES` / `NOTION_KEEP_AWAKE_CONTINUE_COOLDOWN_MS` で変更できます。監視中の外部スレッドでは従来どおり `keep_me_awake` の `autoContinue: false` で監視単位に無効化でき、`maxContinues` で上限を変えられます。一般的な「続行しますか」「keep going?」は自動承認せず、最終ステップが `pending` / `blocked` / `awaiting_permission` の場合も承認しません。監視側の確認猶予は `NOTION_KEEP_AWAKE_CONFIRM_GRACE_MS`、文言が将来変わった場合の追加パターンは `NOTION_KEEP_AWAKE_CONTINUE_PATTERNS`（1行1パターン、大文字小文字無視）で調整します。
 
 検知はプロンプトの文言一致ではなくスレッドレコードの形で行います。Notion はこの確認プロンプトを SSE の `pending_input` としてクライアントに送るだけで、ステップとしては保存しません（実測: 該当スレッドの全ステップを走査しても文言は AI の thinking 内の自己言及 1 件のみで、`thread` レコードには存在しない）。そのため文言一致だけでは実機で発火しません。
 
