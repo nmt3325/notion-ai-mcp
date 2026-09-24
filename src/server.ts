@@ -145,7 +145,7 @@ export function createServer(client: NotionClient, shared?: { keepAwake?: KeepAw
 
   server.registerTool("notion_ai_chat", {
     title: "Chat with Notion AI",
-    description: "Send a prompt to Notion AI and return the fully aggregated streamed answer. Waits up to waitSeconds (default 45s, below the ~60s point where MCP clients abandon a call) and otherwise returns status \"pending\" with jobId and conversationId so get_chat_result can collect the answer instead of losing it. Accepts friendly model names as well as internal IDs.",
+    description: "Send a prompt to Notion AI and return the fully aggregated streamed answer. Native step-limit Continue checkpoints are resumed automatically even without keep_me_awake, up to the configured global Continue budget. Waits up to waitSeconds (default 45s, below the ~60s point where MCP clients abandon a call) and otherwise returns status \"pending\" with jobId and conversationId so get_chat_result can collect the answer instead of losing it. Accepts friendly model names as well as internal IDs.",
     inputSchema: {
       prompt: z.string().min(1).describe("Prompt to send to Notion AI"),
       model: z.string().min(1).optional().describe(`Model name or internal ID. Known: ${modelHint}`),

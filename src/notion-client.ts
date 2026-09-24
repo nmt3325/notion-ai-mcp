@@ -11,7 +11,7 @@ import { McpConnectionManager } from "./mcp-connections.js";
 import { prepareAttachmentInput, readResponseBuffer, writeAttachmentOutput, type AttachmentInput, type PreparedAttachment } from "./attachments.js";
 import { agentTranscriptError, applyAgentTranscriptPatches, createAgentTranscriptState, isAgentTranscriptTurnComplete, latestAgentTranscriptText } from "./agent-transcript.js";
 import type { InterruptResult } from "./types.js";
-import type { KeepAwakeDefaults } from "./keep-awake.js";
+import { DEFAULT_MAX_CONTINUES, isUnfinishedFinalStep, type KeepAwakeDefaults } from "./keep-awake.js";
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 const SEC_CH_UA = '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"';
@@ -985,7 +985,11 @@ export class NotionClient {
 
   private async runChatJob(jobId: string, options: ChatOptions): Promise<void> {
     try {
-      const result = await this.chat(options);
+      const first = await this.chat(options);
+      // A watchdog is not required for the native Continue button. Ordinary notion_ai_chat jobs
+      // transparently resume step-limit checkpoints here; watchdog-triggered continuations retain
+      // their own per-watch budget and therefore skip this second controller.
+      const result = options._continueTraceId ? first : await this.autoContinueChatResult(first, options._signal);
       // An AI-credit retry can move the answer to a freshly created thread, so the job follows the real conversation.
       this.state.retarget(jobId, result.conversationId);
       this.state.complete(jobId, {
@@ -995,6 +999,62 @@ export class NotionClient {
     } catch (error) {
       this.state.fail(jobId, error instanceof Error ? error.message : String(error));
     }
+  }
+
+  /**
+   * Presses Notion's native Continue checkpoint for an ordinary chat job even when no keep-awake
+   * watchdog is registered. The initial job stays running until the resumed execution finishes, so
+   * callers receive one aggregated answer rather than a partial answer plus an unrelated child job.
+   */
+  private async autoContinueChatResult(initial: ChatResult, signal?: AbortSignal): Promise<ChatResult> {
+    const defaults = this.keepAwakeDefaults();
+    const maxContinues = defaults.autoContinue === false ? 0 : defaults.maxContinues ?? DEFAULT_MAX_CONTINUES;
+    if (maxContinues <= 0) return initial;
+
+    let current = initial;
+    let text = initial.text.trim();
+    let inputTokens = initial.usage.inputTokens;
+    let outputTokens = initial.usage.outputTokens;
+    for (let count = 0; count < maxContinues; count += 1) {
+      signal?.throwIfAborted();
+      let shouldContinue = false;
+      try { shouldContinue = await this.shouldAutoContinueConversation(current.conversationId); }
+      catch { break; }
+      if (!shouldContinue) break;
+      if (count > 0 && (defaults.continueCooldownMs ?? 0) > 0) {
+        await sleep(defaults.continueCooldownMs ?? 0);
+      }
+      signal?.throwIfAborted();
+      const resumed = await this.chat({
+        conversationId: current.conversationId,
+        prompt: "Continue agent execution after max iterations reached",
+        model: current.model,
+        ...(current.reasoningEffort ? { reasoningEffort: current.reasoningEffort } : {}),
+        _continueTraceId: randomUUID(),
+        ...(signal ? { _signal: signal } : {})
+      });
+      const nextText = resumed.text.trim();
+      if (nextText) {
+        text = !text ? nextText : nextText.startsWith(text) ? nextText : text.endsWith(nextText) ? text : `${text}\n\n${nextText}`;
+      }
+      inputTokens += resumed.usage.inputTokens;
+      outputTokens += resumed.usage.outputTokens;
+      current = resumed;
+    }
+    return { ...current, text, usage: { inputTokens, outputTokens } };
+  }
+
+  /** Only the exact native step-limit stop is safe to approve; permissions and ordinary answers are not. */
+  private async shouldAutoContinueConversation(conversationId: string): Promise<boolean> {
+    const session = this.sessions.get(conversationId);
+    if (!session || session.transport !== "inference_transcript") return false;
+    const signals = await this.threadSignals(conversationId);
+    const outcome = signals.lastTurnOutcome;
+    if (outcome?.status !== "completed" || !outcome.finalStepId) return false;
+    const finalStep = await this.finalStepShape(outcome.finalStepId);
+    if (!finalStep || /^(pending|blocked|awaiting_permission)$/.test(finalStep.state)) return false;
+    if (!isUnfinishedFinalStep(finalStep)) return false;
+    return await this.nativeContinuationState(conversationId) === true;
   }
 
   /** Waits a bounded time for a chat, then hands back a pending job instead of losing the request. */

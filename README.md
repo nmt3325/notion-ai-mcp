@@ -386,7 +386,7 @@ Notion AI は長いタスクの途中でターンを閉じずに止まること�
 
 ナッジは1回ごとに実ターンとしてクレジットを消費します。`maxNudges`、`cooldownSeconds`、`deadlineMinutes` は常に効き、`stop_keep_me_awake` を `keepAliveId` なしで呼べば全停止できます。監視台帳は `state.json` の隣の `keep-alives.json` に永続化され、再起動前から生き残っていたものは `orphaned` として残るので、タイマーが死んだ監視を生きていると見間違えません。
 
-既定値は `NOTION_KEEP_AWAKE_*` で変えられ、`NOTION_KEEP_AWAKE=0` で機能ごと無効化できます。
+既定値は `NOTION_KEEP_AWAKE_*` で変えられ、`NOTION_KEEP_AWAKE=0` で watchdog の監視・ナッジを無効化できます。通常の `notion_ai_chat` ジョブに対する Continue 自動押下は独立して動くため、こちらも止める場合は `NOTION_KEEP_AWAKE_AUTO_CONTINUE=0` を指定します。
 
 送信ジョブの作成や HTTP 200 だけでは、ナッジを「送信済み」と数えません。送信時に固定したユーザーステップ ID が対象 thread に登録され、対応する `thread_message` が保存されたことを確認してから、カウンタ・クールダウン・anchor を更新します。回答の生成終了までは待ちません。
 
@@ -394,7 +394,7 @@ Notion AI は長いタスクの途中でターンを閉じずに止まること�
 
 Notion 自体が長いエージェントターンを途中で止めて `This task is taking a lot of steps. Please confirm you want the agent to keep going.` と表示し、Continue クリックを待つことがあります。この停止は `last_turn_outcome` が閉じた形で記録されるため、以前は見張りが「正常終了」と判定して監視を終了していました。現在はこの停止をレコードの形から見分けて、Web クライアントの Continue ボタンが送るものと同じ継続リクエストを自動送信します。中身は保存済みチェックポイントの再開指示（空の部分トランスクリプト、`createThread:false`、`isPartialTranscript:true`）で、新しいユーザー発言も承認メッセージもツール承認 ID も含みません。DOM を操作するのではなく、ボタンと同じ本文を API に送ります。ネイティブ継続を持たない transport では、従来の `[KEEP-AWAKE CONTINUE n/max]` という短い承認メッセージにフォールバックします。判定はターンが閉じたか治まったときだけ行い、生成中のスレッドを追加で読みに行きません。
 
-Continue の回数はナッジ予算とは別カウンタで、既定は最大 10 回・クールダウン 15 秒・プロンプト書き込みから 10 秒の猟予後に送信します。`keep_me_awake` の `autoContinue: false` で監視単位に無効化でき、`maxContinues` で上限を変えられます。無効化しても通常の未完了停止へのナッジは動作します。ステップ上限の確認中は自動承認せず待機します。一般的な「続行しますか」「keep going?」は自動承認の対象ではなく、最終ステップが `pending` / `blocked` / `awaiting_permission` の場合も承認せず待機します。既定値は `NOTION_KEEP_AWAKE_AUTO_CONTINUE` / `NOTION_KEEP_AWAKE_MAX_CONTINUES` / `NOTION_KEEP_AWAKE_CONTINUE_COOLDOWN_MS` / `NOTION_KEEP_AWAKE_CONFIRM_GRACE_MS`、文言が将来変わった場合の追加パターンは `NOTION_KEEP_AWAKE_CONTINUE_PATTERNS`（1行1パターン、大文字小文字無視）で調整します。
+Continue は `keep_me_awake` の監視登録がなくても `notion_ai_chat` の通常ジョブが自動で押します。元のジョブを実行中のまま native Continue と同じ checkpoint を再開し、再開前後の回答と token 使用量を1件の結果に集約します。回数はナッジ予算とは別で、既定は最大 10 回です。連続する2回目以降には既定15秒のクールダウンを適用します。グローバル既定は `NOTION_KEEP_AWAKE_AUTO_CONTINUE` / `NOTION_KEEP_AWAKE_MAX_CONTINUES` / `NOTION_KEEP_AWAKE_CONTINUE_COOLDOWN_MS` で変更できます。監視中の外部スレッドでは従来どおり `keep_me_awake` の `autoContinue: false` で監視単位に無効化でき、`maxContinues` で上限を変えられます。一般的な「続行しますか」「keep going?」は自動承認せず、最終ステップが `pending` / `blocked` / `awaiting_permission` の場合も承認しません。監視側の確認猶予は `NOTION_KEEP_AWAKE_CONFIRM_GRACE_MS`、文言が将来変わった場合の追加パターンは `NOTION_KEEP_AWAKE_CONTINUE_PATTERNS`（1行1パターン、大文字小文字無視）で調整します。
 
 検知はプロンプトの文言一致ではなくスレッドレコードの形で行います。Notion はこの確認プロンプトを SSE の `pending_input` としてクライアントに送るだけで、ステップとしては保存しません（実測: 該当スレッドの全ステップを走査しても文言は AI の thinking 内の自己言及 1 件のみで、`thread` レコードには存在しない）。そのため文言一致だけでは実機で発火しません。
 

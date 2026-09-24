@@ -106,8 +106,8 @@ export function loadConfig(): NotionConfig {
     enabled: flag("NOTION_KEEP_AWAKE", true),
     interrupt: flag("NOTION_KEEP_AWAKE_INTERRUPT", true),
     // Notion pauses a long agent turn with "This task is taking a lot of steps" and waits for a
-    // Continue click. Answering it is the same continuation the watchdog already does for a dead
-    // turn, so it is on by default and capped separately from nudges.
+    // Continue click. Ordinary MCP chat jobs answer it even without a keep-awake watchdog; watched
+    // external threads use the same setting. It is on by default and capped separately from nudges.
     autoContinue: flag("NOTION_KEEP_AWAKE_AUTO_CONTINUE", true),
     maxContinues: integer("NOTION_KEEP_AWAKE_MAX_CONTINUES", DEFAULT_MAX_CONTINUES, 0, 100),
     continueCooldownMs: integer("NOTION_KEEP_AWAKE_CONTINUE_COOLDOWN_MS", DEFAULT_CONTINUE_COOLDOWN_MS, 0, 600_000),
