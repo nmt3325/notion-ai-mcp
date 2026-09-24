@@ -1,4 +1,4 @@
-import { createMatrixAdapter, type MatrixAdapter } from "@beeper/chat-adapter-matrix";
+import { loadMatrixAdapter, type MatrixAdapter } from "./matrix-adapter.js";
 import { Chat, ConsoleLogger, type Adapter } from "chat";
 import { loadConfig } from "./config.js";
 import { createFileState } from "./file-state.js";
@@ -30,6 +30,7 @@ export async function startMatrixBridge(): Promise<RunningMatrixBridge> {
   const matrixConfig = loadMatrixConfig();
   const notionConfig = loadConfig();
   const logger = new ConsoleLogger(matrixConfig.logLevel, "notion-ai-matrix");
+  const { createMatrixAdapter } = await loadMatrixAdapter();
   const matrix = createMatrixAdapter(matrixConfig.adapter);
   const notion = new NotionClient(notionConfig);
   const state = createFileState(matrixConfig.stateFilePath);

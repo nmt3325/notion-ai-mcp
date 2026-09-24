@@ -15,7 +15,9 @@ COPY scripts ./scripts
 RUN npm run build \
  && test -f dist/src/http.js \
  && test -f dist/src/index.js \
- && test -f dist/src/matrix.js
+ && test -f dist/src/matrix.js \
+ && test -f dist/src/matrix-sdk-resolver.js \
+ && node --input-type=module -e 'const m = await import("./dist/src/matrix-adapter.js"); await m.loadMatrixAdapter()'
 
 # ---------- prod-deps: 実行時だけの node_modules ----------
 FROM node:${NODE_VERSION}-alpine AS prod-deps
