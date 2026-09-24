@@ -40,7 +40,7 @@ Git に追加しないでください。本リポジトリの `.gitignore` は�
 
 ## 必要環境
 
-- Node.js 20 以上
+- Node.js 22 以上
 - Notion にログイン済みのブラウザから取得した `token_v2`
 - Notion AI を利用できる workspace/quota
 
@@ -105,6 +105,99 @@ node dist/src/index.js
 | `NOTION_MCP_REGISTRY_FILE` | 任意 | 登録済み MCP 接続の保存先（mode 0600） |
 | `NOTION_ATTACHMENT_ROOT` | 任意 | upload元/download先として許可するroot。既定は起動時のworking directory |
 | `NOTION_MAX_ATTACHMENT_BYTES` | 任意 | upload/download 1ファイルの上限。既定 `20971520` (20 MiB) |
+
+## Beeper / Matrix ブリッジ
+
+`notion-ai-matrix` は Matrix sync を使い、Beeper の DM・ルームから既存の `NotionClient` へ
+テキストを送り、Notion AI の回答を同じ Matrix thread に Markdown で返します。
+Beeper の暗号化 room に対応するため、公式の `@beeper/chat-adapter-matrix` と Matrix E2EE を使用します。
+
+### 動作
+
+- **DM**: 最初のメッセージでその DM を購読し、以後のメッセージを同じ Notion conversation へ送ります。
+- **グループ room**: 未購読の room/thread では bot への mention が開始条件です。開始後は同じ thread の
+  follow-up を購読します。未購読 room の全発言へ勝手に反応しません。
+- Matrix room/thread ID と Notion `conversationId`、生成中 job は `MATRIX_STATE_FILE` へ保存されます。
+  応答待ちが timeout しても background poll を続け、再起動時も Notion thread から未回収回答を復元します。
+- 同じ Matrix thread の発言は順番に処理します。別 thread は並列に処理でき、sync 再送された event ID は重複送信しません。
+- 現在の bridge はテキスト送受信が対象です。添付ファイルはまだ Matrix から Notion へ転送しません。
+
+Bridge command は Matrix client のローカル `/command` と衝突しない `!` prefix です。
+
+| command | 動作 |
+|---|---|
+| `!help` | command 一覧を表示 |
+| `!status` | 紐付いた Notion conversation ID と生成状態を表示 |
+| `!new` | 現在の対応だけを解除し、次の発言から新しい Notion conversation を開始 |
+
+### Bot account の設定
+
+主アカウントとは別の Matrix bot account を用意し、Beeper から会話へ招待する構成を推奨します。
+認証は access token、または username/password のどちらかです。
+
+```bash
+export NOTION_TOKEN_V2='...'
+export MATRIX_BASE_URL='https://matrix.example.com'
+export MATRIX_ACCESS_TOKEN='...'
+export MATRIX_USER_ID='@notion-bot:example.com'
+export MATRIX_BOT_USERNAME='notion-bot'
+
+# Beeper の暗号化 room を読む場合
+export MATRIX_DEVICE_ID='NOTIONBOT'
+export MATRIX_RECOVERY_KEY='...'
+
+npm run build
+npm run start:matrix
+```
+
+Password login を使う場合は `MATRIX_ACCESS_TOKEN` の代わりに `MATRIX_USERNAME` と
+`MATRIX_PASSWORD` を設定します。E2EE を使う場合、`MATRIX_DEVICE_ID` は再起動後も同じ値を維持し、
+`MATRIX_RECOVERY_KEY` は bot account の recovery key を設定してください。device ID を省略した場合も
+生成値は state file に保存されますが、state file を失うと別 device になります。
+
+安全な既定値として invite auto-join は無効です。必要な場合だけ次を設定します。
+
+```bash
+export MATRIX_INVITE_AUTOJOIN=1
+# 指定すると、この Matrix user ID からの invite だけを許可
+export MATRIX_INVITE_AUTOJOIN_ALLOWLIST='@alice:example.com,@ops:example.com'
+# 既に参加済みでも処理対象 room を限定したい場合
+export MATRIX_ROOM_ALLOWLIST='!room-id:example.com'
+```
+
+`MATRIX_STATE_FILE` は Chat SDK の購読、sync snapshot、login session、E2EE secrets bundle、
+Notion conversation 対応を一つの mode `0600` JSON に保存します。認証方式にかかわらず session には
+Matrix access token が含まれるため、state file と `MATRIX_CRYPTO_DATABASE_PREFIX` の両方を秘密情報として
+扱ってください。既定は `~/.notion-ai-mcp/matrix-state.json` と同じ directory の crypto store です。
+
+主な調整項目は [.env.example](.env.example) にあります。Bridge 専用 model/reasoning/search 設定を
+省略すると、通常の `NOTION_DEFAULT_*` 設定を使用します。
+
+### Docker Compose
+
+Matrix service は profile 付きです。HTTP service と別の Notion job state file を使うため、同じ volume で
+同時起動しても state JSON を競合更新しません。
+
+```bash
+cp .env.example .env
+# .env に Notion と Matrix の認証情報、E2EE 設定を記入
+docker compose --profile matrix up -d matrix
+docker compose logs -f matrix
+```
+
+コンテナでは Matrix state、Notion job state、crypto store を書き込み可能な `/data` に置きます。
+
+### 送受信 smoke test
+
+1. Beeper から bot account を DM または test room に招待します。
+2. DM では任意の文を、group room では bot mention を含む文を送ります。
+3. Notion AI の回答が同じ room/thread へ返ることを確認します。
+4. follow-up を送り、`!status` の conversation ID が変わらないことを確認します。
+5. `!new` 後に新しい文を送り、conversation ID が変わることを確認します。
+
+認証情報なしで実行できる自動テストは、fake Matrix/Notion を使って
+「Matrix受信 → Notion送信 → 回答poll → Matrix送信」、会話継続、再起動復元、順序制御を検証します。
+実 account の smoke test は有効な Matrix/Beeper と Notion の credential が必要です。
 
 ## Webアクセス確認の自動承認
 

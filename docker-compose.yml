@@ -54,6 +54,26 @@ services:
       start_period: 10s
     stop_grace_period: 10s
 
+  # Beeper / Matrix sync bot。起動: docker compose --profile matrix up -d matrix
+  matrix:
+    <<: *base
+    profiles: ["matrix"]
+    container_name: notion-ai-matrix
+    command: ["node", "dist/src/matrix.js"]
+    restart: unless-stopped
+    environment:
+      NOTION_ATTACHMENT_ROOT: /data
+      # HTTP/stdio プロセスと同じ state file を同時に書かない。
+      NOTION_STATE_FILE: ${MATRIX_NOTION_STATE_FILE:-/data/matrix-notion-state.json}
+      NOTION_MCP_REGISTRY_FILE: ${NOTION_MCP_REGISTRY_FILE:-/data/mcp-connections.json}
+      MATRIX_STATE_FILE: ${MATRIX_STATE_FILE:-/data/matrix-state.json}
+      MATRIX_CRYPTO_DATABASE_PREFIX: ${MATRIX_CRYPTO_DATABASE_PREFIX:-/data/matrix-crypto}
+    # Image-level healthcheck は HTTP endpoint 用なので Matrix-only service では無効化。
+    healthcheck:
+      disable: true
+    stop_grace_period: 30s
+
+
   # stdio (Claude Code / Cursor などから直接起動する場合)
   mcp-stdio:
     <<: *base

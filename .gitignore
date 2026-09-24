@@ -16,3 +16,9 @@ dist/
 
 # Local authenticated smoke harnesses
 scripts/.live-*.tmp.mjs
+
+# Local Matrix credentials, sync state, and crypto stores
+matrix-state.json
+matrix-state.*.json
+matrix-crypto*
+.matrix-state/

@@ -14,7 +14,8 @@ COPY src ./src
 COPY scripts ./scripts
 RUN npm run build \
  && test -f dist/src/http.js \
- && test -f dist/src/index.js
+ && test -f dist/src/index.js \
+ && test -f dist/src/matrix.js
 
 # ---------- prod-deps: 実行時だけの node_modules ----------
 FROM node:${NODE_VERSION}-alpine AS prod-deps

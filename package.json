@@ -6,7 +6,8 @@
   "description": "Personal-use MCP server for Notion AI's unofficial internal API",
   "bin": {
     "notion-ai-mcp": "dist/src/index.js",
-    "notion-ai-mcp-http": "dist/src/http.js"
+    "notion-ai-mcp-http": "dist/src/http.js",
+    "notion-ai-matrix": "dist/src/matrix.js"
   },
   "files": [
     "dist",
@@ -22,13 +23,17 @@
     "dev:http": "tsx src/http.ts",
     "test": "node --import tsx --test tests/**/*.test.ts",
     "smoke:live": "tsx scripts/live-smoke.ts",
-    "smoke:http:remote": "node scripts/cloudflare-tunnel-smoke.mjs"
+    "smoke:http:remote": "node scripts/cloudflare-tunnel-smoke.mjs",
+    "start:matrix": "node dist/src/matrix.js",
+    "dev:matrix": "tsx src/matrix.ts"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "dependencies": {
+    "@beeper/chat-adapter-matrix": "0.2.0",
     "@modelcontextprotocol/sdk": "1.29.0",
+    "chat": "4.25.0",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -37,6 +42,9 @@
     "typescript": "7.0.2"
   },
   "overrides": {
-    "@hono/node-server": "2.0.11"
+    "@hono/node-server": "2.0.11",
+    "fast-uri": "3.1.6",
+    "hono": "4.13.5",
+    "qs": "6.16.0"
   }
 }
