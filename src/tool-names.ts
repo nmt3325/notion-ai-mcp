@@ -21,6 +21,7 @@ export const EXPECTED_TOOL_NAMES: readonly string[] = [
   "list_conversations",
   "list_keep_alives",
   "list_mcp_connections",
+  "list_models",
   "list_preconfigured_mcp_servers",
   "list_workspaces",
   "notion_ai_chat",

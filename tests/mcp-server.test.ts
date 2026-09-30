@@ -5,8 +5,27 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { NotionClient } from "../src/notion-client.js";
 import { createServer, toMcpAuth } from "../src/server.js";
 import { EXPECTED_TOOL_NAMES } from "../src/tool-names.js";
+import { describeCatalog, parseAvailableModels } from "../src/models.js";
 
 export const EXPECTED_TOOLS = [...EXPECTED_TOOL_NAMES];
+
+const MODEL_LISTING = describeCatalog({
+  source: "live",
+  catalog: parseAvailableModels({
+    models: [
+      {
+        model: "almond-croissant-low", modelMessage: "Sonnet 4.6", modelFamily: "anthropic", displayGroup: "fast",
+        modelConfiguration: { supportedReasoningEfforts: ["low", "medium", "high", "max"], defaultReasoningEffort: "low" },
+        workflow: { finalModelName: "almond-croissant-low" }
+      },
+      {
+        model: "albuquerque-quinn", modelMessage: "Opus 5.5", modelFamily: "anthropic", displayGroup: "intelligent",
+        modelConfiguration: { supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"], defaultReasoningEffort: "medium" },
+        workflow: { finalModelName: "albuquerque-quinn" }, agentService: { finalModelName: "albuquerque-quinn" }
+      }
+    ]
+  }, "22222222-2222-4222-8222-222222222222", Date.UTC(2026, 8, 30))
+}, { defaultModel: "almond-croissant-low" });
 
 function fakeClient(): { client: NotionClient; chatCalls: Array<Record<string, unknown>>; added: Array<Record<string, unknown>>; uploaded: Array<Record<string, unknown>>; downloaded: Array<Record<string, unknown>>; lookups: Array<Record<string, unknown>>; waits: Array<number | undefined> } {
   const chatCalls: Array<Record<string, unknown>> = [];
@@ -36,6 +55,10 @@ function fakeClient(): { client: NotionClient; chatCalls: Array<Record<string, u
     listChatJobs: (options: Record<string, unknown>) => {
       lookups.push(options);
       return [{ jobId: "job-1", conversationId: "11111111-1111-4111-8111-111111111111", status: "running", model: "mock-model", prompt: "Hello", turn: 1, transport: "inference_transcript", startedAt: 1 }];
+    },
+    listModels: async (options: Record<string, unknown>) => {
+      lookups.push(options);
+      return MODEL_LISTING;
     },
     chatStatePath: () => "/tmp/notion-ai-mcp-state.json",
     chatStateError: () => null,
@@ -220,6 +243,27 @@ test("get_chat_result and list_chat_jobs recover answers after a timed out call"
   } finally { await close(); }
 });
 
+test("list_models forwards spaceId and refresh and returns the live list as text and structured content", async () => {
+  const { client, lookups } = fakeClient();
+  const { mcpClient, close } = await connect(client);
+  try {
+    const spaceId = "22222222-2222-4222-8222-222222222222";
+    const response = await mcpClient.callTool({ name: "list_models", arguments: { spaceId, refresh: true } });
+    assert.equal(response.isError, undefined);
+    assert.deepEqual(lookups[0], { spaceId, refresh: true });
+    const text = Array.isArray(response.content) && response.content[0]?.type === "text" ? response.content[0].text : "";
+    assert.match(text, /^2 models for workspace 22222222-2222-4222-8222-222222222222 \(live, fetched 2026-09-30T00:00:00\.000Z\); 2 usable in notion_ai_chat\./);
+    assert.match(text, /Default \(NOTION_DEFAULT_MODEL=almond-croissant-low\): Sonnet 4\.6 \[almond-croissant-low\], effort low/);
+    assert.match(text, /albuquerque-quinn \| Opus 5\.5 \| anthropic\/intelligent \| low\|medium\|high\|xhigh\|max \(medium\) \| available \| available/);
+    const structured = response.structuredContent as { models: Array<{ model: string; reasoningEfforts: string[]; defaultReasoningEffort?: string }> };
+    const opus = structured.models.find((entry) => entry.model === "albuquerque-quinn");
+    assert.deepEqual(opus?.reasoningEfforts, ["low", "medium", "high", "xhigh", "max"]);
+    assert.equal(opus?.defaultReasoningEffort, "medium");
+    await mcpClient.callTool({ name: "list_models", arguments: {} });
+    assert.deepEqual(lookups[1], { refresh: false });
+  } finally { await close(); }
+});
+
 const READ_ONLY_TOOLS = [
   "check_mcp_oauth_support",
   "get_chat_result",
@@ -230,6 +274,7 @@ const READ_ONLY_TOOLS = [
   "list_conversations",
   "list_keep_alives",
   "list_mcp_connections",
+  "list_models",
   "list_preconfigured_mcp_servers",
   "list_workspaces"
 ];

@@ -15,7 +15,10 @@ const KEYS = [
   "NOTION_AUTO_CONFIRM_WEB",
   "NOTION_AUTO_CONFIRM_WEB_POLL_MS",
   "NOTION_AUTO_CONFIRM_WEB_DISCOVERY_MS",
-  "NOTION_AUTO_CONFIRM_WEB_CONCURRENCY"
+  "NOTION_AUTO_CONFIRM_WEB_CONCURRENCY",
+  "NOTION_MODEL_CATALOG",
+  "NOTION_MODEL_CATALOG_TTL_MS",
+  "NOTION_ALLOW_UNLISTED_MODELS"
 ] as const;
 
 function withCleanConfigEnvironment(run: () => void): void {
@@ -112,6 +115,33 @@ test("Web confirmation configuration rejects invalid flags and intervals", () =>
       process.env[key] = "0";
       assert.throws(() => loadConfig(), /safe integer/);
       delete process.env[key];
+    }
+  });
+});
+
+
+test("live model catalog is enabled by default with a five-minute cache", () => {
+  withCleanConfigEnvironment(() => {
+    assert.deepEqual(loadConfig().modelCatalog, { enabled: true, ttlMs: 300_000, allowUnlisted: false });
+    process.env.NOTION_MODEL_CATALOG = "off";
+    process.env.NOTION_ALLOW_UNLISTED_MODELS = "yes";
+    process.env.NOTION_MODEL_CATALOG_TTL_MS = "0";
+    assert.deepEqual(loadConfig().modelCatalog, { enabled: false, ttlMs: 0, allowUnlisted: true });
+    process.env.NOTION_MODEL_CATALOG_TTL_MS = "86400000";
+    assert.equal(loadConfig().modelCatalog?.ttlMs, 86_400_000);
+  });
+});
+
+test("live model catalog flags and cache bounds are validated", () => {
+  withCleanConfigEnvironment(() => {
+    for (const key of ["NOTION_MODEL_CATALOG", "NOTION_ALLOW_UNLISTED_MODELS"]) {
+      process.env[key] = "maybe";
+      assert.throws(() => loadConfig(), new RegExp(key));
+      delete process.env[key];
+    }
+    for (const ttl of ["-1", "1.5", "NaN", "Infinity", "86400001"]) {
+      process.env.NOTION_MODEL_CATALOG_TTL_MS = ttl;
+      assert.throws(() => loadConfig(), /NOTION_MODEL_CATALOG_TTL_MS must be a safe integer between 0 and 86400000/);
     }
   });
 });

@@ -7,10 +7,19 @@ function hash(value: string): string {
 }
 
 const client = new NotionClient(loadConfig());
+const models = await client.listModels({ refresh: true }); // Model listing does not start a chat or spend chat credits.
 const listed = await client.listConversations({ limit: 1, maxPages: 3 });
 const first = listed.conversations[0];
 const detail = first ? await client.getConversation(first.id, 3) : null;
 const result: Record<string, unknown> = {
+  modelList: {
+    ok: true,
+    source: models.source,
+    modelCount: models.modelCount,
+    chatModelCount: models.chatModelCount,
+    defaultModel: models.defaultModel,
+    warning: models.warning ?? null
+  },
   listOk: true,
   conversationCount: listed.conversations.length,
   hasMore: listed.hasMore,

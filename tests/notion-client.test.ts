@@ -595,50 +595,240 @@ test("deleteConversation refuses a thread outside the active workspace", async (
   await assert.rejects(() => client.deleteConversation(threadId), /was not found/);
 });
 
-test("chat persists the requested reasoning effort and reuses it for later turns", async () => {
-  const inferenceBodies: Record<string, unknown>[] = [];
-  const fakeFetch = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    inferenceBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+// A getAvailableModels response trimmed to the fields the client reads, shaped like the live one.
+const AVAILABLE_MODELS = {
+  models: [
+    {
+      model: "almond-croissant-low", modelMessage: "Sonnet 4.6", modelFamily: "anthropic", modelProvider: "anthropic", displayGroup: "fast",
+      modelConfiguration: { supportedReasoningEfforts: ["low", "medium", "high", "max"], defaultReasoningEffort: "low" },
+      isDisabled: false, workflow: { finalModelName: "almond-croissant-low", beta: false }
+    },
+    {
+      model: "albuquerque-quinn", modelMessage: "Opus 5.5", modelFamily: "anthropic", modelProvider: "anthropic", displayGroup: "intelligent",
+      modelConfiguration: { supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"], defaultReasoningEffort: "medium" },
+      isDisabled: false,
+      workflow: { finalModelName: "albuquerque-quinn-v2", beta: false },
+      agentService: { finalModelName: "albuquerque-quinn-agent", beta: false }
+    },
+    {
+      model: "oval-kumquat-medium", modelMessage: "GPT-5.4", modelFamily: "openai", modelProvider: "openai", displayGroup: "intelligent",
+      modelConfiguration: { supportedReasoningEfforts: ["medium", "high"], defaultReasoningEffort: "medium" },
+      isDisabled: false, workflow: { finalModelName: "oval-kumquat-medium", beta: false }
+    },
+    {
+      model: "xinomavro-cake", modelMessage: "Grok Build 0.1", modelFamily: "xai", modelProvider: "xai", displayGroup: "intelligent",
+      modelConfiguration: { supportedReasoningEfforts: [] },
+      isDisabled: false, workflow: { finalModelName: "xinomavro-cake", beta: true }
+    },
+    {
+      model: "orlando-quinn", modelMessage: "GPT-6 Astra", modelFamily: "openai", modelProvider: "openai", displayGroup: "intelligent",
+      modelConfiguration: { supportedReasoningEfforts: ["medium", "high"], defaultReasoningEffort: "medium" },
+      isDisabled: true, disabledReason: "credit_limit_reached",
+      workflow: { finalModelName: "orlando-quinn", isDisabled: true, disabledReason: "restricted_access" }
+    }
+  ],
+  modelSelectionRestricted: false
+};
+
+const catalogConfig: NotionConfig = {
+  ...config,
+  defaultModel: "almond-croissant-low",
+  modelCatalog: { enabled: true, ttlMs: 60_000, allowUnlisted: false }
+};
+
+interface CatalogFake {
+  fetchImpl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+  catalogRequests: Array<{ body: Record<string, unknown>; spaceHeader: string | null }>;
+  inference: Array<Record<string, unknown>>;
+}
+
+function catalogFake(options: { modelsStatus?: (call: number) => number } = {}): CatalogFake {
+  const catalogRequests: CatalogFake["catalogRequests"] = [];
+  const inference: CatalogFake["inference"] = [];
+  const fetchImpl = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const endpoint = String(input).split("/").at(-1) ?? "";
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    if (endpoint === "getAvailableModels") {
+      catalogRequests.push({ body, spaceHeader: new Headers(init?.headers).get("x-notion-space-id") });
+      const status = options.modelsStatus?.(catalogRequests.length) ?? 200;
+      return status === 200 ? jsonResponse(AVAILABLE_MODELS) : new Response("catalog unavailable", { status });
+    }
+    if (endpoint === "runInferenceTranscript") {
+      inference.push(body);
+      const turn = inference.length;
+      return ndjsonResponse([
+        { type: "agent-inference", id: `step-${turn}`, value: [{ type: "text", content: `Answer ${turn}` }], finishedAt: Date.now(), inputTokens: 1, outputTokens: 1 }
+      ]);
+    }
+    return new Response(`unexpected ${endpoint}`, { status: 500 });
+  };
+  return { fetchImpl, catalogRequests, inference };
+}
+
+function configStep(body: Record<string, unknown> | undefined): Record<string, unknown> {
+  return ((body?.transcript as Array<Record<string, unknown>> | undefined)?.[0]?.value ?? {}) as Record<string, unknown>;
+}
+
+test("chat resolves the model and reasoning effort against the live getAvailableModels list", async () => {
+  const fake = catalogFake();
+  const client = new NotionClient(catalogConfig, fake.fetchImpl as typeof fetch);
+
+  const first = await client.chat({ prompt: "First", model: "Opus 5.5", reasoningEffort: "xhigh" });
+  assert.equal(first.model, "albuquerque-quinn-v2");
+  assert.equal(first.modelName, "Opus 5.5");
+  assert.equal(first.reasoningEffort, "xhigh");
+  assert.equal(first.warnings, undefined);
+  assert.equal(configStep(fake.inference[0]).model, "albuquerque-quinn-v2");
+  assert.equal(configStep(fake.inference[0]).modelFromUser, true);
+  assert.equal(configStep(fake.inference[0]).reasoningEffort, "xhigh");
+  assert.equal((fake.inference[0]?.debugOverrides as Record<string, unknown> | undefined)?.model, "albuquerque-quinn-v2");
+
+  // A later turn without model keeps the conversation's model and effort.
+  const second = await client.chat({ prompt: "Second", conversationId: first.conversationId });
+  assert.equal(second.model, "albuquerque-quinn-v2");
+  assert.equal(second.reasoningEffort, "xhigh");
+  assert.equal(configStep(fake.inference[1]).model, "albuquerque-quinn-v2");
+  assert.equal(configStep(fake.inference[1]).reasoningEffort, "xhigh");
+
+  // Switching to a model without that effort falls back to the new model's default and says so.
+  const third = await client.chat({ prompt: "Third", model: "gpt-5.4", conversationId: first.conversationId });
+  assert.equal(third.model, "oval-kumquat-medium");
+  assert.equal(third.reasoningEffort, "medium");
+  assert.match(third.warnings?.join(" ") ?? "", /GPT-5\.4 \(oval-kumquat-medium\) does not support the conversation's reasoningEffort xhigh; using medium instead/);
+  assert.equal(configStep(fake.inference[2]).reasoningEffort, "medium");
+
+  // An effort suffix in the model name picks the effort.
+  const fourth = await client.chat({ prompt: "Fourth", model: "opus-5.5-max", conversationId: first.conversationId });
+  assert.equal(fourth.model, "albuquerque-quinn-v2");
+  assert.equal(fourth.reasoningEffort, "max");
+  assert.equal(configStep(fake.inference[3]).reasoningEffort, "max");
+
+  // A new chat without model uses NOTION_DEFAULT_MODEL and sends that model's default effort explicitly.
+  const fresh = await client.chat({ prompt: "Default" });
+  assert.equal(fresh.model, "almond-croissant-low");
+  assert.equal(fresh.modelName, "Sonnet 4.6");
+  assert.equal(fresh.reasoningEffort, "low");
+  assert.equal(configStep(fake.inference[4]).reasoningEffort, "low");
+
+  // A model without an effort setting gets none.
+  const grok = await client.chat({ prompt: "Grok", model: "Grok Build 0.1" });
+  assert.equal(grok.model, "xinomavro-cake");
+  assert.equal(grok.reasoningEffort, undefined);
+  assert.equal(configStep(fake.inference[5]).reasoningEffort, undefined);
+
+  // One getAvailableModels call for the workspace; the other turns use the cached list.
+  assert.deepEqual(fake.catalogRequests, [{ body: { spaceId: account.spaceId }, spaceHeader: account.spaceId }]);
+});
+
+test("chat rejects a model or effort the live list does not allow before anything is sent", async () => {
+  const fake = catalogFake();
+  const client = new NotionClient(catalogConfig, fake.fetchImpl as typeof fetch);
+  await assert.rejects(
+    () => client.chat({ prompt: "Hello", model: "gpt-5.4", reasoningEffort: "low" }),
+    /GPT-5\.4 \(oval-kumquat-medium\) does not support reasoningEffort "low"\. Supported: medium, high \(default medium\)/
+  );
+  await assert.rejects(() => client.chat({ prompt: "Hello", model: "Grok Build 0.1", reasoningEffort: "high" }), /has no reasoning effort setting/);
+  await assert.rejects(() => client.chat({ prompt: "Hello", model: "GPT-6 Astra" }), /GPT-6 Astra \(orlando-quinn\) is disabled/);
+  await assert.rejects(() => client.chat({ prompt: "Hello", model: "opus-55" }), /Unknown model "opus-55".*Did you mean albuquerque-quinn \(Opus 5\.5\)/);
+  await assert.rejects(() => client.startChat({ prompt: "Hello", model: "no-such-model" }), /Unknown model "no-such-model"/);
+  assert.equal(fake.inference.length, 0);
+  assert.equal(client.listChatJobs().length, 0);
+});
+
+test("chat sends the typed names with a warning when getAvailableModels fails, and uses a stale list when it has one", async () => {
+  const failing = catalogFake({ modelsStatus: () => 500 });
+  const client = new NotionClient(catalogConfig, failing.fetchImpl as typeof fetch);
+  const unchecked = await client.chat({ prompt: "Hello", model: "Opus 5.5", reasoningEffort: "High" });
+  assert.equal(unchecked.model, "Opus 5.5");
+  assert.equal(unchecked.reasoningEffort, "high");
+  assert.equal(unchecked.modelName, undefined);
+  assert.deepEqual(unchecked.warnings, [
+    "getAvailableModels failed (getAvailableModels returned HTTP 500: catalog unavailable), so model Opus 5.5 and reasoningEffort high were sent without validation."
+  ]);
+  assert.equal(configStep(failing.inference[0]).model, "Opus 5.5");
+  assert.equal(configStep(failing.inference[0]).reasoningEffort, "high");
+
+  // With a zero TTL every turn fetches again; after one good fetch a failure falls back to that list.
+  const flaky = catalogFake({ modelsStatus: (call) => (call === 1 ? 200 : 503) });
+  const staleClient = new NotionClient({ ...catalogConfig, modelCatalog: { enabled: true, ttlMs: 0, allowUnlisted: false } }, flaky.fetchImpl as typeof fetch);
+  const warm = await staleClient.chat({ prompt: "Warm", model: "gpt-5.4" });
+  assert.equal(warm.warnings, undefined);
+  const checked = await staleClient.chat({ prompt: "Stale", model: "Opus 5.5" });
+  assert.equal(checked.model, "albuquerque-quinn-v2");
+  assert.equal(checked.reasoningEffort, "medium");
+  assert.match(checked.warnings?.[0] ?? "", /^getAvailableModels failed \(getAvailableModels returned HTTP 503: catalog unavailable\); the model was checked against the list fetched at \d{4}-\d{2}-\d{2}T/);
+  await assert.rejects(() => staleClient.chat({ prompt: "Stale", model: "gpt-5.4", reasoningEffort: "low" }), /does not support reasoningEffort "low"/);
+  assert.equal(flaky.catalogRequests.length, 3);
+  assert.equal(flaky.inference.length, 2);
+});
+
+test("listModels shows the live list of a workspace and reuses the cached copy until refresh", async () => {
+  const fake = catalogFake();
+  const client = new NotionClient(catalogConfig, fake.fetchImpl as typeof fetch);
+  const otherSpace = "23000000-0000-4000-8000-000000000001";
+  const listing = await client.listModels({ spaceId: otherSpace });
+  assert.deepEqual(fake.catalogRequests, [{ body: { spaceId: otherSpace }, spaceHeader: otherSpace }]);
+  assert.equal(listing.spaceId, otherSpace);
+  assert.equal(listing.source, "live");
+  assert.equal(listing.modelCount, 5);
+  assert.equal(listing.chatModelCount, 4);
+  const opus = listing.models.find((entry) => entry.model === "albuquerque-quinn");
+  assert.deepEqual(opus?.reasoningEfforts, ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(opus?.defaultReasoningEffort, "medium");
+  assert.equal(opus?.finalModelName, "albuquerque-quinn-v2");
+  assert.equal(opus?.chat, "available");
+  assert.equal(opus?.agentService, "available");
+  assert.equal(listing.models.find((entry) => entry.model === "orlando-quinn")?.chat, "disabled (restricted_access, credit_limit_reached)");
+  assert.deepEqual(listing.models.find((entry) => entry.model === "xinomavro-cake")?.reasoningEfforts, []);
+  assert.deepEqual(listing.defaultModel, { configured: "almond-croissant-low", model: "almond-croissant-low", name: "Sonnet 4.6", reasoningEffort: "low" });
+  assert.deepEqual(listing.tiers.standard, { model: "almond-croissant-low", name: "Sonnet 4.6", reasoningEffort: "high" });
+  assert.equal(listing.tiers.thinking?.model, "albuquerque-quinn-v2");
+  assert.match(listing.tiers.thinking?.warnings?.join(" ") ?? "", /Tier "thinking" normally means oatmeal-cookie/);
+
+  assert.equal((await client.listModels({ spaceId: otherSpace })).source, "cache");
+  assert.equal(fake.catalogRequests.length, 1);
+  assert.equal((await client.listModels({ spaceId: otherSpace, refresh: true })).source, "live");
+  assert.equal(fake.catalogRequests.length, 2);
+
+  // Listing only reads, so it works with NOTION_MODEL_CATALOG off, and it flags a default the list lacks.
+  const legacy = new NotionClient(config, fake.fetchImpl as typeof fetch);
+  const current = await legacy.listModels();
+  assert.equal(current.spaceId, account.spaceId);
+  assert.deepEqual(fake.catalogRequests.at(-1), { body: { spaceId: account.spaceId }, spaceHeader: account.spaceId });
+  assert.match(current.defaultModel.error ?? "", /Unknown model "test-model"/);
+});
+
+test("without the live list a conversation keeps its model and carries its effort only with that model", async () => {
+  const inference: Array<Record<string, unknown>> = [];
+  const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const endpoint = String(input).split("/").at(-1) ?? "";
+    if (endpoint !== "runInferenceTranscript") throw new Error(`unexpected ${endpoint}`);
+    inference.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
     return ndjsonResponse([
       { type: "agent-inference", id: "step", value: [{ type: "text", content: "Answer" }], finishedAt: Date.now(), inputTokens: 1, outputTokens: 1 }
     ]);
   };
   const client = new NotionClient(config, fakeFetch as typeof fetch);
-  const first = await client.chat({ prompt: "First", model: "gpt-5.4", reasoningEffort: "high" });
+  const first = await client.chat({ prompt: "First", model: "oval-kumquat-medium", reasoningEffort: "High" });
   assert.equal(first.model, "oval-kumquat-medium");
   assert.equal(first.reasoningEffort, "high");
-  const firstConfig = ((inferenceBodies[0]?.transcript as Array<Record<string, unknown>>)[0]?.value ?? {}) as Record<string, unknown>;
-  assert.equal(firstConfig.model, "oval-kumquat-medium");
-  assert.equal(firstConfig.modelFromUser, true);
-  assert.equal(firstConfig.reasoningEffort, "high");
+  assert.equal(first.warnings, undefined);
 
-  const second = await client.chat({ prompt: "Second", model: "gpt-5.4", conversationId: first.conversationId });
+  const second = await client.chat({ prompt: "Second", conversationId: first.conversationId });
+  assert.equal(second.model, "oval-kumquat-medium");
   assert.equal(second.reasoningEffort, "high");
-  const secondConfig = ((inferenceBodies[1]?.transcript as Array<Record<string, unknown>>)[0]?.value ?? {}) as Record<string, unknown>;
-  assert.equal(secondConfig.reasoningEffort, "high");
+  assert.equal(configStep(inference[1]).model, "oval-kumquat-medium");
+  assert.equal(configStep(inference[1]).reasoningEffort, "high");
 
-  const third = await client.chat({ prompt: "Third", model: "gpt-5.4", reasoningEffort: "medium", conversationId: first.conversationId });
-  assert.equal(third.reasoningEffort, "medium");
-  const thirdConfig = ((inferenceBodies[2]?.transcript as Array<Record<string, unknown>>)[0]?.value ?? {}) as Record<string, unknown>;
-  assert.equal(thirdConfig.reasoningEffort, "medium");
-});
+  // Nothing says whether "high" suits another model, so a switch drops it.
+  const third = await client.chat({ prompt: "Third", model: "fast", conversationId: first.conversationId });
+  assert.equal(third.model, "almond-croissant-low");
+  assert.equal(third.reasoningEffort, undefined);
+  assert.equal(configStep(inference[2]).reasoningEffort, undefined);
 
-test("chat rejects an effort the selected model does not expose", async () => {
-  let calls = 0;
-  const fakeFetch = async (): Promise<Response> => {
-    calls += 1;
-    return ndjsonResponse([{ type: "agent-inference", value: [{ type: "text", content: "unexpected" }] }]);
-  };
-  const client = new NotionClient(config, fakeFetch as typeof fetch);
-  await assert.rejects(
-    () => client.chat({ prompt: "Hello", model: "gpt-5.4", reasoningEffort: "low" }),
-    /does not support reasoningEffort "low"/
-  );
-  await assert.rejects(
-    () => client.chat({ prompt: "Hello", model: "Claude Opus 4.5", reasoningEffort: "high" }),
-    /has no reasoningEffort picker/
-  );
-  assert.equal(calls, 0);
+  const fourth = await client.chat({ prompt: "Fourth", reasoningEffort: "max", conversationId: first.conversationId });
+  assert.equal(fourth.model, "almond-croissant-low");
+  assert.equal(fourth.reasoningEffort, "max");
 });
 
 test("a resumed conversation replays the config and context ids stored on the thread", async () => {
@@ -724,4 +914,16 @@ test("a text-less stream reports the workspace and stream events instead of an e
     assert.match(message, /AI credits/);
     return true;
   });
+});
+
+
+test("explicitly disabling live model validation sends typed names with a warning", async () => {
+  const fake = catalogFake();
+  const client = new NotionClient({ ...catalogConfig, modelCatalog: { enabled: false, ttlMs: 300_000, allowUnlisted: false } }, fake.fetchImpl as typeof fetch);
+  const answer = await client.chat({ prompt: "Hello", model: "Opus 5.5", reasoningEffort: "ultra" });
+  assert.equal(answer.model, "Opus 5.5");
+  assert.equal(answer.reasoningEffort, "ultra");
+  assert.deepEqual(answer.warnings, ["Live model validation is disabled (NOTION_MODEL_CATALOG=0); model and reasoningEffort are sent without validation."]);
+  assert.equal(fake.catalogRequests.length, 0);
+  assert.equal(configStep(fake.inference[0]).model, "Opus 5.5");
 });

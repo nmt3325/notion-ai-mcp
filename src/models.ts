@@ -1,148 +1,616 @@
-// Model catalog extracted from the Notion web bundle model registry.
-// Regenerate with scripts/extract-models.md when Notion ships new models.
+// Live Notion AI model catalog.
+//
+// The models a workspace can use, the surfaces that accept each one and the reasoning efforts each one
+// takes all come from POST /api/v3/getAvailableModels, the call behind the model picker in the Notion
+// web client. This module keeps no model list and no effort table of its own: it parses that response
+// and resolves what a caller typed ("Opus 5.5", "opus-5.5-max", a codename, a tier such as "fast")
+// against it, and picks the effort the same way the web client does.
 
-export interface ModelInfo {
-  modelId: string;
-  displayName: string;
-  displayNameWithProvider: string;
-  family: string;
-  group: string;
-  pickable: boolean;
+export type ModelTransport = "inference_transcript" | "agent_service";
+
+export interface ModelSurface {
+  /** The name the web client sends for this surface. */
+  finalModelName: string;
+  beta?: boolean | undefined;
+  isDisabled?: boolean | undefined;
+  disabledReason?: string | undefined;
 }
 
-export const MODEL_CATALOG: ModelInfo[] = [
-  { modelId: "openai-gpt-4o", displayName: "GPT-4o", displayNameWithProvider: "OpenAI GPT-4o", family: "openai", group: "fast", pickable: false },
-  { modelId: "openai-gpt-4o-mini", displayName: "GPT-4o mini", displayNameWithProvider: "OpenAI GPT-4o mini", family: "openai", group: "fast", pickable: false },
-  { modelId: "openai-turbo", displayName: "GPT-5", displayNameWithProvider: "OpenAI GPT-5", family: "openai", group: "fast", pickable: false },
-  { modelId: "openai-gpt-4.1", displayName: "GPT-4.1", displayNameWithProvider: "OpenAI GPT-4.1", family: "openai", group: "fast", pickable: false },
-  { modelId: "openai-gpt-4.1-mini", displayName: "GPT-4.1 Mini", displayNameWithProvider: "OpenAI GPT-4.1 Mini", family: "openai", group: "fast", pickable: false },
-  { modelId: "openai-gpt-5-mini", displayName: "GPT-5 Mini", displayNameWithProvider: "OpenAI GPT-5 Mini", family: "openai", group: "fast", pickable: false },
-  { modelId: "openai-gpt-5-nano", displayName: "GPT-5 Nano", displayNameWithProvider: "OpenAI GPT-5 Nano", family: "openai", group: "fast", pickable: false },
-  { modelId: "openai-turbo-thinking", displayName: "GPT-5 with thinking", displayNameWithProvider: "OpenAI GPT-5 with thinking", family: "openai", group: "intelligent", pickable: false },
-  { modelId: "openai-turbo-minimal-thinking", displayName: "GPT-5 + minimal CoT", displayNameWithProvider: "OpenAI GPT-5 + minimal CoT", family: "openai", group: "fast", pickable: false },
-  { modelId: "openai-turbo-10", displayName: "GPT-5 + juice@10", displayNameWithProvider: "OpenAI GPT-5 + juice@10", family: "openai", group: "fast", pickable: false },
-  { modelId: "openai-turbo-8", displayName: "GPT-5 + juice@8", displayNameWithProvider: "OpenAI GPT-5 + juice@8", family: "openai", group: "fast", pickable: false },
-  { modelId: "orange-tart", displayName: "GPT-5.1", displayNameWithProvider: "OpenAI GPT-5.1", family: "openai", group: "fast", pickable: false },
-  { modelId: "opal-quince", displayName: "GPT-5.5", displayNameWithProvider: "OpenAI GPT-5.5", family: "openai", group: "intelligent", pickable: true },
-  { modelId: "opal-quince-medium", displayName: "GPT-5.5", displayNameWithProvider: "OpenAI GPT-5.5", family: "openai", group: "intelligent", pickable: true },
-  { modelId: "opal-quince-high", displayName: "GPT-5.5 High", displayNameWithProvider: "OpenAI GPT-5.5 High", family: "openai", group: "intelligent", pickable: true },
-  { modelId: "oatmeal-cookie", displayName: "GPT 5.2", displayNameWithProvider: "GPT 5.2", family: "openai", group: "fast", pickable: true },
-  { modelId: "oatmeal-cookie-medium-thinking", displayName: "GPT-5.2 Medium", displayNameWithProvider: "OpenAI GPT-5.2 Medium", family: "openai", group: "fast", pickable: true },
-  { modelId: "oatmeal-cookie-high-thinking", displayName: "GPT-5.2 High", displayNameWithProvider: "OpenAI GPT-5.2 High", family: "openai", group: "fast", pickable: true },
-  { modelId: "oval-kumquat", displayName: "GPT-5.4", displayNameWithProvider: "OpenAI GPT-5.4", family: "openai", group: "fast", pickable: true },
-  { modelId: "oval-kumquat-medium", displayName: "GPT-5.4", displayNameWithProvider: "OpenAI GPT-5.4", family: "openai", group: "fast", pickable: true },
-  { modelId: "oval-kumquat-high", displayName: "GPT-5.4 High", displayNameWithProvider: "OpenAI GPT-5.4 High", family: "openai", group: "fast", pickable: true },
-  { modelId: "oregon-grape-low", displayName: "GPT-5.4 Mini Low", displayNameWithProvider: "OpenAI GPT-5.4 Mini Low", family: "openai", group: "fast", pickable: true },
-  { modelId: "oregon-grape-medium", displayName: "GPT-5.4 Mini", displayNameWithProvider: "OpenAI GPT-5.4 Mini", family: "openai", group: "fast", pickable: true },
-  { modelId: "oregon-grape-high", displayName: "GPT-5.4 Mini High", displayNameWithProvider: "OpenAI GPT-5.4 Mini High", family: "openai", group: "fast", pickable: true },
-  { modelId: "otaheite-apple-low", displayName: "GPT-5.4 Nano Low", displayNameWithProvider: "OpenAI GPT-5.4 Nano Low", family: "openai", group: "fast", pickable: true },
-  { modelId: "otaheite-apple-medium", displayName: "GPT-5.4 Nano", displayNameWithProvider: "OpenAI GPT-5.4 Nano", family: "openai", group: "fast", pickable: true },
-  { modelId: "otaheite-apple-high", displayName: "GPT-5.4 Nano High", displayNameWithProvider: "OpenAI GPT-5.4 Nano High", family: "openai", group: "fast", pickable: true },
-  { modelId: "orange-mousse", displayName: "GPT-5.6 Sol", displayNameWithProvider: "OpenAI GPT-5.6 Sol", family: "openai", group: "intelligent", pickable: true },
-  { modelId: "orchid-muffin", displayName: "GPT-5.6 Terra", displayNameWithProvider: "OpenAI GPT-5.6 Terra", family: "openai", group: "intelligent", pickable: true },
-  { modelId: "olive-jellyroll", displayName: "GPT-5.6 Luna", displayNameWithProvider: "OpenAI GPT-5.6 Luna", family: "openai", group: "fast", pickable: true },
-  { modelId: "anthropic-sonnet-4", displayName: "Claude 4 Sonnet", displayNameWithProvider: "Anthropic Claude 4 Sonnet", family: "anthropic", group: "fast", pickable: false },
-  { modelId: "anthropic-sonnet-3.7", displayName: "Claude 3.7 Sonnet", displayNameWithProvider: "Anthropic Claude 3.7 Sonnet", family: "anthropic", group: "intelligent", pickable: true },
-  { modelId: "anthropic-sonnet-3.7-thinking", displayName: "Claude 3.7 Sonnet with thinking", displayNameWithProvider: "Anthropic Claude 3.7 Sonnet with thinking", family: "anthropic", group: "intelligent", pickable: false },
-  { modelId: "anthropic-opus", displayName: "Claude Opus 3", displayNameWithProvider: "Anthropic Claude Opus 3", family: "anthropic", group: "intelligent", pickable: false },
-  { modelId: "anthropic-sonnet-4-thinking", displayName: "Claude 4 Sonnet with thinking", displayNameWithProvider: "Anthropic Claude 4 Sonnet with thinking", family: "anthropic", group: "intelligent", pickable: false },
-  { modelId: "anthropic-opus-4", displayName: "Claude 4 Opus", displayNameWithProvider: "Anthropic Claude 4 Opus", family: "anthropic", group: "fast", pickable: false },
-  { modelId: "anthropic-opus-4-thinking", displayName: "Claude 4 Opus with thinking", displayNameWithProvider: "Anthropic Claude 4 Opus with thinking", family: "anthropic", group: "intelligent", pickable: false },
-  { modelId: "anthropic-opus-4.1", displayName: "Claude 4.1 Opus", displayNameWithProvider: "Anthropic Claude 4.1 Opus", family: "anthropic", group: "fast", pickable: false },
-  { modelId: "anthropic-opus-4.1-thinking", displayName: "Claude 4.1 Opus with thinking", displayNameWithProvider: "Anthropic Claude 4.1 Opus with thinking", family: "anthropic", group: "intelligent", pickable: false },
-  { modelId: "anthropic-sonnet-alt", displayName: "Claude Sonnet (dev only)", displayNameWithProvider: "Anthropic Claude Sonnet (dev only)", family: "anthropic", group: "fast", pickable: false },
-  { modelId: "anthropic-sonnet-alt-no-thinking", displayName: "Claude Sonnet 4.5 no thinking", displayNameWithProvider: "Anthropic Claude Sonnet 4.5 no thinking", family: "anthropic", group: "fast", pickable: false },
-  { modelId: "anthropic-sonnet-alt-thinking", displayName: "Claude Sonnet (dev only) with thinking", displayNameWithProvider: "Anthropic Claude Sonnet (dev only) with thinking", family: "anthropic", group: "intelligent", pickable: false },
-  { modelId: "anthropic-haiku-4.5", displayName: "Claude Haiku 4.5", displayNameWithProvider: "Anthropic Claude Haiku 4.5", family: "anthropic", group: "fast", pickable: false },
-  { modelId: "anthropic-haiku-4.5-thinking", displayName: "Claude Haiku 4.5 with thinking", displayNameWithProvider: "Anthropic Claude Haiku 4.5 with thinking", family: "anthropic", group: "intelligent", pickable: false },
-  { modelId: "almond-croissant-high", displayName: "Sonnet 4.6 (High)", displayNameWithProvider: "Sonnet 4.6 (High)", family: "anthropic", group: "intelligent", pickable: false },
-  { modelId: "almond-croissant-low", displayName: "Sonnet 4.6 (Low)", displayNameWithProvider: "Sonnet 4.6 (Low)", family: "anthropic", group: "fast", pickable: true },
-  { modelId: "apple-danish", displayName: "Claude Opus 4.5", displayNameWithProvider: "Anthropic Claude Opus 4.5", family: "anthropic", group: "intelligent", pickable: true },
-  { modelId: "ambrosia-tart-high", displayName: "Opus 4.8 (High)", displayNameWithProvider: "Anthropic Claude Opus 4.8 (High)", family: "anthropic", group: "intelligent", pickable: true },
-  { modelId: "apricot-sorbet-x-high", displayName: "Opus 4.7 (X-High)", displayNameWithProvider: "Anthropic Claude Opus 4.7 (X-High)", family: "anthropic", group: "intelligent", pickable: true },
-  { modelId: "apricot-sorbet-max", displayName: "Opus 4.7 (Max)", displayNameWithProvider: "Anthropic Claude Opus 4.7 (Max)", family: "anthropic", group: "intelligent", pickable: true },
-  { modelId: "apricot-sorbet-high", displayName: "Opus 4.7 (High)", displayNameWithProvider: "Anthropic Claude Opus 4.7 (High)", family: "anthropic", group: "intelligent", pickable: true },
-  { modelId: "apricot-sorbet-medium", displayName: "Opus 4.7 (Medium)", displayNameWithProvider: "Anthropic Claude Opus 4.7 (Medium)", family: "anthropic", group: "intelligent", pickable: true },
-  { modelId: "apricot-sorbet-low", displayName: "Opus 4.7 (Low)", displayNameWithProvider: "Anthropic Claude Opus 4.7 (Low)", family: "anthropic", group: "fast", pickable: true },
-  { modelId: "acai-budino-high", displayName: "Fable 5", displayNameWithProvider: "Anthropic Claude Fable 5", family: "anthropic", group: "intelligent", pickable: true },
-  { modelId: "agave-flan", displayName: "Opus 5", displayNameWithProvider: "Anthropic Claude Opus 5", family: "anthropic", group: "intelligent", pickable: true },
-  { modelId: "avocado-froyo-medium", displayName: "Opus 4.6 (Medium)", displayNameWithProvider: "Opus 4.6 (Medium)", family: "anthropic", group: "intelligent", pickable: true },
-  { modelId: "angel-cake-high", displayName: "Sonnet 5", displayNameWithProvider: "Anthropic Claude Sonnet 5", family: "anthropic", group: "intelligent", pickable: true },
-  { modelId: "angel-cake-medium", displayName: "Sonnet 5", displayNameWithProvider: "Anthropic Claude Sonnet 5", family: "anthropic", group: "intelligent", pickable: false },
-  { modelId: "angel-cake-low", displayName: "Sonnet 5 (Low)", displayNameWithProvider: "Anthropic Claude Sonnet 5 (Low)", family: "anthropic", group: "intelligent", pickable: false },
-  { modelId: "angel-cake-none", displayName: "Sonnet 5 (No Thinking)", displayNameWithProvider: "Anthropic Claude Sonnet 5 (No Thinking)", family: "anthropic", group: "fast", pickable: false },
-  { modelId: "gemini-pro", displayName: "Gemini 2.5 Pro", displayNameWithProvider: "Google Gemini 2.5 Pro", family: "gemini", group: "intelligent", pickable: false },
-  { modelId: "gemini-flash", displayName: "Gemini 2.5 Flash", displayNameWithProvider: "Google Gemini 2.5 Flash", family: "gemini", group: "fast", pickable: false },
-  { modelId: "gingerbread", displayName: "Gemini 3 Flash", displayNameWithProvider: "Google Gemini 3 Flash", family: "gemini", group: "fast", pickable: false },
-  { modelId: "vertex-gemini-3.5-flash", displayName: "Gemini 3.5 Flash", displayNameWithProvider: "Google Gemini 3.5 Flash", family: "gemini", group: "fast", pickable: true },
-  { modelId: "galette-medium-thinking", displayName: "Gemini 3.1 Pro", displayNameWithProvider: "Google Gemini 3.1 Pro", family: "gemini", group: "intelligent", pickable: true },
-  { modelId: "fireworks-kimi-k2.6", displayName: "Kimi K2.6", displayNameWithProvider: "Fireworks Kimi K2.6", family: "kimi", group: "intelligent", pickable: true },
-  { modelId: "fireworks-kimi-k2.7", displayName: "Kimi K2.7 Code", displayNameWithProvider: "Fireworks Kimi K2.7 Code", family: "kimi", group: "intelligent", pickable: true },
-  { modelId: "fireworks-kimi-k3", displayName: "Kimi K3", displayNameWithProvider: "Fireworks Kimi K3", family: "kimi", group: "intelligent", pickable: true },
-  { modelId: "cinder-kite", displayName: "Engram 1", displayNameWithProvider: "Engram 1", family: "engram", group: "fast", pickable: false },
-  { modelId: "xigua-mochi-medium", displayName: "Grok 4.3", displayNameWithProvider: "SpaceXAI Grok 4.3", family: "xai", group: "intelligent", pickable: true },
-  { modelId: "xinomavro-cake", displayName: "Grok Build 0.1", displayNameWithProvider: "SpaceXAI Grok Build 0.1", family: "xai", group: "intelligent", pickable: true },
-  { modelId: "strawberry-whoopiepie", displayName: "Grok 4.5", displayNameWithProvider: "SpaceXAI Grok 4.5", family: "xai", group: "intelligent", pickable: true },
-  { modelId: "baseten-deepseek-v4-pro", displayName: "DeepSeek V4 Pro", displayNameWithProvider: "DeepSeek V4 Pro", family: "deepseek", group: "intelligent", pickable: true },
-  { modelId: "baseten-glm-5.2", displayName: "GLM 5.2", displayNameWithProvider: "Baseten GLM 5.2", family: "glm", group: "intelligent", pickable: true }
-];
+export interface ModelCard { speed?: number | undefined; intelligence?: number | undefined; cost?: number | undefined }
 
-export const KNOWN_MODEL_IDS: string[] = MODEL_CATALOG.map((entry) => entry.modelId);
+export interface CatalogModel {
+  /** Internal codename, e.g. albuquerque-quinn. */
+  codename: string;
+  /** Picker label, e.g. "Opus 5.5". */
+  name: string;
+  family: string;
+  provider: string;
+  group: string;
+  /** supportedReasoningEfforts in the server's order; empty when the model has no effort setting. */
+  efforts: string[];
+  defaultEffort?: string | undefined;
+  isDisabled: boolean;
+  disabledReason?: string | undefined;
+  restrictedForPersonalAgent: boolean;
+  restrictedForCustomAgent: boolean;
+  disabledOnlyByDisasterRecovery: boolean;
+  approachingRateLimit: boolean;
+  billsNotionCredits?: boolean | undefined;
+  supportsTokenSharing: boolean;
+  restrictedAccessCodename?: string | undefined;
+  card?: ModelCard | undefined;
+  surfaces: { workflow?: ModelSurface | undefined; agentService?: ModelSurface | undefined; customAgent?: ModelSurface | undefined };
+}
 
-/** Stable, human friendly tiers that stay valid even when Notion renames a model. */
-export const BUILTIN_ALIASES: Record<string, string> = {
-  fast: "almond-croissant-low",
-  default: "almond-croissant-low",
-  "notion-fast": "almond-croissant-low",
-  standard: "almond-croissant-high",
-  balanced: "almond-croissant-high",
-  "notion-standard": "almond-croissant-high",
-  thinking: "oatmeal-cookie",
-  reasoning: "oatmeal-cookie",
-  deep: "oatmeal-cookie",
-  "notion-thinking": "oatmeal-cookie",
-  "opus-4.6": "avocado-froyo-medium",
-  "claude-opus-4.6": "avocado-froyo-medium",
-  "sonnet-4.6": "almond-croissant-low",
-  "claude-sonnet-4.6": "almond-croissant-low",
-  "gpt-5.2": "oatmeal-cookie",
-  "gpt-5.4": "oval-kumquat-medium",
-  "gemini-2.5-flash": "vertex-gemini-2.5-flash",
-  "gemini-3-flash": "gingerbread"
+export interface RestrictedAccessModel { codename: string; name: string; family: string; billsNotionCredits?: boolean | undefined }
+
+export interface ModelCatalog {
+  spaceId: string;
+  fetchedAt: number;
+  models: CatalogModel[];
+  modelSelectionRestricted: boolean;
+  restrictedGeoPolicyApplied: boolean;
+  restrictedAccessModels: RestrictedAccessModel[];
+}
+
+type Json = Record<string, unknown>;
+
+function record(value: unknown): Json { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Json : {}; }
+function text(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
+function finite(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) ? value : undefined; }
+function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+
+function parseSurface(value: unknown, codename: string): ModelSurface | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Json;
+  const disabledReason = text(raw.disabledReason);
+  return {
+    finalModelName: text(raw.finalModelName) || codename,
+    ...(typeof raw.beta === "boolean" ? { beta: raw.beta } : {}),
+    ...(typeof raw.isDisabled === "boolean" ? { isDisabled: raw.isDisabled } : {}),
+    ...(disabledReason ? { disabledReason } : {})
+  };
+}
+
+function parseCard(value: unknown): ModelCard | undefined {
+  const raw = record(value);
+  const card: ModelCard = {};
+  for (const key of ["speed", "intelligence", "cost"] as const) {
+    const score = finite(raw[key]);
+    if (score !== undefined) card[key] = score;
+  }
+  return Object.keys(card).length > 0 ? card : undefined;
+}
+
+/**
+ * Parses a getAvailableModels response. Unknown fields are ignored and entries without a codename are
+ * skipped, so a new field or a partial entry never breaks model resolution.
+ */
+export function parseAvailableModels(payload: unknown, spaceId: string, fetchedAt: number = Date.now()): ModelCatalog {
+  const body = record(payload);
+  if (!Array.isArray(body.models)) throw new Error("getAvailableModels did not return a models array");
+  const models: CatalogModel[] = [];
+  const seen = new Set<string>();
+  for (const item of body.models) {
+    const raw = record(item);
+    const codename = text(raw.model);
+    if (!codename || seen.has(codename)) continue;
+    seen.add(codename);
+    const configuration = record(raw.modelConfiguration);
+    const supported: unknown[] = Array.isArray(configuration.supportedReasoningEfforts) ? configuration.supportedReasoningEfforts : [];
+    const efforts = [...new Set(supported.map(text).filter(Boolean))];
+    const defaultEffort = text(configuration.defaultReasoningEffort);
+    const disabledReason = text(raw.disabledReason);
+    const restrictedAccessCodename = text(raw.restrictedAccessModelCodename);
+    const card = parseCard(raw.modelCardAttributes);
+    const workflow = parseSurface(raw.workflow, codename);
+    const agentService = parseSurface(raw.agentService, codename);
+    const customAgent = parseSurface(raw.customAgent, codename);
+    models.push({
+      codename,
+      name: text(raw.modelMessage) || codename,
+      family: text(raw.modelFamily),
+      provider: text(raw.modelProvider) || text(raw.modelFamily),
+      group: text(raw.displayGroup),
+      efforts,
+      ...(defaultEffort ? { defaultEffort } : {}),
+      isDisabled: raw.isDisabled === true,
+      ...(disabledReason ? { disabledReason } : {}),
+      restrictedForPersonalAgent: raw.restrictedForPersonalAgent === true,
+      restrictedForCustomAgent: raw.restrictedForCustomAgent === true,
+      disabledOnlyByDisasterRecovery: raw.isDisabledOnlyByDisasterRecovery === true,
+      approachingRateLimit: raw.isApproachingRateLimit === true,
+      ...(typeof raw.billsNotionCredits === "boolean" ? { billsNotionCredits: raw.billsNotionCredits } : {}),
+      supportsTokenSharing: raw.supportsTokenSharing === true,
+      ...(restrictedAccessCodename ? { restrictedAccessCodename } : {}),
+      ...(card ? { card } : {}),
+      surfaces: { ...(workflow ? { workflow } : {}), ...(agentService ? { agentService } : {}), ...(customAgent ? { customAgent } : {}) }
+    });
+  }
+  if (models.length === 0) throw new Error("getAvailableModels returned no models");
+  const restrictedAccessModels: RestrictedAccessModel[] = [];
+  const restricted: unknown[] = Array.isArray(body.restrictedAccessModelsInPickerConfig) ? body.restrictedAccessModelsInPickerConfig : [];
+  for (const item of restricted) {
+    const raw = record(item);
+    const codename = text(raw.codename);
+    if (!codename) continue;
+    restrictedAccessModels.push({
+      codename, name: text(raw.modelMessage) || codename, family: text(raw.modelFamily),
+      ...(typeof raw.billsNotionCredits === "boolean" ? { billsNotionCredits: raw.billsNotionCredits } : {})
+    });
+  }
+  return {
+    spaceId, fetchedAt, models,
+    modelSelectionRestricted: body.modelSelectionRestricted === true,
+    restrictedGeoPolicyApplied: body.restrictedGeoPolicyApplied === true,
+    restrictedAccessModels
+  };
+}
+
+/** Lowercases and hyphenates, so "Opus 5.5 (Max)", "opus_5.5_max" and "opus-5.5-max" compare equal. */
+export function normalizeKey(value: string): string {
+  return value.trim().toLowerCase().replace(/[()[\]{}]/g, " ").replace(/[\s_]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+}
+
+/**
+ * Other spellings of the effort names Notion uses. This only normalizes what a caller types: which
+ * efforts a model accepts, and which one it defaults to, always come from the live list.
+ */
+const EFFORT_SPELLINGS: Record<string, string> = {
+  off: "none",
+  disabled: "none",
+  "no-thinking": "none",
+  "no-reasoning": "none",
+  min: "minimal",
+  med: "medium",
+  "x-high": "xhigh",
+  "extra-high": "xhigh",
+  "very-high": "xhigh",
+  maximum: "max"
 };
 
-export function normalizeKey(value: string): string {
-  return value.trim().toLowerCase().replace(/[\s_]+/g, "-").replace(/-+/g, "-");
+export function canonicalEffort(value: string): string {
+  const key = normalizeKey(value);
+  return EFFORT_SPELLINGS[key] ?? key;
 }
 
-function addAlias(target: Record<string, string>, alias: string, modelId: string): void {
-  const key = normalizeKey(alias);
-  if (!key || key in target) return;
-  target[key] = modelId;
+/** The server's own spelling of an effort the model supports, or undefined. */
+export function matchEffort(model: CatalogModel, value: string): string | undefined {
+  const wanted = canonicalEffort(value);
+  return wanted ? model.efforts.find((effort) => canonicalEffort(effort) === wanted) : undefined;
 }
 
-/** Vendor names taken straight from the Notion model registry, e.g. "gpt-5.2" or "sonnet-4.6-low". */
-export function catalogAliases(): Record<string, string> {
-  const aliases: Record<string, string> = {};
-  for (const entry of MODEL_CATALOG) {
-    addAlias(aliases, entry.modelId, entry.modelId);
-    addAlias(aliases, entry.displayName, entry.modelId);
-    addAlias(aliases, entry.displayNameWithProvider, entry.modelId);
-    addAlias(aliases, entry.displayName.replace(/[()]/g, ""), entry.modelId);
-    addAlias(aliases, entry.displayNameWithProvider.replace(/^(OpenAI|Anthropic|Google|Notion)\s+/i, "").replace(/[()]/g, ""), entry.modelId);
+/**
+ * Splits a trailing effort off a normalized name: "opus-5.5-max" -> opus-5.5 + max, and old-style IDs
+ * such as "oatmeal-cookie-high-thinking" -> oatmeal-cookie + high. The vocabulary is longest first.
+ */
+export function splitEffortSuffix(key: string, vocabulary: readonly string[]): { base: string; effort?: string | undefined } | undefined {
+  const rest = key.endsWith("-thinking") && !key.endsWith("-no-thinking") ? key.slice(0, -"-thinking".length) : key;
+  for (const word of vocabulary) {
+    const suffix = `-${word}`;
+    if (rest.length > suffix.length && rest.endsWith(suffix)) return { base: rest.slice(0, -suffix.length), effort: canonicalEffort(word) };
   }
-  return aliases;
+  return rest !== key && rest ? { base: rest } : undefined;
 }
 
-export function envAliases(): Record<string, string> {
-  const raw = process.env.NOTION_MODEL_ALIASES;
-  if (!raw) return {};
+interface CatalogIndex {
+  codename: Map<string, CatalogModel[]>;
+  finalName: Map<string, CatalogModel[]>;
+  name: Map<string, CatalogModel[]>;
+  base: Map<string, CatalogModel[]>;
+  vocabulary: string[];
+}
+
+const PREFIX_ALIASES: Record<string, string[]> = { anthropic: ["claude"], gemini: ["google"] };
+
+/** "Opus 5.5" is also reachable as claude-opus-5.5 and anthropic-opus-5.5. */
+function nameKeys(model: CatalogModel): string[] {
+  const names = new Set([normalizeKey(model.name), normalizeKey(model.name.replace(/\([^)]*\)/g, " "))].filter(Boolean));
+  const prefixes = new Set<string>();
+  for (const label of [model.family, model.provider]) {
+    const key = normalizeKey(label);
+    // "mystery" is the family Notion gives unannounced models, not a name anyone types.
+    if (!key || key === "mystery") continue;
+    prefixes.add(key);
+    for (const extra of PREFIX_ALIASES[key] ?? []) prefixes.add(extra);
+  }
+  const keys = new Set(names);
+  for (const name of names) for (const prefix of prefixes) if (!name.startsWith(`${prefix}-`)) keys.add(`${prefix}-${name}`);
+  return [...keys];
+}
+
+const indexes = new WeakMap<ModelCatalog, CatalogIndex>();
+
+function indexOf(catalog: ModelCatalog): CatalogIndex {
+  const cached = indexes.get(catalog);
+  if (cached) return cached;
+  const words = new Set(Object.keys(EFFORT_SPELLINGS));
+  for (const model of catalog.models) for (const effort of model.efforts) {
+    const key = normalizeKey(effort);
+    if (key) words.add(key);
+  }
+  // Longest first, so "x-high" is tried before "high".
+  const vocabulary = [...words].sort((a, b) => b.length - a.length || a.localeCompare(b));
+  const index: CatalogIndex = { codename: new Map(), finalName: new Map(), name: new Map(), base: new Map(), vocabulary };
+  const add = (table: Map<string, CatalogModel[]>, key: string, model: CatalogModel): void => {
+    if (!key) return;
+    const list = table.get(key);
+    if (!list) table.set(key, [model]);
+    else if (!list.includes(model)) list.push(model);
+  };
+  for (const model of catalog.models) {
+    const codename = normalizeKey(model.codename);
+    add(index.codename, codename, model);
+    for (const surface of [model.surfaces.workflow, model.surfaces.agentService, model.surfaces.customAgent]) {
+      if (surface) add(index.finalName, normalizeKey(surface.finalModelName), model);
+    }
+    for (const key of nameKeys(model)) add(index.name, key, model);
+    const split = splitEffortSuffix(codename, vocabulary);
+    if (split) add(index.base, split.base, model);
+  }
+  indexes.set(catalog, index);
+  return index;
+}
+
+const SURFACE_LABELS = { workflow: "Notion AI chat", agentService: "Agent Service file chats", customAgent: "custom agents" } as const;
+
+export function transportLabel(transport: ModelTransport): string {
+  return transport === "agent_service" ? SURFACE_LABELS.agentService : SURFACE_LABELS.workflow;
+}
+
+export function modelLabel(model: CatalogModel): string {
+  return model.name && model.name !== model.codename ? `${model.name} (${model.codename})` : model.codename;
+}
+
+/** Chats use the workflow surface; the Agent Service uses its own and falls back to workflow, like the web client. */
+export function surfaceFor(model: CatalogModel, transport: ModelTransport): ModelSurface | undefined {
+  const { workflow, agentService, customAgent } = model.surfaces;
+  // An entry without any surface predates per-surface flags; its codename is then the model name.
+  if (!workflow && !agentService && !customAgent) return { finalModelName: model.codename };
+  return transport === "agent_service" ? agentService ?? workflow : workflow;
+}
+
+export interface ModelAvailability { available: boolean; finalModelName: string; reason?: string | undefined }
+
+export function modelAvailability(model: CatalogModel, transport: ModelTransport): ModelAvailability {
+  const surface = surfaceFor(model, transport);
+  if (!surface) {
+    const offered = (Object.keys(SURFACE_LABELS) as Array<keyof typeof SURFACE_LABELS>).filter((key) => model.surfaces[key]).map((key) => SURFACE_LABELS[key]);
+    return { available: false, finalModelName: model.codename, reason: `not offered for ${transportLabel(transport)}${offered.length > 0 ? ` (Notion lists it only for ${offered.join(" and ")})` : ""}` };
+  }
+  if (surface.isDisabled ?? model.isDisabled) {
+    const reasons = [...new Set([surface.disabledReason, model.disabledReason].filter((value): value is string => Boolean(value)))];
+    return { available: false, finalModelName: surface.finalModelName, reason: `disabled${reasons.length > 0 ? ` (${reasons.join(", ")})` : ""}` };
+  }
+  if (transport === "agent_service" && model.restrictedForPersonalAgent) {
+    return { available: false, finalModelName: surface.finalModelName, reason: "restricted for the personal agent" };
+  }
+  return { available: true, finalModelName: surface.finalModelName };
+}
+
+export interface LookupOptions {
+  transport: ModelTransport;
+  /** NOTION_DEFAULT_MODEL, used for the "default" tier. */
+  defaultModel?: string | undefined;
+  /** Send a name the live list does not contain unvalidated (NOTION_ALLOW_UNLISTED_MODELS). */
+  allowUnlisted?: boolean | undefined;
+  /** NOTION_MODEL_ALIASES with normalized keys. */
+  aliases?: Record<string, string> | undefined;
+}
+
+export type ModelMatchSource = "alias" | "codename" | "finalModelName" | "name" | "codenameBase" | "effortSuffix" | "tier" | "unlisted";
+
+export interface ModelMatch {
+  /** Undefined when an unlisted name is passed through. */
+  model?: CatalogModel | undefined;
+  codename: string;
+  /** Effort named by a suffix such as "-max" or "(High)". */
+  impliedEffort?: string | undefined;
+  via: ModelMatchSource;
+  warnings: string[];
+}
+
+/**
+ * Tier names kept from earlier releases. A target is resolved against the live list like any other
+ * name; when the workspace does not offer it, the first usable model of the same display group is used.
+ */
+const TIERS: Record<string, { target: string; group: string }> = {
+  fast: { target: "almond-croissant-low", group: "fast" },
+  "notion-fast": { target: "almond-croissant-low", group: "fast" },
+  standard: { target: "almond-croissant-high", group: "intelligent" },
+  balanced: { target: "almond-croissant-high", group: "intelligent" },
+  "notion-standard": { target: "almond-croissant-high", group: "intelligent" },
+  thinking: { target: "oatmeal-cookie", group: "intelligent" },
+  reasoning: { target: "oatmeal-cookie", group: "intelligent" },
+  deep: { target: "oatmeal-cookie", group: "intelligent" },
+  "notion-thinking": { target: "oatmeal-cookie", group: "intelligent" }
+};
+
+const DEFAULT_TIERS = new Set(["default", "notion-default"]);
+
+/** Tier names shown by list_models. */
+export const MODEL_TIERS: readonly string[] = ["fast", "standard", "thinking"];
+
+function preferUsable(models: readonly CatalogModel[] | undefined, transport: ModelTransport): CatalogModel | undefined {
+  if (!models || models.length === 0) return undefined;
+  return models.find((model) => modelAvailability(model, transport).available) ?? models[0];
+}
+
+function exactMatch(index: CatalogIndex, key: string, transport: ModelTransport): { model: CatalogModel; via: ModelMatchSource } | undefined {
+  const tables: Array<[Map<string, CatalogModel[]>, ModelMatchSource]> = [
+    [index.codename, "codename"], [index.finalName, "finalModelName"], [index.name, "name"], [index.base, "codenameBase"]
+  ];
+  for (const [table, via] of tables) {
+    const model = preferUsable(table.get(key), transport);
+    if (model) return { model, via };
+  }
+  return undefined;
+}
+
+function resolveListed(catalog: ModelCatalog, key: string, options: LookupOptions, depth: number): ModelMatch | undefined {
+  const index = indexOf(catalog);
+  const exact = exactMatch(index, key, options.transport);
+  if (exact) return { model: exact.model, codename: exact.model.codename, via: exact.via, warnings: [] };
+  const split = splitEffortSuffix(key, index.vocabulary);
+  const base = split ? exactMatch(index, split.base, options.transport) : undefined;
+  if (split && base) {
+    return { model: base.model, codename: base.model.codename, ...(split.effort ? { impliedEffort: split.effort } : {}), via: "effortSuffix", warnings: [] };
+  }
+  if (depth >= 2) return undefined;
+  if (DEFAULT_TIERS.has(key)) {
+    const target = normalizeKey(options.defaultModel ?? "");
+    const resolved = resolveListed(catalog, target && !DEFAULT_TIERS.has(target) ? target : "fast", options, depth + 1);
+    return resolved ? { ...resolved, via: "tier" } : undefined;
+  }
+  const tier = TIERS[key];
+  if (!tier) return undefined;
+  const target = resolveListed(catalog, tier.target, options, depth + 1);
+  if (target?.model && modelAvailability(target.model, options.transport).available) return { ...target, via: "tier" };
+  const fallback = catalog.models.find((model) => model.group === tier.group && modelAvailability(model, options.transport).available);
+  if (fallback) {
+    return {
+      model: fallback, codename: fallback.codename, via: "tier",
+      warnings: [`Tier "${key}" normally means ${tier.target}, which this workspace does not offer for ${transportLabel(options.transport)}; using ${modelLabel(fallback)} instead.`]
+    };
+  }
+  return target ? { ...target, via: "tier" } : undefined;
+}
+
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      current[j] = Math.min((previous[j] ?? 0) + 1, (current[j - 1] ?? 0) + 1, (previous[j - 1] ?? 0) + cost);
+    }
+    previous = current;
+  }
+  return previous[b.length] ?? 0;
+}
+
+/** Closest listed models for a name that did not resolve, for the error message. */
+export function suggestModels(catalog: ModelCatalog, input: string, limit = 3): CatalogModel[] {
+  const key = normalizeKey(input);
+  const index = indexOf(catalog);
+  const split = splitEffortSuffix(key, index.vocabulary);
+  const probes = [...new Set([key, ...(split ? [split.base] : [])])].filter(Boolean);
+  const best = new Map<CatalogModel, number>();
+  for (const table of [index.codename, index.name]) {
+    for (const [candidate, models] of table) {
+      for (const probe of probes) {
+        let score = editDistance(probe, candidate);
+        if (probe.length >= 3 && (candidate.includes(probe) || probe.includes(candidate))) score = Math.min(score, 1);
+        if (score > Math.max(2, Math.ceil(probe.length / 3))) continue;
+        for (const model of models) {
+          const seen = best.get(model);
+          if (seen === undefined || score < seen) best.set(model, score);
+        }
+      }
+    }
+  }
+  return [...best]
+    .sort((a, b) => a[1] - b[1] || catalog.models.indexOf(a[0]) - catalog.models.indexOf(b[0]))
+    .slice(0, limit)
+    .map(([model]) => model);
+}
+
+/**
+ * Resolves a model name against the live list, in this order: NOTION_MODEL_ALIASES, codename, surface
+ * finalModelName, display name (optionally prefixed with family/provider, claude- or google-), codename
+ * without its effort suffix, any of those followed by an effort suffix, then a tier. A name that still
+ * does not resolve is an error listing the closest models, unless NOTION_ALLOW_UNLISTED_MODELS is on.
+ */
+export function lookupModel(catalog: ModelCatalog, input: string, options: LookupOptions): ModelMatch {
+  const raw = input.trim();
+  const key = normalizeKey(raw);
+  if (!key) throw new Error("model must not be empty");
+  const alias = options.aliases?.[key]?.trim();
+  const target = alias || raw;
+  const resolved = resolveListed(catalog, normalizeKey(target), options, 0);
+  if (resolved) return alias ? { ...resolved, via: "alias" } : resolved;
+  const described = alias ? `"${raw}" (NOTION_MODEL_ALIASES -> "${alias}")` : `"${raw}"`;
+  if (options.allowUnlisted) {
+    return { codename: target, via: "unlisted", warnings: [`Model ${described} is not in this workspace's model list; it is sent unvalidated because NOTION_ALLOW_UNLISTED_MODELS is on.`] };
+  }
+  const hints = suggestModels(catalog, target);
+  throw new Error(
+    `Unknown model ${described}: workspace ${catalog.spaceId} does not offer it.` +
+    (hints.length > 0 ? ` Did you mean ${hints.map((model) => `${model.codename} (${model.name})`).join(", ")}?` : "") +
+    " Call list_models for the live list of models and their reasoning efforts."
+  );
+}
+
+export interface EffortRequest {
+  /** reasoningEffort passed by the caller. */
+  explicit?: string | undefined;
+  /** Effort named by the model suffix, e.g. "opus-5.5-max". */
+  implied?: string | undefined;
+  /** The conversation's current effort. */
+  inherited?: string | undefined;
+}
+
+export interface EffortResolution {
+  effort?: string | undefined;
+  source?: "explicit" | "implied" | "inherited" | "default" | undefined;
+  warnings: string[];
+}
+
+/**
+ * Picks the effort the way the web client does: nothing for a model without an effort setting,
+ * otherwise the chosen effort when the model supports it and its defaultReasoningEffort (or first
+ * supported effort) when not. An effort the caller asked for and the model lacks is an error.
+ */
+export function resolveReasoningEffort(model: CatalogModel | undefined, request: EffortRequest): EffortResolution {
+  const explicit = request.explicit?.trim();
+  const implied = request.implied?.trim();
+  const inherited = request.inherited?.trim();
+  const warnings: string[] = [];
+  if (!model) {
+    // Unlisted model: nothing to validate against, and no default to add.
+    const value = explicit || implied || inherited;
+    return value ? { effort: canonicalEffort(value), source: explicit ? "explicit" : implied ? "implied" : "inherited", warnings } : { warnings };
+  }
+  const label = modelLabel(model);
+  if (model.efforts.length === 0) {
+    if (explicit) throw new Error(`${label} has no reasoning effort setting; omit reasoningEffort for this model.`);
+    if (implied) throw new Error(`${label} has no reasoning effort setting, so the "${implied}" suffix in the model name cannot be applied; use ${model.codename}.`);
+    if (inherited) warnings.push(`${label} has no reasoning effort setting, so the conversation's reasoningEffort ${inherited} is not sent.`);
+    return { warnings };
+  }
+  const supported = `${model.efforts.join(", ")}${model.defaultEffort ? ` (default ${model.defaultEffort})` : ""}`;
+  if (explicit) {
+    const effort = matchEffort(model, explicit);
+    if (!effort) throw new Error(`${label} does not support reasoningEffort "${explicit}". Supported: ${supported}.`);
+    if (implied && matchEffort(model, implied) !== effort) warnings.push(`reasoningEffort ${effort} overrides the "${implied}" suffix in the model name.`);
+    return { effort, source: "explicit", warnings };
+  }
+  if (implied) {
+    const effort = matchEffort(model, implied);
+    if (!effort) throw new Error(`${label} does not support reasoningEffort "${implied}" (taken from the model name). Supported: ${supported}.`);
+    return { effort, source: "implied", warnings };
+  }
+  const fallback = model.defaultEffort ?? model.efforts[0];
+  if (inherited) {
+    const effort = matchEffort(model, inherited);
+    if (effort) return { effort, source: "inherited", warnings };
+    warnings.push(`${label} does not support the conversation's reasoningEffort ${inherited}; using ${fallback ?? "no effort"} instead.`);
+  }
+  return { ...(fallback ? { effort: fallback } : {}), source: "default", warnings };
+}
+
+export interface ModelPlanInput {
+  requestedModel?: string | undefined;
+  requestedEffort?: string | undefined;
+  /** The conversation's current model and effort, for a follow-up turn. */
+  inheritedModel?: string | undefined;
+  inheritedEffort?: string | undefined;
+  transport: ModelTransport;
+}
+
+export interface ModelPlan {
+  /** Sent as config.model and debugOverrides.model, or as the Agent Service model. */
+  model: string;
+  codename?: string | undefined;
+  modelName?: string | undefined;
+  reasoningEffort?: string | undefined;
+  warnings: string[];
+}
+
+export interface PlanOptions {
+  defaultModel: string;
+  allowUnlisted?: boolean | undefined;
+  aliases?: Record<string, string> | undefined;
+}
+
+function assertUsable(match: ModelMatch, transport: ModelTransport): void {
+  if (!match.model) return;
+  const state = modelAvailability(match.model, transport);
+  if (!state.available) throw new Error(`${modelLabel(match.model)} is ${state.reason ?? "unavailable"} in this workspace. Call list_models to pick another model.`);
+}
+
+/**
+ * Chooses the model and effort for one chat turn against the live list: the caller's model, else the
+ * conversation's model, else NOTION_DEFAULT_MODEL; then the effort per resolveReasoningEffort, with the
+ * conversation's effort carried across a model switch when the new model supports it.
+ */
+export function planModel(catalog: ModelCatalog, input: ModelPlanInput, options: PlanOptions): ModelPlan {
+  const warnings: string[] = [];
+  const lookup: LookupOptions = { transport: input.transport, defaultModel: options.defaultModel, allowUnlisted: options.allowUnlisted, aliases: options.aliases };
+  let inheritedEffort = input.inheritedEffort?.trim() || undefined;
+  let match: ModelMatch | undefined;
+  const requested = input.requestedModel?.trim();
+  const inherited = input.inheritedModel?.trim();
+  if (requested) {
+    match = lookupModel(catalog, requested, lookup);
+    assertUsable(match, input.transport);
+  } else if (inherited) {
+    try {
+      // A conversation keeps the model it runs on; operator aliases only apply to names a caller types.
+      const kept = lookupModel(catalog, inherited, { ...lookup, aliases: {} });
+      assertUsable(kept, input.transport);
+      inheritedEffort ??= kept.impliedEffort;
+      match = { ...kept, impliedEffort: undefined };
+    } catch (error) {
+      warnings.push(`This conversation ran on ${inherited}, which cannot be used any more (${errorText(error)}); switching to NOTION_DEFAULT_MODEL.`);
+    }
+  }
+  if (!match) {
+    try {
+      match = lookupModel(catalog, options.defaultModel.trim() || "fast", lookup);
+      assertUsable(match, input.transport);
+    } catch (error) {
+      throw new Error(`NOTION_DEFAULT_MODEL "${options.defaultModel}" cannot be used: ${errorText(error)}`);
+    }
+  }
+  warnings.push(...match.warnings);
+  const effort = resolveReasoningEffort(match.model, { explicit: input.requestedEffort, implied: match.impliedEffort, inherited: inheritedEffort });
+  warnings.push(...effort.warnings);
+  return {
+    model: match.model ? modelAvailability(match.model, input.transport).finalModelName : match.codename,
+    ...(match.model ? { codename: match.model.codename, modelName: match.model.name } : {}),
+    ...(effort.effort ? { reasoningEffort: effort.effort } : {}),
+    warnings
+  };
+}
+
+/**
+ * Resolution without the live list (NOTION_MODEL_CATALOG=0, or getAvailableModels unreachable with
+ * nothing cached): aliases and tiers are expanded, anything else is sent as typed, and no effort is
+ * added that the caller or the conversation did not choose.
+ */
+export function legacyPlan(input: ModelPlanInput, options: PlanOptions): ModelPlan {
+  const aliases = options.aliases ?? {};
+  const expand = (value: string, depth = 0): string => {
+    const key = normalizeKey(value);
+    const alias = aliases[key]?.trim();
+    if (alias) return alias;
+    if (DEFAULT_TIERS.has(key)) {
+      const target = options.defaultModel.trim();
+      return depth < 2 && target && !DEFAULT_TIERS.has(normalizeKey(target)) ? expand(target, depth + 1) : TIERS.fast?.target ?? value.trim();
+    }
+    return TIERS[key]?.target ?? value.trim();
+  };
+  const requested = input.requestedModel?.trim();
+  const inherited = input.inheritedModel?.trim();
+  const model = requested ? expand(requested) : inherited || expand(options.defaultModel.trim() || "fast");
+  // Nothing here says whether the conversation's effort suits another model, so it only carries over with its model.
+  const keepsModel = !requested || model === inherited;
+  const effort = input.requestedEffort?.trim() || (keepsModel ? input.inheritedEffort?.trim() : undefined);
+  return { model, ...(effort ? { reasoningEffort: canonicalEffort(effort) } : {}), warnings: [] };
+}
+
+/** NOTION_MODEL_ALIASES: a JSON object mapping extra names to models, e.g. {"my-fast":"almond-croissant-low"}. */
+export function envAliases(raw: string | undefined = process.env.NOTION_MODEL_ALIASES): Record<string, string> {
+  if (!raw?.trim()) return {};
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const aliases: Record<string, string> = {};
-    for (const [alias, modelId] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof modelId === "string" && modelId.trim()) aliases[normalizeKey(alias)] = modelId.trim();
+    for (const [alias, target] of Object.entries(parsed as Record<string, unknown>)) {
+      const key = normalizeKey(alias);
+      if (key && typeof target === "string" && target.trim()) aliases[key] = target.trim();
     }
     return aliases;
   } catch {
@@ -150,121 +618,159 @@ export function envAliases(): Record<string, string> {
   }
 }
 
-export function modelAliases(): Record<string, string> {
-  return { ...catalogAliases(), ...BUILTIN_ALIASES, ...envAliases() };
-}
-
-/** Accepts an internal ID, a vendor name, or a tier alias; unknown values pass through untouched. */
-export function normalizeModelName(value: string | undefined, fallback: string): string {
-  const raw = (value ?? "").trim();
-  if (!raw) return fallback.trim() ? normalizeModelName(fallback, "almond-croissant-low") : "almond-croissant-low";
-  const aliases = modelAliases();
-  return aliases[normalizeKey(raw)] ?? raw;
-}
-
-export function listModels(): Array<{ modelId: string; displayName: string; family: string; group: string; pickable: boolean; aliases: string[] }> {
-  const aliases = modelAliases();
-  const byModel = new Map<string, string[]>();
-  for (const [alias, modelId] of Object.entries(aliases)) {
-    if (alias === modelId) continue;
-    byModel.set(modelId, [...(byModel.get(modelId) ?? []), alias]);
-  }
-  const known = MODEL_CATALOG.map((entry) => ({ ...entry, aliases: (byModel.get(entry.modelId) ?? []).sort() }));
-  const extra = [...byModel.keys()].filter((modelId) => !KNOWN_MODEL_IDS.includes(modelId));
-  return [
-    ...known,
-    ...extra.map((modelId) => ({ modelId, displayName: modelId, displayNameWithProvider: modelId, family: "unknown", group: "unknown", pickable: false, aliases: (byModel.get(modelId) ?? []).sort() }))
-  ];
-}
-
-/** Effort tiers accepted by the current Notion thread config (`reasoningEffort`). */
-export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-
-export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
-
-export interface ModelReasoningEfforts {
-  supported: ReasoningEffort[];
-  default: ReasoningEffort;
-}
-
-const MEDIUM_HIGH: ReasoningEffort[] = ["medium", "high"];
-const LOW_TO_MAX: ReasoningEffort[] = ["low", "medium", "high", "max"];
-const LOW_TO_HIGH: ReasoningEffort[] = ["low", "medium", "high"];
-const NONE_TO_MAX: ReasoningEffort[] = ["none", "low", "medium", "high", "xhigh", "max"];
+export interface CatalogLoad { catalog: ModelCatalog; source: "live" | "cache" | "stale"; error?: string | undefined }
 
 /**
- * `modelConfiguration.supportedReasoningEfforts` / `defaultReasoningEffort` taken from the Notion
- * web bundle model registry. Models missing here render no effort picker in the Notion UI.
+ * Per account and workspace cache of getAvailableModels. A fresh entry is served for ttlMs; after that
+ * the list is fetched again, and if that fails the last good list is served as "stale" instead of
+ * failing a chat on a transient error. Concurrent callers share one request.
  */
-export const MODEL_REASONING_EFFORTS: Record<string, ModelReasoningEfforts> = {
-  "opal-quince": { supported: MEDIUM_HIGH, default: "medium" },
-  "opal-quince-medium": { supported: MEDIUM_HIGH, default: "medium" },
-  "opal-quince-high": { supported: MEDIUM_HIGH, default: "high" },
-  "oatmeal-cookie": { supported: MEDIUM_HIGH, default: "medium" },
-  "oatmeal-cookie-medium-thinking": { supported: MEDIUM_HIGH, default: "medium" },
-  "oatmeal-cookie-high-thinking": { supported: MEDIUM_HIGH, default: "high" },
-  "oval-kumquat": { supported: MEDIUM_HIGH, default: "medium" },
-  "oval-kumquat-medium": { supported: MEDIUM_HIGH, default: "medium" },
-  "oval-kumquat-high": { supported: MEDIUM_HIGH, default: "high" },
-  "orange-mousse": { supported: NONE_TO_MAX, default: "medium" },
-  "orchid-muffin": { supported: NONE_TO_MAX, default: "medium" },
-  "olive-jellyroll": { supported: NONE_TO_MAX, default: "medium" },
-  "almond-croissant-max": { supported: LOW_TO_MAX, default: "max" },
-  "almond-croissant-high": { supported: LOW_TO_MAX, default: "high" },
-  "almond-croissant-medium": { supported: LOW_TO_MAX, default: "medium" },
-  "almond-croissant-low": { supported: LOW_TO_MAX, default: "low" },
-  "ambrosia-tart-max": { supported: LOW_TO_MAX, default: "max" },
-  "ambrosia-tart-high": { supported: LOW_TO_MAX, default: "high" },
-  "ambrosia-tart-medium": { supported: LOW_TO_MAX, default: "medium" },
-  "ambrosia-tart-low": { supported: LOW_TO_MAX, default: "low" },
-  "acai-budino-high": { supported: LOW_TO_MAX, default: "high" },
-  "agave-flan": { supported: LOW_TO_MAX, default: "medium" },
-  "vertex-gemini-3.5-flash": { supported: LOW_TO_HIGH, default: "low" },
-  "grapefruit-zeppole": { supported: LOW_TO_HIGH, default: "medium" }
-};
+export class ModelCatalogStore {
+  private readonly entries = new Map<string, { catalog: ModelCatalog; expiresAt: number }>();
+  private readonly loading = new Map<string, Promise<ModelCatalog>>();
 
-const EFFORT_ALIASES: Record<string, ReasoningEffort> = {
-  none: "none",
-  off: "none",
-  disabled: "none",
-  "no-thinking": "none",
-  minimal: "minimal",
-  min: "minimal",
-  low: "low",
-  medium: "medium",
-  med: "medium",
-  high: "high",
-  xhigh: "xhigh",
-  "x-high": "xhigh",
-  "extra-high": "xhigh",
-  "very-high": "xhigh",
-  max: "max",
-  maximum: "max"
-};
+  constructor(private readonly ttlMs: number, private readonly now: () => number = Date.now) {}
 
-/** Registry effort configuration for one internal model ID, when Notion exposes an effort picker. */
-export function modelReasoningEfforts(modelId: string): ModelReasoningEfforts | undefined {
-  return MODEL_REASONING_EFFORTS[modelId];
-}
-
-/**
- * Resolves a requested effort against the model registry. Returns undefined when no effort was
- * requested so the transcript config stays byte-identical to the current Notion web client.
- */
-export function normalizeReasoningEffort(modelId: string, value: string | undefined): ReasoningEffort | undefined {
-  const raw = (value ?? "").trim();
-  if (!raw) return undefined;
-  const effort = EFFORT_ALIASES[normalizeKey(raw)];
-  if (!effort) throw new Error(`Unknown reasoningEffort "${raw}". Supported values: ${REASONING_EFFORTS.join(", ")}`);
-  const config = MODEL_REASONING_EFFORTS[modelId];
-  if (!config) {
-    if (KNOWN_MODEL_IDS.includes(modelId)) {
-      throw new Error(`Model ${modelId} has no reasoningEffort picker in the Notion model registry; omit reasoningEffort or pick a model that has one, such as oatmeal-cookie, oval-kumquat-medium, or almond-croissant-low`);
+  async get(key: string, load: () => Promise<ModelCatalog>, options: { refresh?: boolean | undefined } = {}): Promise<CatalogLoad> {
+    const entry = this.entries.get(key);
+    if (entry && options.refresh !== true && this.now() < entry.expiresAt) return { catalog: entry.catalog, source: "cache" };
+    try {
+      return { catalog: await this.fetch(key, load), source: "live" };
+    } catch (error) {
+      const stale = this.entries.get(key);
+      if (stale) return { catalog: stale.catalog, source: "stale", error: errorText(error) };
+      throw error;
     }
-    return effort;
   }
-  if (!config.supported.includes(effort)) {
-    throw new Error(`Model ${modelId} does not support reasoningEffort "${effort}". Supported: ${config.supported.join(", ")} (default ${config.default})`);
+
+  private fetch(key: string, load: () => Promise<ModelCatalog>): Promise<ModelCatalog> {
+    const pending = this.loading.get(key);
+    if (pending) return pending;
+    const work = Promise.resolve().then(load).then((catalog) => {
+      if (catalog.models.length === 0) throw new Error("getAvailableModels returned no models");
+      this.entries.set(key, { catalog, expiresAt: this.now() + this.ttlMs });
+      return catalog;
+    });
+    this.loading.set(key, work);
+    const settle = (): void => { if (this.loading.get(key) === work) this.loading.delete(key); };
+    work.then(settle, settle);
+    return work;
   }
-  return effort;
+}
+
+export interface ModelListingEntry {
+  model: string;
+  name: string;
+  family: string;
+  provider: string;
+  group: string;
+  reasoningEfforts: string[];
+  defaultReasoningEffort?: string | undefined;
+  /** notion_ai_chat without Agent Service fileIds. */
+  chat: string;
+  /** notion_ai_chat with fileIds from upload_attachment. */
+  agentService: string;
+  customAgent: string;
+  finalModelName?: string | undefined;
+  billsNotionCredits?: boolean | undefined;
+  approachingRateLimit?: boolean | undefined;
+  card?: ModelCard | undefined;
+}
+
+export interface ModelListingChoice { model?: string | undefined; name?: string | undefined; reasoningEffort?: string | undefined; warnings?: string[] | undefined; error?: string | undefined }
+
+export interface ModelListing {
+  spaceId: string;
+  fetchedAt: string;
+  source: CatalogLoad["source"];
+  warning?: string | undefined;
+  modelCount: number;
+  chatModelCount: number;
+  defaultModel: ModelListingChoice & { configured: string };
+  tiers: Record<string, ModelListingChoice>;
+  modelSelectionRestricted: boolean;
+  restrictedAccessModels: RestrictedAccessModel[];
+  models: ModelListingEntry[];
+}
+
+function customAgentState(model: CatalogModel): string {
+  const surface = model.surfaces.customAgent;
+  if (!surface) return model.surfaces.workflow || model.surfaces.agentService ? "not offered" : "available";
+  if (surface.isDisabled ?? model.isDisabled) return `disabled${surface.disabledReason ? ` (${surface.disabledReason})` : ""}`;
+  return model.restrictedForCustomAgent ? "restricted" : "available";
+}
+
+function listingChoice(catalog: ModelCatalog, requestedModel: string, options: PlanOptions): ModelListingChoice {
+  try {
+    const plan = planModel(catalog, { requestedModel, transport: "inference_transcript" }, options);
+    return {
+      model: plan.model, ...(plan.modelName ? { name: plan.modelName } : {}),
+      ...(plan.reasoningEffort ? { reasoningEffort: plan.reasoningEffort } : {}),
+      ...(plan.warnings.length > 0 ? { warnings: plan.warnings } : {})
+    };
+  } catch (error) {
+    return { error: errorText(error) };
+  }
+}
+
+/** Structured list_models output. */
+export function describeCatalog(load: CatalogLoad, options: PlanOptions): ModelListing {
+  const { catalog } = load;
+  const models = catalog.models.map((model): ModelListingEntry => {
+    const chat = modelAvailability(model, "inference_transcript");
+    const agent = modelAvailability(model, "agent_service");
+    return {
+      model: model.codename, name: model.name, family: model.family, provider: model.provider, group: model.group,
+      reasoningEfforts: [...model.efforts],
+      ...(model.efforts.length > 0 && model.defaultEffort ? { defaultReasoningEffort: model.defaultEffort } : {}),
+      chat: chat.available ? "available" : chat.reason ?? "unavailable",
+      agentService: agent.available ? "available" : agent.reason ?? "unavailable",
+      customAgent: customAgentState(model),
+      ...(chat.available && chat.finalModelName !== model.codename ? { finalModelName: chat.finalModelName } : {}),
+      ...(model.billsNotionCredits === undefined ? {} : { billsNotionCredits: model.billsNotionCredits }),
+      ...(model.approachingRateLimit ? { approachingRateLimit: true } : {}),
+      ...(model.card ? { card: model.card } : {})
+    };
+  });
+  const tiers: Record<string, ModelListingChoice> = {};
+  for (const tier of MODEL_TIERS) tiers[tier] = listingChoice(catalog, tier, options);
+  const fetchedAt = new Date(catalog.fetchedAt).toISOString();
+  return {
+    spaceId: catalog.spaceId, fetchedAt, source: load.source,
+    ...(load.error ? { warning: `getAvailableModels failed (${load.error}); showing the list fetched at ${fetchedAt}.` } : {}),
+    modelCount: models.length,
+    chatModelCount: models.filter((entry) => entry.chat === "available").length,
+    defaultModel: { configured: options.defaultModel, ...listingChoice(catalog, options.defaultModel.trim() || "fast", options) },
+    tiers,
+    modelSelectionRestricted: catalog.modelSelectionRestricted,
+    restrictedAccessModels: catalog.restrictedAccessModels,
+    models
+  };
+}
+
+function describeChoice(choice: ModelListingChoice): string {
+  if (choice.error) return `unusable: ${choice.error}`;
+  const effort = choice.reasoningEffort ? `, effort ${choice.reasoningEffort}` : "";
+  const warnings = choice.warnings?.length ? ` (${choice.warnings.join(" ")})` : "";
+  return `${choice.name ? `${choice.name} ` : ""}[${choice.model ?? "?"}]${effort}${warnings}`;
+}
+
+/** Plain-text list_models output: one line per model. */
+export function formatModelListing(listing: ModelListing): string {
+  const lines = [
+    `${listing.modelCount} models for workspace ${listing.spaceId} (${listing.source}, fetched ${listing.fetchedAt}); ${listing.chatModelCount} usable in notion_ai_chat.`,
+    ...(listing.warning ? [`Warning: ${listing.warning}`] : []),
+    `Default (NOTION_DEFAULT_MODEL=${listing.defaultModel.configured}): ${describeChoice(listing.defaultModel)}`,
+    `Tiers: ${Object.entries(listing.tiers).map(([tier, choice]) => `${tier} -> ${describeChoice(choice)}`).join("; ")}`,
+    "",
+    "model | name | family/group | reasoning efforts (default) | chat | Agent Service"
+  ];
+  for (const entry of listing.models) {
+    const family = entry.provider && entry.provider !== entry.family ? `${entry.family}:${entry.provider}` : entry.family;
+    const efforts = entry.reasoningEfforts.length > 0
+      ? `${entry.reasoningEfforts.join("|")}${entry.defaultReasoningEffort ? ` (${entry.defaultReasoningEffort})` : ""}`
+      : "none offered";
+    lines.push(`${entry.model} | ${entry.name} | ${family}/${entry.group} | ${efforts} | ${entry.chat} | ${entry.agentService}`);
+  }
+  return lines.join("\n");
 }

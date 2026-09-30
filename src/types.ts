@@ -4,7 +4,7 @@ export interface ConversationSummary { id:string; title:string; type:string; cre
 export interface ConversationMessage { id:string; role:"user"|"assistant"; text:string; createdAt:number|null }
 export interface Conversation { id:string; title:string; type:string; createdAt:number|null; updatedAt:number|null; messages:ConversationMessage[] }
 export interface ListConversationsResult { conversations:ConversationSummary[]; nextCursor:string|null; hasMore:boolean }
-export interface ChatResult { conversationId:string; text:string; model:string; reasoningEffort?:string|undefined; usage:{inputTokens:number;outputTokens:number} }
+export interface ChatResult { conversationId:string; text:string; model:string; modelName?:string|undefined; reasoningEffort?:string|undefined; usage:{inputTokens:number;outputTokens:number}; warnings?:string[]|undefined }
 export interface ChatSession { threadId:string; configId:string; contextId:string; originalDatetime:string; model:string; reasoningEffort?:string|undefined; updatedConfigIds:string[]; turnCount:number; transport?:"inference_transcript"|"agent_service"; rehydrated?:boolean|undefined }
 export interface ParsedInferenceStream { text:string; inputTokens:number; outputTokens:number; eventTypes:Record<string,number> }
 export interface ChatAttachment { name:string; url?:string|undefined; text?:string|undefined; mimeType?:string|undefined }
@@ -17,9 +17,9 @@ export interface AttachmentDownloadResult { source:"agent_service"|"inference_tr
 export type ChatJobStatus = "running"|"completed"|"failed"|"orphaned";
 export interface ChatJobUsage { inputTokens:number; outputTokens:number }
 export interface ChatJob { jobId:string; conversationId:string; status:ChatJobStatus; model:string; reasoningEffort?:string|undefined; promptPreview:string; turn:number; transport:"inference_transcript"|"agent_service"; startedAt:number; finishedAt?:number|undefined; text?:string|undefined; error?:string|undefined; usage?:ChatJobUsage|undefined }
-export interface ChatStartResult { status:"running"; jobId:string; conversationId:string; model:string; reasoningEffort?:string|undefined; startedAt:number; rehydrated?:boolean|undefined; hint:string }
+export interface ChatStartResult { status:"running"; jobId:string; conversationId:string; model:string; modelName?:string|undefined; reasoningEffort?:string|undefined; startedAt:number; rehydrated?:boolean|undefined; hint:string; warnings?:string[]|undefined }
 export interface CompletedChatResult extends ChatResult { status:"completed"; jobId:string; rehydrated?:boolean|undefined }
-export interface PendingChatResult { status:"pending"; jobId:string; conversationId:string; model:string; reasoningEffort?:string|undefined; startedAt:number; elapsedMs:number; rehydrated?:boolean|undefined; hint:string }
+export interface PendingChatResult { status:"pending"; jobId:string; conversationId:string; model:string; modelName?:string|undefined; reasoningEffort?:string|undefined; startedAt:number; elapsedMs:number; rehydrated?:boolean|undefined; hint:string; warnings?:string[]|undefined }
 export type ChatWaitResult = CompletedChatResult|PendingChatResult;
 export interface ChatJobLookup { status:ChatJobStatus; source:"job"|"thread"; conversationId:string; jobId?:string|undefined; model?:string|undefined; reasoningEffort?:string|undefined; text?:string|undefined; error?:string|undefined; usage?:ChatJobUsage|undefined; startedAt?:number|undefined; finishedAt?:number|undefined; elapsedMs?:number|undefined; hint?:string|undefined }
 

@@ -461,41 +461,48 @@ connectはこの2 commitの間で実行する。connect、visibility commit、lo
 
 Personal Agent moduleには`workflowId`がないため、`getMcpOAuthStatus`は使用できない。statusは`syncRecordValues`で`workflow_module`と参照先`external_connection`を読み、space-view linkageと合わせて判定する。pointerなしは`needs_setup`、external connectionの`authenticated:false`は`needs_reauth`、liveかつlinkedでそれ以外は`connected`、deadまたはunlinkedは`disconnected`となる。2026-08-07のcompiled-stdio live lifecycleではNotion-only update/reconnectとcleanupを含めて検証し、67/67 testsが成功した。
 
-## モデルレジストリ
+## 利用可能モデル（`getAvailableModels`）
 
-Web バンドルの chunk に、全モデルの定義がインラインで含まれます（ログイン不要）。
+`POST /api/v3/getAvailableModels` に認証 header と `{ "spaceId": "<workspace-uuid>" }` を送り、
+workspace が提供する一覧を取得する。空の body は HTTP 400。チャットを作成せず、チャットのクレジットを消費しない。
+この一覧を `src/models.ts` の解決・検証に使用する。Web bundle のグローバルな model registry は
+調査資料であり、契約・地域・surface ごとの利用可否を示さないため、固定カタログとしては使用しない。
 
-```
-{ notionName: "oatmeal-cookie", modelFamily: "openai", maxOutputTokens: 128000,
-  maxContextTokens: 400000, isProductionCallable: true, isProductionPickable: true,
-  isThinkingEnabled: true, pricing: {...},
-  displayName: "GPT 5.2", displayNameWithProvider: "GPT 5.2", displayGroup: "fast" }
-```
+各 `models[]` entry の主要 field:
 
-179 エントリ中 74 が `isProductionCallable`。`src/models.ts` はこれを取り込んだカタログです。
+- `model`（内部 codename）、`modelMessage`（表示名）、`modelFamily`、`modelProvider`、`displayGroup`
+- `modelConfiguration.supportedReasoningEfforts` と `defaultReasoningEffort`
+- `workflow` / `agentService` / `customAgent` の `finalModelName`、`beta`、`isDisabled`、`disabledReason`
+- model 全体の `isDisabled` / `disabledReason`、`restrictedForPersonalAgent`、`restrictedForCustomAgent`
+- `billsNotionCredits`、`supportsTokenSharing`、`isApproachingRateLimit`、`modelCardAttributes`
+
+response 全体には `modelSelectionRestricted`、`restrictedAccessModelsInPickerConfig`、
+`restrictedGeoPolicyApplied` なども含まれる。未知 field は無視し、codename がない entry は読み飛ばす。
+chat は workflow、Agent Service は agentService（なければ workflow）を選ぶ。
+利用停止判定は `surface.isDisabled ?? model.isDisabled` とし、設定された制限を回避しない。
 
 ## モデルと推論レベル（`reasoningEffort`）
 
-Web clientはworkflow transcriptの`config` stepと、Agent Serviceの`createAgentThread` /
-`sendEventToAgentThread` bodyのいずれでも、`model`と並んで次の2 fieldを送る。
+workflow transcript の `config` step と、Agent Service の `createAgentThread` /
+`sendEventToAgentThread` body にモデルと effort を設定する。
 
-- `modelFromUser: true` — これがないとUIは選択を`自動`のまま扱い、threadにモデルが永続化されない。
-- `reasoningEffort` — `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` のliteral。
-  省略時はfield自体を送らない。`debugOverrides`はmodelのみでeffortを含めない。
+- workflow の `model` は `workflow.finalModelName`、`modelFromUser` は `true`。
+- Agent Service の `model` は `(agentService ?? workflow).finalModelName`。
+- effort の有効値と既定値はライブ entry の `modelConfiguration` が情報源であり、固定 literal/enum ではない。
+- 優先順位は明示 effort → モデル名の effort suffix → 対応する会話の保存 effort → API の既定（なければ最初の supported）。
+- 明示した非対応 effort はエラー。会話からの非対応 effort は既定へ戻し warning。
+- supported effort が空なら field を省略する。effort があるモデルの既定値は明示的に送る。
+- `debugOverrides` は model のみで、effort は含めない。
 
-effortはmodel registryの`modelConfiguration`を持つmodelだけが受け付ける。
+2026-09-30 の取得例: `albuquerque-quinn`（Opus 5.5）は
+`["low", "medium", "high", "xhigh", "max"]`、既定 `"medium"`。
+`oval-kumquat-medium`（GPT-5.4）は `["medium", "high"]`、既定 `"medium"`。
+これらは実測例であり、workspace や API の更新により変化する。
 
-| `supportedReasoningEfforts` | 対象model | `defaultReasoningEffort` |
-|---|---|---|
-| `medium`, `high` | `oatmeal-cookie*`, `oval-kumquat*`, `opal-quince*` | model名のtier（無印/`-medium`は`medium`、`-high`は`high`） |
-| `low`, `medium`, `high`, `max` | `almond-croissant-*`, `ambrosia-tart-*`, `acai-budino-high`, `agave-flan` | model名のtier |
-| `none`, `low`, `medium`, `high`, `xhigh`, `max` | `orange-mousse`, `orchid-muffin`, `olive-jellyroll` | `medium` |
-| `low`, `medium`, `high` | `vertex-gemini-3.5-flash`, `grapefruit-zeppole` | `low` / `medium` |
-
-実機確認では`oval-kumquat-medium` + `reasoningEffort:"high"`を送信した後、
-`syncRecordValuesMain`で取得したthread_messageのconfigに
-`{model:"oval-kumquat-medium", modelFromUser:true, reasoningEffort:"high"}`が保存され、
-UIの推論レベルボタンが「現在高い」、modelボタンが「GPT-5.4」になることを確認した。
+以前の実機検証では `oval-kumquat-medium` + `reasoningEffort:"high"` 送信後に、
+thread_message の config に `{model:"oval-kumquat-medium", modelFromUser:true, reasoningEffort:"high"}`
+が保存され、UI に「現在高い」と「GPT-5.4」が表示されることを確認した。
+今回の変更の live 検証は無料のモデル一覧取得だけで行い、新しいチャットは作成しない。
 
 ## Attachment lifecycle invariants
 

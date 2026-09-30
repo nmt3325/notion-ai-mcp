@@ -448,3 +448,21 @@ Live verification with a personal account, one workspace holding credits and one
 
 したがってthread削除は専用endpointではなく、`saveTransactionsFanout`によるrecord-offで動作することを
 live backend上でも確認済み。確認用threadは同じ処理で削除され、cookie/account JSONはrepositoryへ保存していない。
+
+
+## 2026-09-30 ライブモデル一覧・effort 解決
+
+固定モデル registry からの生成を廃止し、workspace の `POST /api/v3/getAvailableModels` を
+モデル名・surface の `finalModelName`・supported/default reasoning effort の情報源にした。
+
+- Linux 環境の既存認証情報で `NotionClient.listModels({refresh:true})` を実行し、`source:"live"` を確認。
+- 取得した一覧は38モデル、うち `notion_ai_chat` の workflow surface で利用可能なものは30モデル。
+- `albuquerque-quinn`（Opus 5.5）の effort は `low, medium, high, xhigh, max`、既定 `medium`。
+- 既定モデルは `almond-croissant-low`（Sonnet 4.6）、effort `low` と解決された。
+- この live 検証はモデル一覧取得のみ。チャットの作成、Continue、クレジット消費を伴う検証は行っていない。
+- 認証情報・生の Cookie・probe は repository に保存しない。
+
+型チェック、全287 tests、build、compiled stdio command smoke、`git diff --check` が成功。
+新しい tests は partial/future schema、表示名/別名/effort suffix、transport 別 availability、
+会話のモデル維持、effort 優先順位、非対応値の拒否、TTL/同時取得/stale fallback、
+未検証互換モードの warning、`list_models` の text/structured output を含む。

@@ -6,7 +6,7 @@ import type { FinalStepShape, AccountContext, AgentUploadedFile, AttachmentDownl
 import type { NotionConfig } from "./config.js";
 import { WorkspaceManager } from "./workspace-manager.js";
 import { ChatStateStore } from "./chat-jobs.js";
-import { normalizeModelName, normalizeReasoningEffort } from "./models.js";
+import { describeCatalog, envAliases, legacyPlan, ModelCatalogStore, parseAvailableModels, planModel, type CatalogLoad, type ModelCatalog, type ModelListing, type ModelPlan, type ModelPlanInput, type ModelTransport, type PlanOptions } from "./models.js";
 import { McpConnectionManager } from "./mcp-connections.js";
 import { prepareAttachmentInput, readResponseBuffer, writeAttachmentOutput, type AttachmentInput, type PreparedAttachment } from "./attachments.js";
 import { agentTranscriptError, applyAgentTranscriptPatches, createAgentTranscriptState, isAgentTranscriptTurnComplete, latestAgentTranscriptText } from "./agent-transcript.js";
@@ -43,6 +43,8 @@ interface ChatOptions {
   _userStepId?: string | undefined;
   /** Internal native Continue identity; never appends a user message. */
   _continueTraceId?: string | undefined;
+  /** Internal: the model and effort startChat already resolved, so the background job does not resolve them again. */
+  _modelPlan?: ModelPlan | undefined;
   _signal?: AbortSignal | undefined;
 }
 
@@ -427,12 +429,14 @@ export class NotionClient {
   private readonly pendingContinuations = new Map<string, { traceId: string; jobId: string }>();
   private readonly continuationChecks = new Map<string, Promise<{ acceptedAt: number }>>();
   private readonly transcriptUploads = new Map<string, TranscriptUploadRecord>();
+  private readonly modelCatalogs: ModelCatalogStore;
   private workspaceManager: WorkspaceManager | null = null;
   private mcpManager: McpConnectionManager | null = null;
 
   constructor(private readonly config: NotionConfig, private readonly fetchImpl: typeof fetch = fetch) {
     // Sessions and jobs are cached on disk, so a restart cannot orphan a conversation that is still generating.
     this.state = new ChatStateStore(config.stateFilePath ?? null);
+    this.modelCatalogs = new ModelCatalogStore(config.modelCatalog?.ttlMs ?? 300_000);
     for (const session of this.state.sessions()) this.rememberSession(session);
     if (config.account.tokenV2) {
       const sharedAccount = config.account as AccountContext;
@@ -558,6 +562,12 @@ export class NotionClient {
         if (!recovered.contextId) recovered.contextId = stepId;
       } else if (type === "updated-config") {
         recovered.updatedConfigIds.push(stepId);
+        // A model or effort picked later in the conversation is recorded on an updated-config step; the latest wins.
+        const value = object(step.value);
+        const switchedModel = asString(value.model);
+        const switchedEffort = asString(value.reasoningEffort);
+        if (switchedModel) recovered.model = switchedModel;
+        if (switchedEffort) recovered.reasoningEffort = switchedEffort;
       }
     }
     return recovered;
@@ -804,7 +814,8 @@ export class NotionClient {
         if (attempt <= maxRetries) {
           await this.workspaceManager.handleLimitReached();
           this.accountPromise = null;
-          return this.chat({ ...options, _retryCount: attempt });
+          // The retry runs in another workspace, whose model list can differ.
+          return this.chat({ ...options, _retryCount: attempt, _modelPlan: undefined });
         }
       }
       throw error;
@@ -818,15 +829,18 @@ export class NotionClient {
    * conversation ID is handed out before the answer exists and the answer is kept in a job for later.
    */
   async startChat(options: ChatOptions): Promise<ChatStartResult> {
-    const model = normalizeModelName(options.model, this.config.defaultModel);
-    const reasoningEffort = normalizeReasoningEffort(model, options.reasoningEffort);
     const requested = options.conversationId?.trim() ?? "";
     let rehydrated = false;
     if (requested && !this.sessions.get(requested)) {
-      const restored = await this.rehydrateSession(requested, model, reasoningEffort);
+      const restored = await this.rehydrateSession(requested);
       if (!restored) throw new Error(`Conversation ${requested} was not found in this workspace, so it cannot be continued. Start a new chat without conversationId, or switch to the workspace that owns it.`);
       rehydrated = true;
     }
+    options._signal?.throwIfAborted();
+    // Resolved before the job exists, so an unknown model or an unsupported effort fails this call
+    // instead of a background job.
+    const plan = await this.chatModelPlan(options);
+    const { model, reasoningEffort } = plan;
     options._signal?.throwIfAborted();
     const conversationId = requested || randomUUID();
     const job = this.state.createJob({
@@ -834,12 +848,14 @@ export class NotionClient {
       turn: (this.sessions.get(conversationId)?.turnCount ?? 0) + 1,
       transport: normalizedFileIds(options.fileIds).length > 0 ? "agent_service" : "inference_transcript"
     });
-    void this.runChatJob(job.jobId, requested ? { ...options } : { ...options, newConversationId: conversationId });
+    const jobOptions: ChatOptions = { ...options, _modelPlan: plan };
+    void this.runChatJob(job.jobId, requested ? jobOptions : { ...jobOptions, newConversationId: conversationId });
     return {
-      status: "running", jobId: job.jobId, conversationId, model,
+      status: "running", jobId: job.jobId, conversationId, model, ...(plan.modelName ? { modelName: plan.modelName } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}), startedAt: job.startedAt,
       ...(rehydrated ? { rehydrated: true } : {}),
-      hint: `Notion AI is generating in the background. Collect the answer with get_chat_result (jobId ${job.jobId} or conversationId ${conversationId}).`
+      hint: `Notion AI is generating in the background. Collect the answer with get_chat_result (jobId ${job.jobId} or conversationId ${conversationId}).`,
+      ...(plan.warnings.length > 0 ? { warnings: plan.warnings } : {})
     };
   }
 
@@ -1063,21 +1079,27 @@ export class NotionClient {
     const job = await this.state.wait(started.jobId, Math.max(0, waitMs ?? this.config.chatWaitMs ?? DEFAULT_CHAT_WAIT_MS));
     if (job?.status === "failed") throw new Error(job.error || "Notion AI chat failed");
     if (job?.status === "completed") {
+      // The name and warnings describe the planned model; a credit retry in another workspace can change it.
+      const planned = job.model === started.model;
       return {
         status: "completed", jobId: job.jobId, conversationId: job.conversationId, text: job.text ?? "", model: job.model,
+        ...(planned && started.modelName ? { modelName: started.modelName } : {}),
         ...(job.reasoningEffort ? { reasoningEffort: job.reasoningEffort } : {}),
         usage: job.usage ?? { inputTokens: 0, outputTokens: 0 },
-        ...(started.rehydrated ? { rehydrated: true } : {})
+        ...(started.rehydrated ? { rehydrated: true } : {}),
+        ...(planned && started.warnings ? { warnings: started.warnings } : {})
       };
     }
     const conversationId = job?.conversationId ?? started.conversationId;
     const elapsedMs = Date.now() - started.startedAt;
     return {
       status: "pending", jobId: started.jobId, conversationId, model: started.model,
+      ...(started.modelName ? { modelName: started.modelName } : {}),
       ...(started.reasoningEffort ? { reasoningEffort: started.reasoningEffort } : {}),
       startedAt: started.startedAt, elapsedMs,
       ...(started.rehydrated ? { rehydrated: true } : {}),
-      hint: `Still generating after ${Math.round(elapsedMs / 1000)}s. Nothing is lost: call get_chat_result with jobId ${started.jobId} (or conversationId ${conversationId}) to collect the answer.`
+      hint: `Still generating after ${Math.round(elapsedMs / 1000)}s. Nothing is lost: call get_chat_result with jobId ${started.jobId} (or conversationId ${conversationId}) to collect the answer.`,
+      ...(started.warnings ? { warnings: started.warnings } : {})
     };
   }
 
@@ -1086,8 +1108,95 @@ export class NotionClient {
   chatStatePath(): string | null { return this.state.statePath(); }
 
   /** Capability defaults applied when notion_ai_chat omits webSearch/workspaceSearch/readOnly. */
-  chatDefaults(): { webSearch: boolean; workspaceSearch: boolean; readOnly: boolean } {
-    return { webSearch: this.config.defaultWebSearch, workspaceSearch: this.config.defaultWorkspaceSearch, readOnly: this.config.defaultReadOnly };
+  chatDefaults(): { webSearch: boolean; workspaceSearch: boolean; readOnly: boolean; model: string } {
+    return { webSearch: this.config.defaultWebSearch, workspaceSearch: this.config.defaultWorkspaceSearch, readOnly: this.config.defaultReadOnly, model: this.config.defaultModel };
+  }
+
+  /** POST getAvailableModels: the per-workspace list behind the model picker in the web client. */
+  private async fetchModelCatalog(account: AccountContext, spaceId: string): Promise<ModelCatalog> {
+    const response = await this.fetchImpl(`${this.config.apiBase}/getAvailableModels`, {
+      method: "POST", headers: this.headers({ ...account, spaceId }, false), body: JSON.stringify({ spaceId }),
+      signal: AbortSignal.timeout(Math.min(this.config.requestTimeoutMs, 20_000))
+    });
+    if (!response.ok) {
+      const errorBody = (await response.text()).slice(0, 300);
+      throw new Error(`getAvailableModels returned HTTP ${response.status}: ${errorBody}`);
+    }
+    return parseAvailableModels(await response.json(), spaceId);
+  }
+
+  /** The model list of a workspace (the current one by default), cached per account and workspace. */
+  private async modelCatalog(options: { spaceId?: string | undefined; refresh?: boolean | undefined } = {}): Promise<CatalogLoad> {
+    const account = await this.account();
+    const spaceId = options.spaceId?.trim() || account.spaceId;
+    if (!spaceId) throw new Error("No workspace is selected, so the model list cannot be loaded");
+    return this.modelCatalogs.get(`${account.userId}:${spaceId}`, () => this.fetchModelCatalog(account, spaceId), { refresh: options.refresh });
+  }
+
+  /** The live model list for list_models. It only reads, so it works with NOTION_MODEL_CATALOG off too. */
+  async listModels(options: { spaceId?: string | undefined; refresh?: boolean | undefined } = {}): Promise<ModelListing> {
+    return describeCatalog(await this.modelCatalog(options), this.modelPlanOptions());
+  }
+
+  private modelPlanOptions(): PlanOptions {
+    return { defaultModel: this.config.defaultModel, allowUnlisted: this.config.modelCatalog?.allowUnlisted === true, aliases: envAliases() };
+  }
+
+  /**
+   * Checks the model and effort of one turn against the live list. With NOTION_MODEL_CATALOG off, or
+   * when the list cannot be fetched and nothing is cached, the names are sent as typed (legacy behaviour).
+   */
+  private async planChatModel(input: ModelPlanInput): Promise<ModelPlan> {
+    const options = this.modelPlanOptions();
+    if (this.config.modelCatalog?.enabled !== true) {
+      const plan = legacyPlan(input, options);
+      if (!this.config.modelCatalog) return plan; // Programmatic legacy clients predate catalog configuration.
+      return { ...plan, warnings: ["Live model validation is disabled (NOTION_MODEL_CATALOG=0); model and reasoningEffort are sent without validation.", ...plan.warnings] };
+    }
+    let load: CatalogLoad;
+    try {
+      load = await this.modelCatalog();
+    } catch (error) {
+      const plan = legacyPlan(input, options);
+      const detail = error instanceof Error ? error.message : String(error);
+      return { ...plan, warnings: [`getAvailableModels failed (${detail}), so model ${plan.model}${plan.reasoningEffort ? ` and reasoningEffort ${plan.reasoningEffort}` : ""} were sent without validation.`, ...plan.warnings] };
+    }
+    const plan = planModel(load.catalog, input, options);
+    if (load.source !== "stale") return plan;
+    return { ...plan, warnings: [`getAvailableModels failed (${load.error ?? "unknown error"}); the model was checked against the list fetched at ${new Date(load.catalog.fetchedAt).toISOString()}.`, ...plan.warnings] };
+  }
+
+  /** The session a turn continues: the named conversation, or the one an inference-transcript upload opened. */
+  private chatSessionFor(options: ChatOptions): ChatSession | undefined {
+    const conversationId = options.conversationId?.trim();
+    if (conversationId) return this.sessions.get(conversationId);
+    for (const id of normalizedFileIds(options.fileIds)) {
+      const upload = this.transcriptUploads.get(id);
+      if (upload) return this.sessions.get(upload.threadId);
+    }
+    return undefined;
+  }
+
+  /** Chats go through runInferenceTranscript unless Agent Service fileIds (not transcript handles) are attached. */
+  private chatTransport(options: ChatOptions, session: ChatSession | undefined): ModelTransport {
+    if (session?.transport) return session.transport;
+    const fileIds = normalizedFileIds(options.fileIds);
+    return fileIds.every((id) => this.transcriptUploads.has(id) || id.startsWith(TRANSCRIPT_FILE_HANDLE_PREFIX)) ? "inference_transcript" : "agent_service";
+  }
+
+  /** The model and reasoning effort for one turn of a conversation. */
+  private async chatModelPlan(options: ChatOptions, known?: ChatSession | undefined): Promise<ModelPlan> {
+    const session = known ?? this.chatSessionFor(options);
+    if (options._continueTraceId) {
+      // Native Continue resumes the stopped turn exactly as it was configured, so nothing is re-resolved.
+      const model = session?.model || options.model?.trim() || legacyPlan({ transport: "inference_transcript" }, this.modelPlanOptions()).model;
+      return { model, ...(session?.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}), warnings: [] };
+    }
+    return this.planChatModel({
+      requestedModel: options.model, requestedEffort: options.reasoningEffort,
+      inheritedModel: session?.model, inheritedEffort: session?.reasoningEffort,
+      transport: this.chatTransport(options, session)
+    });
   }
 
   chatStateError(): string | null { return this.state.persistError(); }
@@ -1141,7 +1250,7 @@ export class NotionClient {
    * Without this, a conversation whose call timed out (or that was started before a restart) could
    * never be continued, because the session lived only in the memory of the previous process.
    */
-  private async rehydrateSession(conversationId: string, model: string, reasoningEffort: string | undefined, modelRequested = false): Promise<ChatSession | null> {
+  private async rehydrateSession(conversationId: string): Promise<ChatSession | null> {
     if (this.config.allowSessionRehydrate === false) return null;
     const found = await this.findThread(conversationId, 20).catch(() => null);
     if (!found) return null;
@@ -1152,14 +1261,12 @@ export class NotionClient {
     if (!stored?.configId || !stored.contextId) {
       throw new Error(`Conversation ${conversationId} cannot be resumed because Notion no longer exposes the config and context steps it was started with. Start a new chat without conversationId.`);
     }
-    const resumedModel = modelRequested ? model : stored.model ?? model;
-    // Only inherit the stored effort when the stored model comes with it; mixing a caller-picked
-    // model with a foreign effort would fail validation.
-    const resumedEffort = reasoningEffort ?? (resumedModel === stored.model ? stored.reasoningEffort : undefined);
     const session: ChatSession = {
       threadId: conversationId, configId: stored.configId, contextId: stored.contextId,
       originalDatetime: new Date(asNumber(found.thread.created_time) ?? Date.now()).toISOString(),
-      model: resumedModel, ...(resumedEffort ? { reasoningEffort: resumedEffort } : {}), updatedConfigIds: stored.updatedConfigIds,
+      // The model and effort Notion recorded on the thread: the next turn keeps them unless the caller
+      // picks others. An empty model means NOTION_DEFAULT_MODEL.
+      model: stored.model ?? "", ...(stored.reasoningEffort ? { reasoningEffort: stored.reasoningEffort } : {}), updatedConfigIds: stored.updatedConfigIds,
       // A non-zero turn count keeps the request a partial transcript, so Notion appends to the existing thread.
       turnCount: Math.max(1, messageIds.length), transport: "inference_transcript", rehydrated: true
     };
@@ -1175,8 +1282,6 @@ export class NotionClient {
   private async _chatInternal(options: ChatOptions): Promise<ChatResult> {
     const account = await this.account();
     if (options._continueTraceId && (!options.conversationId || options.fileIds?.length || options.attachments?.length)) throw new Error("Native Continue requires an existing thread without new attachments");
-    const model = normalizeModelName(options.model, this.config.defaultModel);
-    const requestedEffort = normalizeReasoningEffort(model, options.reasoningEffort);
     const fileIds = normalizedFileIds(options.fileIds);
     const resolvedTranscriptFiles = fileIds.map((id) => this.transcriptUploads.get(id));
     const transcriptFileCount = resolvedTranscriptFiles.filter((file): file is TranscriptUploadRecord => file !== undefined).length;
@@ -1189,16 +1294,16 @@ export class NotionClient {
     const transcriptThreadIds = new Set(transcriptFiles.map((file) => file.threadId));
     if (transcriptThreadIds.size > 1) throw new Error("Inference-transcript attachments from different conversations cannot be mixed");
 
-    let session: ChatSession;
+    let session: ChatSession | undefined;
     if (options.conversationId) {
       const cached = this.sessions.get(options.conversationId);
       // A session whose first turn never finished locally (timed-out stream, answer recovered from the
       // thread) still looks brand new, and sending it as-is would ask Notion to create the thread twice.
       const stale = cached !== undefined && cached.turnCount === 0 && cached.transport === "inference_transcript" && fileIds.length === 0;
       const refreshed = stale
-        ? await this.rehydrateSession(options.conversationId, model, requestedEffort, Boolean(options.model)).catch(() => null)
+        ? await this.rehydrateSession(options.conversationId).catch(() => null)
         : null;
-      const known = refreshed ?? cached ?? await this.rehydrateSession(options.conversationId, model, requestedEffort, Boolean(options.model));
+      const known = refreshed ?? cached ?? await this.rehydrateSession(options.conversationId);
       if (!known) throw new Error(`Conversation ${options.conversationId} was not found in this workspace, so it cannot be continued. Start a new chat without conversationId, or switch to the workspace that owns it.`);
       session = known;
       if (transcriptFiles.length > 0 && transcriptFiles[0]?.threadId !== session.threadId) throw new Error("Attachment handle belongs to another conversation");
@@ -1207,22 +1312,23 @@ export class NotionClient {
       const known = this.sessions.get(threadId);
       if (!known || known.transport !== "inference_transcript") throw new Error("Inference-transcript attachment session is no longer active; upload it again");
       session = known;
-    } else {
-      session = {
-        threadId: options.newConversationId || randomUUID(), configId: randomUUID(), contextId: randomUUID(), originalDatetime: new Date().toISOString(),
-        model, updatedConfigIds: [], turnCount: 0,
-        ...(requestedEffort ? { reasoningEffort: requestedEffort } : {}),
-        transport: fileIds.length > 0 ? "agent_service" : "inference_transcript"
-      };
     }
-    const reasoningEffort = requestedEffort ?? session.reasoningEffort;
-    // A rehydrated session carries the model Notion recorded on the thread, so a resumed turn keeps
-    // answering with that model unless the caller names a different one.
-    const effectiveModel = session.rehydrated === true && !options.model ? session.model || model : model;
+    // A conversation keeps its model and effort unless the caller picks others (a rehydrated one keeps
+    // what Notion recorded on the thread); either way both are checked against getAvailableModels.
+    const plan = options._modelPlan ?? await this.chatModelPlan(options, session);
+    session ??= {
+      threadId: options.newConversationId || randomUUID(), configId: randomUUID(), contextId: randomUUID(), originalDatetime: new Date().toISOString(),
+      model: plan.model, updatedConfigIds: [], turnCount: 0,
+      ...(plan.reasoningEffort ? { reasoningEffort: plan.reasoningEffort } : {}),
+      transport: fileIds.length > 0 ? "agent_service" : "inference_transcript"
+    };
+    const effectiveModel = plan.model;
+    const reasoningEffort = plan.reasoningEffort;
+    const planDetails = { ...(plan.modelName ? { modelName: plan.modelName } : {}), ...(plan.warnings.length > 0 ? { warnings: plan.warnings } : {}) };
     if (session.transport === "agent_service") {
       if (options._continueTraceId) throw new Error("Native Continue is only supported for inference-transcript conversations");
       if (transcriptFiles.length > 0) throw new Error("Inference-transcript attachment handles cannot be used in an Agent Service conversation");
-      return this.agentServiceChat(account, effectiveModel, session, options, fileIds, reasoningEffort);
+      return { ...await this.agentServiceChat(account, effectiveModel, session, options, fileIds, reasoningEffort), ...planDetails };
     }
     if (fileIds.length > 0 && transcriptFiles.length === 0) throw new Error("Uploaded file IDs cannot be added to a legacy chat unless they are inference-transcript attachment handles. Start a new chat without conversationId.");
     if (transcriptFiles.some((file) => file.usedInChat)) throw new Error("An inference-transcript attachment handle can only be attached once");
@@ -1243,7 +1349,7 @@ export class NotionClient {
     if (!parsed.text.trim()) throw new Error(emptyAnswerMessage(account.spaceId, session, parsed.eventTypes));
     for (const file of transcriptFiles) file.usedInChat = true;
     session.turnCount += 1; session.updatedConfigIds.push(randomUUID()); session.model = effectiveModel; session.reasoningEffort = reasoningEffort; this.rememberSession(session);
-    return { conversationId: session.threadId, text: parsed.text, model: effectiveModel, ...(reasoningEffort ? { reasoningEffort } : {}), usage: { inputTokens: parsed.inputTokens, outputTokens: parsed.outputTokens } };
+    return { conversationId: session.threadId, text: parsed.text, model: effectiveModel, ...(reasoningEffort ? { reasoningEffort } : {}), usage: { inputTokens: parsed.inputTokens, outputTokens: parsed.outputTokens }, ...planDetails };
   }
 
   private async signedRequest(url: string, init: RequestInit, label: string): Promise<Response> {
