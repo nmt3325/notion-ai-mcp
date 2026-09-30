@@ -31,6 +31,8 @@ type Mode = "seed" | "locked" | "http-error" | "accepted" | "pending";
 async function fixture() {
   let now = BASE,
     mode: Mode = "seed",
+    deniedReads = false,
+    deniedMessageReads = false,
     runs = 0,
     threadId = "",
     lastStep: any;
@@ -97,10 +99,11 @@ async function fixture() {
       const ids: string[] = [];
       for (const req of body.requests) {
         const { table, id } = req.pointer;
-        if (table === "thread") maps.thread[id] = { value: thread };
+        if (table === "thread") maps.thread[id] = { value: deniedReads ? { role: "none" } : thread };
         else {
           ids.push(id);
-          if (records[id]) maps.thread_message[id] = { value: records[id] };
+          if (deniedMessageReads) maps.thread_message[id] = { value: { role: "none" } };
+          else if (records[id]) maps.thread_message[id] = { value: records[id] };
         }
       }
       if (ids.length) readBatches.push(ids);
@@ -129,6 +132,8 @@ async function fixture() {
     readBatches,
     id: initial.conversationId,
     runs: () => runs,
+    readDenied: (value: boolean) => { deniedReads = value; },
+    messageReadDenied: (value: boolean) => { deniedMessageReads = value; },
     mode: (m: Mode) => {
       mode = m;
     },
@@ -301,3 +306,48 @@ test("final-step shapes distinguish commentary plus tool-use from an actual fina
     f.cleanup();
   }
 });
+
+
+test("production watchdog surfaces role-none reads without nudging or spending its budget", async () => {
+  const f = await fixture();
+  const supervisor = createKeepAwakeSupervisor(f.client);
+  try {
+    const watch = await supervisor.start({ conversationId: f.id });
+    f.readDenied(true);
+    f.advance();
+    const blocked = await supervisor.tick(watch.keepAliveId);
+    assert.equal(blocked.decision.action, "wait");
+    assert.equal(blocked.decision.reason, "signals_unavailable");
+    assert.match(blocked.keepAlive?.lastError ?? "", /role "none".*token_v2.*restart/i);
+    assert.equal(blocked.keepAlive?.nudgeCount, 0);
+    assert.equal(blocked.keepAlive?.continueCount ?? 0, 0);
+    assert.equal(f.runs(), 0);
+    f.readDenied(false);
+    f.mode("accepted");
+    const recovered = await supervisor.tick(watch.keepAliveId);
+    assert.equal(recovered.keepAlive?.nudgeCount, 1);
+    assert.equal(recovered.keepAlive?.lastError, undefined);
+  } finally { supervisor.stopAll(); f.cleanup(); }
+});
+
+for (const target of ["thread", "receipt message"] as const) {
+  test(`role-none ${target} reads retain a failed nudge identity until absence is verified`, async () => {
+    const f = await fixture();
+    try {
+      f.mode("locked");
+      if (target === "thread") f.readDenied(true);
+      else f.messageReadDenied(true);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await assert.rejects(f.client.sendChatNudge(f.id, "resume", undefined, 2), /not yet confirmed.*token_v2/i);
+      }
+      assert.equal(f.runs(), 1);
+      f.readDenied(false);
+      f.messageReadDenied(false);
+      await assert.rejects(f.client.sendChatNudge(f.id, "resume", undefined, 50), /no events|no answer text/);
+      assert.equal(f.runs(), 1);
+      f.mode("accepted");
+      await f.client.sendChatNudge(f.id, "resume", undefined, 50);
+      assert.equal(f.runs(), 2);
+    } finally { f.cleanup(); }
+  });
+}

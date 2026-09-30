@@ -43,6 +43,38 @@ function ndjsonResponse(lines: unknown[]): Response {
   });
 }
 
+for (const [label, stub] of [
+  ["bare", { role: "none" }],
+  ["value wrapper", { value: { role: "none" } }],
+  ["double wrapper", { value: { value: { role: "none" } } }],
+  ["denied wrapper with empty value", { role: "none", value: {} }]
+] as const) {
+  test(`permission-denied ${label} records are not usable watchdog or Continue evidence`, async () => {
+    const fake: typeof fetch = async (input, init) => {
+      assert.equal(String(input).split("/").at(-1), "syncRecordValuesMain");
+      const body = JSON.parse(String(init?.body));
+      const recordMap: Record<string, Record<string, unknown>> = {};
+      for (const { pointer: { table, id } } of body.requests) {
+        recordMap[table] ??= {};
+        recordMap[table]![id] = stub;
+      }
+      return new Response(JSON.stringify({ recordMap }), { headers: { "content-type": "application/json" } });
+    };
+    const client = new NotionClient({ ...config, stateFilePath: undefined }, fake);
+    await assert.rejects(client.threadSignals("unreadable-thread"), /unreadable.*role "none".*token_v2.*restart/i);
+    await assert.rejects(client.finalStepShape("unreadable-step"), /unreadable.*role "none".*token_v2.*restart/i);
+    await assert.rejects(client.nativeContinuationState("unreadable-thread"), /unreadable.*role "none".*token_v2.*restart/i);
+  });
+}
+
+test("absent records retain their not-found/null semantics rather than implying permission denial", async () => {
+  const fake: typeof fetch = async () => new Response(JSON.stringify({ recordMap: {} }));
+  const client = new NotionClient({ ...config, stateFilePath: undefined }, fake);
+  await assert.rejects(client.threadSignals("missing-thread"), /was not found/);
+  assert.equal(await client.finalStepShape("missing-step"), null);
+  assert.equal(await client.nativeContinuationState("missing-thread"), null);
+});
+
 test("Notion rich text is converted to Markdown", () => {
   assert.equal(
     notionRichTextToMarkdown([["bold", [["b"]]], [" and "], ["link", [["a", "https://example.com"]]]]),
