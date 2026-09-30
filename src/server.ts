@@ -4,7 +4,7 @@ import { z } from "zod";
 import { loadConfig } from "./config.js";
 import { NotionClient } from "./notion-client.js";
 import type { McpAuth } from "./mcp-connections.js";
-import { BUILTIN_ALIASES, listModels, modelReasoningEfforts, REASONING_EFFORTS } from "./models.js";
+import { formatModelListing } from "./models.js";
 import { KeepAliveStore, KeepAwakeSupervisor } from "./keep-awake.js";
 
 export const SERVER_VERSION = "0.8.0";
@@ -133,24 +133,18 @@ export function createServer(client: NotionClient, shared?: { keepAwake?: KeepAw
   const keepAwakeSettings = client.keepAwakeDefaults();
   const keepAwake = shared?.keepAwake ?? createKeepAwakeSupervisor(client);
   const seconds = (value: number): number => Math.round(value / 1000);
-  const canonicalModelIds = new Set(Object.values(BUILTIN_ALIASES));
-  const modelHint = listModels().filter((entry) => entry.pickable || canonicalModelIds.has(entry.modelId)).map((entry) => `${entry.modelId} (${entry.aliases.join(", ")})`).join("; ");
-  const effortHint = listModels()
-    .filter((entry) => entry.pickable && modelReasoningEfforts(entry.modelId) !== undefined)
-    .map((entry) => {
-      const config = modelReasoningEfforts(entry.modelId);
-      return config ? `${entry.modelId}: ${config.supported.join("|")} (default ${config.default})` : entry.modelId;
-    })
-    .join("; ");
+  // Models and efforts are workspace-specific and change without a release, so the schema names no
+  // list: callers read it with list_models. (Test doubles may omit defaults.model.)
+  const defaultModelNote = defaults.model ? ` (currently ${defaults.model})` : "";
 
   server.registerTool("notion_ai_chat", {
     title: "Chat with Notion AI",
-    description: "Send a prompt to Notion AI and return the fully aggregated streamed answer. Native step-limit Continue checkpoints are resumed automatically even without keep_me_awake, up to the configured global Continue budget. Waits up to waitSeconds (default 45s, below the ~60s point where MCP clients abandon a call) and otherwise returns status \"pending\" with jobId and conversationId so get_chat_result can collect the answer instead of losing it. Accepts friendly model names as well as internal IDs.",
+    description: "Send a prompt to Notion AI and return the fully aggregated streamed answer. Native step-limit Continue checkpoints are resumed automatically even without keep_me_awake, up to the configured global Continue budget. Waits up to waitSeconds (default 45s, below the ~60s point where MCP clients abandon a call) and otherwise returns status \"pending\" with jobId and conversationId so get_chat_result can collect the answer instead of losing it. The model and reasoningEffort are checked against the workspace's live model list from Notion (getAvailableModels, the list behind the web model picker); call list_models to see it.",
     inputSchema: {
       prompt: z.string().min(1).describe("Prompt to send to Notion AI"),
-      model: z.string().min(1).optional().describe(`Model name or internal ID. Known: ${modelHint}`),
-      reasoningEffort: z.enum(REASONING_EFFORTS).optional().describe(`Thinking effort, sent as the same reasoningEffort field the Notion web client persists. Only models with an effort picker accept it. Per model: ${effortHint}`),
-      conversationId: z.string().uuid().optional().describe("ID returned by a previous notion_ai_chat call, including one whose call timed out or ran before a restart; omit reasoningEffort to keep the effort already chosen for that conversation"),
+      model: z.string().min(1).optional().describe(`Model, resolved against this workspace's live list (call list_models): a codename such as albuquerque-quinn, a display name such as "Opus 5.5" or "GPT-5.4", either with an optional effort suffix ("opus-5.5-max", "Sonnet 4.6 (High)"), or a tier: fast, standard, thinking, default. Unknown or disabled models are rejected with suggestions. Omitted: the conversation's current model, else NOTION_DEFAULT_MODEL${defaultModelNote}.`),
+      reasoningEffort: z.string().min(1).optional().describe("Reasoning effort, sent as the reasoningEffort field the Notion web client persists. Must be one of the model's live supported efforts (list_models shows them per model with the default, e.g. low|medium|high|xhigh|max). Omitted: the effort in the model suffix, else the conversation's current effort if the model supports it, else the model's default effort. Models without an effort setting reject it."),
+      conversationId: z.string().uuid().optional().describe("ID returned by a previous notion_ai_chat call, including one whose call timed out or ran before a restart; omit model and reasoningEffort to keep the ones that conversation already uses"),
       webSearch: z.boolean().optional().describe(`Allow Notion AI web search. Omitted means NOTION_DEFAULT_WEB_SEARCH (currently ${defaults.webSearch}).`),
       workspaceSearch: z.boolean().optional().describe(`Allow Notion workspace search. Omitted means NOTION_DEFAULT_WORKSPACE_SEARCH (currently ${defaults.workspaceSearch}).`),
       readOnly: z.boolean().default(defaults.readOnly).describe(`Ask/read-only mode. false is Agent mode, which lets Notion AI edit the workspace. Default: ${defaults.readOnly} (NOTION_DEFAULT_READ_ONLY).`),
@@ -432,6 +426,19 @@ export function createServer(client: NotionClient, shared?: { keepAwake?: KeepAw
     inputSchema: {},
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async () => result(await client.listWorkspaces()));
+
+  server.registerTool("list_models", {
+    title: "List Notion AI models",
+    description: "List the models a workspace offers, live from Notion's getAvailableModels (the list behind the web model picker): codename, display name, supported reasoning efforts with the default, and whether notion_ai_chat can use each one for chats and for Agent Service file chats. Also shows what NOTION_DEFAULT_MODEL and the fast/standard/thinking tiers resolve to. Reading the list uses no AI credits.",
+    inputSchema: {
+      spaceId: z.string().uuid().optional().describe("Workspace to list; defaults to the current one"),
+      refresh: z.boolean().default(false).describe("Fetch the list again instead of using the cached copy (NOTION_MODEL_CATALOG_TTL_MS)")
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  }, async (input) => {
+    const listing = await client.listModels({ ...(input.spaceId ? { spaceId: input.spaceId } : {}), refresh: input.refresh });
+    return result(listing, formatModelListing(listing));
+  });
 
   server.registerTool("get_current_workspace", {
     title: "Get the active workspace",

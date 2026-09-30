@@ -7,9 +7,20 @@ import { DEFAULT_CONFIRM_GRACE_MS, DEFAULT_STEP_LIMIT_STEPS, DEFAULT_CONTINUE_CO
 
 import type { WebConfirmationOptions } from "./web-confirmation.js";
 
+export interface ModelCatalogConfig {
+  /** Resolve models and reasoning efforts against getAvailableModels (NOTION_MODEL_CATALOG). */
+  enabled: boolean;
+  /** How long a fetched model list is reused, per account and workspace (NOTION_MODEL_CATALOG_TTL_MS). */
+  ttlMs: number;
+  /** Send a model the live list does not contain instead of rejecting it (NOTION_ALLOW_UNLISTED_MODELS). */
+  allowUnlisted: boolean;
+}
+
 export interface NotionConfig {
   apiBase: string;
   defaultModel: string;
+  /** Live model list from getAvailableModels. Undefined keeps the legacy pass-through resolution. */
+  modelCatalog?: ModelCatalogConfig | undefined;
   requestTimeoutMs: number;
   account: Partial<AccountContext> & Pick<AccountContext, "tokenV2">;
   accountFilePath?: string|undefined;
@@ -120,6 +131,11 @@ export function loadConfig(): NotionConfig {
   return {
     apiBase: optional("NOTION_API_BASE", "https://www.notion.so/api/v3").replace(/\/$/, ""),
     defaultModel: optional("NOTION_DEFAULT_MODEL", "almond-croissant-low"),
+    modelCatalog: {
+      enabled: flag("NOTION_MODEL_CATALOG", true),
+      ttlMs: integer("NOTION_MODEL_CATALOG_TTL_MS", 300_000, 0, 86_400_000),
+      allowUnlisted: flag("NOTION_ALLOW_UNLISTED_MODELS", false)
+    },
     requestTimeoutMs: timeout,
     accountFilePath: accountPath || undefined,
     mcpRegistryPath: optional("NOTION_MCP_REGISTRY_FILE") || undefined,

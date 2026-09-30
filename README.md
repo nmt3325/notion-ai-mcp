@@ -1,11 +1,12 @@
 # Notion AI MCP Server
 
 Notion AI の非公式な内部 API を MCP サーバーとしてラップする、個人検証用の TypeScript 実装です。
-stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次の 23 ツールを利用できます。
+stdioと認証付きStreamable HTTPの両方で、Claude Code、Cursor、Notion AI 本体などから次のツールを利用できます。
 
 **チャット / 履歴**
 
 - `notion_ai_chat`: Notion AI にプロンプトを送信し、NDJSON/SSE ストリームを集約して返す（モデル・reasoningEffort 指定、添付対応）。MCP client が約60秒で呼び出しを放棄するため、既定45秒で切り上げて `jobId` 付きの `pending` を返し、生成はサーバー側で継続する
+- `list_models`: workspace が実際に提供するモデル・reasoning effort・既定値・利用制限を `getAvailableModels` から取得する（読み取り専用）
 - `get_chat_result`: 待機打ち切り後・タイムアウト後の回答を job または thread 本文から回収する
 - `list_chat_jobs`: バックグラウンドで走らせた chat job の状態・conversationId を一覧する
 - `keep_me_awake`: 長いタスクの途中で止まったターンを検知して継続を促す短いメッセージを自動送信する
@@ -90,7 +91,10 @@ node dist/src/index.js
 | `NOTION_PINNED_SPACE_ID` | 任意 | 起動時に復元する固定 workspace UUID |
 | `NOTION_USER_ID` | 任意 | user UUID。未指定時は自動検出 |
 | `NOTION_CLIENT_VERSION` | 任意 | 既定 `23.13.20260313.1423` |
-| `NOTION_DEFAULT_MODEL` | 任意 | Notion 内部 model ID。既定 `almond-croissant-low` |
+| `NOTION_DEFAULT_MODEL` | 任意 | 内部 ID・表示名・ティア別名。既定 `almond-croissant-low`。ライブ一覧で検証 |
+| `NOTION_MODEL_CATALOG` | 任意 | ライブモデル解決。既定有効、`0` で未検証の互換モード |
+| `NOTION_MODEL_CATALOG_TTL_MS` | 任意 | account/workspace 別の一覧キャッシュ TTL。既定 `300000`、`0`〜`86400000` ms |
+| `NOTION_ALLOW_UNLISTED_MODELS` | 任意 | 一覧にないモデル名の未検証送信を許可。既定無効。掲載済みの disabled/restricted は許可しない |
 | `NOTION_API_BASE` | 任意 | 既定 `https://www.notion.so/api/v3` |
 | `NOTION_REQUEST_TIMEOUT_MS` | 任意 | 内部 API request timeout（workspace操作にも適用）。既定 300000 ms |
 | `NOTION_MAX_WORKSPACE_RETRIES` | 任意 | credit枯渇時のworkspaceローテーション上限。既定5、`0`で無効 |
@@ -101,7 +105,7 @@ node dist/src/index.js
 | `NOTION_DEFAULT_WORKSPACE_SEARCH` | 任意 | 新規 chat の workspace 検索。既定 有効（`0` で無効） |
 | `NOTION_DEFAULT_READ_ONLY` | 任意 | Ask（読み取り専用）モード。既定 無効 = Agent モードで spawn（`1` で Ask 固定） |
 | `NOTION_FULL_COOKIE` | 任意 | 完全なCookie header。assistant-transcript downloadにはブラウザsessionの`file_token`が必要 |
-| `NOTION_MODEL_ALIASES` | 任意 | モデル別名を追加/上書きする JSON。例 `{"my-fast":"oatmeal-cookie"}` |
+| `NOTION_MODEL_ALIASES` | 任意 | 名前解決を優先する別名 JSON。例 `{"my-opus":"Opus 5.5"}`。解決先もライブ一覧で検証 |
 | `NOTION_MCP_REGISTRY_FILE` | 任意 | 登録済み MCP 接続の保存先（mode 0600） |
 | `NOTION_ATTACHMENT_ROOT` | 任意 | upload元/download先として許可するroot。既定は起動時のworking directory |
 | `NOTION_MAX_ATTACHMENT_BYTES` | 任意 | upload/download 1ファイルの上限。既定 `20971520` (20 MiB) |
@@ -314,8 +318,8 @@ multi-stage なので最終イメージには `dist/` と本番依存のみが�
 入力:
 
 - `prompt` (必須)
-- `model` (任意、Notion 内部 model ID)
-- `reasoningEffort` (任意、`none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`)
+- `model` (任意、内部 ID・表示名・ティア別名。省略時は会話のモデル、なければ `NOTION_DEFAULT_MODEL`)
+- `reasoningEffort` (任意の文字列、ライブ一覧の `supportedReasoningEfforts` で検証。固定 enum ではない)
 - `conversationId` (任意、過去に返した ID。タイムアウトした chat や再起動前の thread も継続可能)
 - `waitSeconds` (任意、1〜55。既定は `NOTION_CHAT_WAIT_MS` の45秒)
 - `background` (既定 `false`、`true` で待たずに `jobId` と `conversationId` を即返す)
@@ -463,7 +467,7 @@ Notion AI 側の生成は数分続くことがありますが、MCP client は�
 
 ```jsonc
 // 1) 長い質問を投げる（45秒で切り上げ）
-{ "name": "notion_ai_chat", "arguments": { "prompt": "...", "model": "gpt-5.4-high", "reasoningEffort": "max" } }
+{ "name": "notion_ai_chat", "arguments": { "prompt": "...", "model": "gpt-5.4", "reasoningEffort": "high" } }
 // => { "status": "pending", "jobId": "...", "conversationId": "...", "elapsedMs": 45000, "hint": "..." }
 
 // 2) 回答を回収する（必要なら繰り返す）
@@ -478,7 +482,7 @@ npm run check
 npm test
 npm run build
 
-# 実アカウントの履歴を本文非表示で smoke test
+# 実アカウントのモデル一覧と履歴を本文非表示で smoke test（chat は作成しない）
 NOTION_ACCOUNT_FILE=/absolute/path/account.json npm run smoke:live
 
 # 実 chat も行う（Notion 上にテスト thread を作成し quota を消費）
@@ -490,44 +494,79 @@ NOTION_ACCOUNT_FILE=/absolute/path/account.json NOTION_SMOKE_CHAT=1 npm run smok
 
 ## モデル指定
 
-`notion_ai_chat` の `model` には、内部 ID・ベンダー名・ティア別名のいずれでも指定できます。
-別名テーブルは Notion Web バンドルの model registry から生成した 74 モデル / 235 別名です（`src/models.ts`）。
+モデルと effort の情報源は `POST /api/v3/getAvailableModels`（body: `{ "spaceId": "..." }`）です。
+固定のモデルカタログやモデル別 effort テーブルは持ちません。取得は最初の利用時に行い、
+起動時には外部 API を呼びません。account/workspace ごとに既定5分キャッシュし、同時取得は1 request にまとめます。
 
-| 指定例 | 解決される内部 ID |
+### `list_models`
+
+- `spaceId`（任意）: 対象 workspace。省略時は現在の workspace。
+- `refresh`（既定 `false`）: `true` で TTL を待たず再取得。
+- text と structuredContent に、内部 ID、表示名、family/provider、effort と既定値、
+  chat / Agent Service / custom agent の利用可否、クレジット課金フラグなどを返します。
+- モデル一覧の取得はチャットを作成せず、チャットのクレジットを消費しません。
+  `NOTION_MODEL_CATALOG=0` の場合も、この読み取りツールは利用できます。
+
+```json
+{ "name": "list_models", "arguments": { "refresh": true } }
+```
+
+### 名前の解決
+
+`notion_ai_chat.model` は、設定した別名 → 内部 codename → surface の `finalModelName` →
+表示名（family/provider、`claude-`、`google-` prefix 付きも可）→ codename の base →
+effort suffix → 互換ティアの順に、ライブ一覧と照合します。
+大文字小文字、空白、`_`、`()` は正規化します。`mystery` は表示名の provider prefix として扱いません。
+
+次は2026-09-30に取得した一覧の例であり、固定の対応表ではありません。利用前に `list_models` を確認してください。
+
+| 指定例 | codename / effort |
 |---|---|
-| `fast` / `default` | `almond-croissant-low`（Sonnet 4.6 Low） |
-| `standard` / `balanced` | `almond-croissant-high`（Sonnet 4.6 High） |
-| `thinking` / `reasoning` / `deep` | `oatmeal-cookie`（GPT 5.2） |
-| `GPT 5.2` / `gpt-5.4` / `gpt-5.4-high` | `oatmeal-cookie` / `oval-kumquat-medium` / `oval-kumquat-high` |
-| `Claude Opus 4.5` | `apple-danish` |
-| `Gemini 3.5 Flash` | `vertex-gemini-3.5-flash` |
-| `Grok 4.5` | `strawberry-whoopiepie` |
+| `Opus 5.5` / `claude-opus-5.5` | `albuquerque-quinn` / `medium` |
+| `Opus 5.5 (Max)` / `opus-5.5-max` | `albuquerque-quinn` / `max` |
+| `Sonnet 4.6` / `fast` | `almond-croissant-low` / `low` |
+| `standard` / `balanced` | `almond-croissant-low` / `high` |
+| `GPT-5.4` / `gpt-5.4-high` | `oval-kumquat-medium` / `medium` または `high` |
+| `thinking` / `reasoning` / `deep` | `oatmeal-cookie` / そのモデルの既定 effort |
+| `default` | `NOTION_DEFAULT_MODEL` を解決（自己参照時は `fast`） |
 
-別名は大文字小文字・空白・`_`・`()` を無視して照合します。未知の値はそのまま Notion に渡します。
-`NOTION_MODEL_ALIASES` の JSON で別名を上書きできます。レジストリの再抽出は `scripts/extract-models.cjs` を使います。
+ティアは以前の呼び出しとの互換別名です。通常の対象が使えない場合は同じ display group の
+最初の利用可能モデルを選び、warning を返します。chat は `workflow.finalModelName`、
+ファイル chat は `agentService.finalModelName`（なければ workflow）を送信します。
+customAgent にしか提供されないモデル、disabled なモデル、Agent Service の personal-agent 制限対象は送信前に拒否します。
+
+- 未知のモデルは既定でエラーにし、近い候補と `list_models` を案内します。
+- `NOTION_ALLOW_UNLISTED_MODELS=1` の場合だけ未知の名前を未検証で渡し、warning を返します。
+  一覧に載ったモデルの disabled/restricted を回避する設定ではありません。
+- `NOTION_MODEL_ALIASES` は JSON で優先別名を追加できます。会話に保存済みのモデルには適用せず、
+  呼び出し側が指定した名前や既定モデルの解決にだけ適用します。
+- 一覧取得が失敗しても最後の成功結果があれば `source: "stale"` と warning 付きで使用します。
+  キャッシュもない場合、または `NOTION_MODEL_CATALOG=0` では互換モードとなり、
+  ティア・設定別名以外は入力された名前を未検証のまま送ります。表示名 → codename の固定変換は行いません。
+  互換モードではモデルの可否や effort の正当性を確認できないため、warning を必ず確認してください。
 
 ## 思考の深さ（reasoningEffort）
 
-`notion_ai_chat` の `reasoningEffort` は、Notion Web client が thread config に保存するのと同じ
-`reasoningEffort` フィールドを、`model` / `modelFromUser` と並べて送信します（Agent Service 経由の
-添付 chat では `createAgentThread` / `sendEventToAgentThread` の body に同名フィールドとして付与）。
-値を省略した場合はフィールド自体を送らず、Notion 側の既定 effort が使われます。
+受け付ける値と既定値は各 entry の `modelConfiguration.supportedReasoningEfforts` と
+`defaultReasoningEffort` を使用します。新しい値も API が提供すれば、固定 enum の更新なしで利用できます。
+例えば取得した `albuquerque-quinn`（Opus 5.5）は `low / medium / high / xhigh / max`、既定 `medium` です。
 
-effort を持つのは Notion の model registry で `modelConfiguration` が定義されたモデルだけです。
+優先順位は次のとおりです。
 
-| モデル | 指定できる effort | 既定 |
-|---|---|---|
-| `oatmeal-cookie` (GPT-5.2) / `oval-kumquat` / `oval-kumquat-medium` / `opal-quince` / `opal-quince-medium` | `medium`, `high` | `medium` |
-| `oatmeal-cookie-high-thinking` / `oval-kumquat-high` / `opal-quince-high` | `medium`, `high` | `high` |
-| `almond-croissant-*` (Sonnet 4.6) / `ambrosia-tart-*` / `acai-budino-high` / `agave-flan` | `low`, `medium`, `high`, `max` | モデル名の tier |
-| `orange-mousse` / `orchid-muffin` / `olive-jellyroll` | `none`, `low`, `medium`, `high`, `xhigh`, `max` | `medium` |
-| `vertex-gemini-3.5-flash` | `low`, `medium`, `high` | `low` |
-| `grapefruit-zeppole` | `low`, `medium`, `high` | `medium` |
+1. 明示的な `reasoningEffort`（モデル名の suffix と競合すればこちらを優先し warning）
+2. モデル名に含まれる effort suffix（例: `opus-5.5-max`）
+3. 会話に保存された effort（モデルを切り替えた場合も、切り替え先が対応すれば維持）
+4. API の `defaultReasoningEffort`、なければ最初の supported effort
 
-- `High` / `X-High` / `no thinking` / `maximum` などの表記ゆれは正規化して照合します。
-- モデルが受け付けない effort（例: `gpt-5.4` へ `low`）や effort picker を持たないモデル（例: `Claude Opus 4.5`）は
-  送信前にエラーにし、使える値を提示します。
-- 同じ `conversationId` を継続する際に `reasoningEffort` を省略すると、初回に選んだ effort をそのまま引き継ぎます。
+- `High` / `X-High` / `no thinking` / `maximum` などの表記ゆれを対応する値に照合します。
+- 明示した値や suffix が非対応なら送信前にエラーにします（例: `GPT-5.4` へ `max`）。
+- 継承した effort が非対応なら既定値へ戻し、warning を返します。
+- effort を提供しないモデルではフィールドを送信しません。明示設定はエラー、継承値の省略は warning です。
+- effort を提供するモデルでは、省略時も解決した既定値を明示的に送信します。
+  inference transcript は thread config、Agent Service は create/send の body に付与します。
+- `model` を省略した継続は既存の会話のモデルを保持します。既存モデルが利用不能になった場合だけ
+  `NOTION_DEFAULT_MODEL` に切り替え、理由を warning として返します。
+- 互換モードでは既定 effort を推測しません。明示値、または同じモデルを継続する会話の保存値だけを送ります。
 
 ## ワークスペース切り替えとクレジット対策
 
@@ -705,6 +744,7 @@ Notionへ実ファイルとして送る場合は必ず `upload_attachment` と `
 ## 既知の制限
 
 - 非公式 API のため schema、header、model ID、client version は変更される。
+- モデル一覧は workspace・契約・地域・surface に依存する。stale/互換モードの warning と利用制限を確認する。
 - Node `fetch` は `notion_manager` の Chrome uTLS fingerprint を再現しない。現時点の履歴 API は実環境で成功。
 - chat job と継続 session は state file に保存されるが、assistant-transcript upload handle は再起動後に失効する。
 - Agent Service file chatのtoken usageはtranscript APIから返らないため、`usage`は現在0を返す。assistant-transcript fallbackは通常の推論usageを返す。
