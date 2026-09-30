@@ -1,26 +1,25 @@
-researched_at=2026-09-24T10:16:58Z
+researched_at=2026-09-30T08:04:53Z
 method=wget plus webpack-runtime dependency crawl
 
 == Fetch login and initial JavaScript assets ==
-login_bytes=20032
-initial_asset_count=15
+login_bytes=19971
+initial_asset_count=14
 asset_host=transcend-cdn.com asset_path=/cm/4d6a6beb-faf4-4a4e-9e1c-c7692d5f9c2f/airgap.js
-asset_host=www.notion.so asset_path=/_assets/10512-d06fbb63a3c48f72.js
-asset_host=www.notion.so asset_path=/_assets/33732-435806f6e49d984f.js
-asset_host=www.notion.so asset_path=/_assets/49459-7ae169a8581f2b47.js
+asset_host=www.notion.so asset_path=/_assets/29013-c582a878291fd719.js
+asset_host=www.notion.so asset_path=/_assets/33732-7f8d8a34f2d62e7c.js
+asset_host=www.notion.so asset_path=/_assets/46790-63a147e2eaaf5fc4.js
 asset_host=www.notion.so asset_path=/_assets/56643-254b7f29e5762127.js
-asset_host=www.notion.so asset_path=/_assets/63069-dc772edb3fedc4e7.js
+asset_host=www.notion.so asset_path=/_assets/63069-46d0775f4b2d068f.js
+asset_host=www.notion.so asset_path=/_assets/72240-045bfff3440653a4.js
 asset_host=www.notion.so asset_path=/_assets/8563-9e3514d19f7f9efe.js
-asset_host=www.notion.so asset_path=/_assets/86379-13d08e09628902af.js
-asset_host=www.notion.so asset_path=/_assets/87022-232a0a62575cae4f.js
-asset_host=www.notion.so asset_path=/_assets/91185-43c732b8e5d1dc3b.js
-asset_host=www.notion.so asset_path=/_assets/ClientFramework-87a4dcb1cd8fc71c.js
-asset_host=www.notion.so asset_path=/_assets/RecordMap-3104a7db2e8bf8f1.js
-asset_host=www.notion.so asset_path=/_assets/UISpacePermissionGroupToken-90c79100a210774e.js
-asset_host=www.notion.so asset_path=/_assets/app-a8202f0dc874edb4.js
+asset_host=www.notion.so asset_path=/_assets/95209-da5ed98f9c9e58df.js
+asset_host=www.notion.so asset_path=/_assets/ClientFramework-4c251474db039465.js
+asset_host=www.notion.so asset_path=/_assets/RecordMap-4408aad5f46201d3.js
+asset_host=www.notion.so asset_path=/_assets/UISpacePermissionGroupToken-93ea41e737a62899.js
+asset_host=www.notion.so asset_path=/_assets/app-c8de37f51a3505f7.js
 asset_host=www.notion.so asset_path=/_assets/contentPreview-9c63c27140a19dcc.js
-downloaded_initial_count=15
-downloaded_initial_bytes=5873103
+downloaded_initial_count=14
+downloaded_initial_bytes=5910425
 
 == Resolve runtime maps and crawl attachment dependencies ==
 Traceback (most recent call last):
@@ -35,7 +34,7 @@ Traceback (most recent call last):
   File "/usr/lib/python3.12/json/decoder.py", line 353, in raw_decode
     obj, end = self.scan_once(s, idx)
                ^^^^^^^^^^^^^^^^^^^^^^
-json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 5327 (char 5326)
+json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 5490 (char 5489)
 
 == Public source-code queries (wget) ==
 query=getUploadFileUrl

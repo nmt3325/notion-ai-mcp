@@ -1,6 +1,6 @@
-researched_at=2026-09-24T10:17:03Z
+researched_at=2026-09-30T08:04:58Z
 method=wget full current webpack chunk map plus bounded endpoint extraction
-initial_asset_count=15
+initial_asset_count=14
 Traceback (most recent call last):
   File "<stdin>", line 40, in <module>
   File "<stdin>", line 28, in parse_map
@@ -13,4 +13,4 @@ Traceback (most recent call last):
   File "/usr/lib/python3.12/json/decoder.py", line 353, in raw_decode
     obj, end = self.scan_once(s, idx)
                ^^^^^^^^^^^^^^^^^^^^^^
-json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 5327 (char 5326)
+json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 5490 (char 5489)

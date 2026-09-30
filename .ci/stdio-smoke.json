@@ -1,7 +1,7 @@
 {
   "started": true,
   "transport": "stdio",
-  "toolCount": 29,
+  "toolCount": 30,
   "tools": [
     "add_mcp_connection",
     "check_keep_alive",
@@ -22,6 +22,7 @@
     "list_conversations",
     "list_keep_alives",
     "list_mcp_connections",
+    "list_models",
     "list_preconfigured_mcp_servers",
     "list_workspaces",
     "notion_ai_chat",
