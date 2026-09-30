@@ -245,6 +245,24 @@ function asString(value: unknown, fallback = ""): string { return typeof value =
 function asNumber(value: unknown): number | null { return typeof value === "number" && Number.isFinite(value) ? value : null; }
 function arrayOfStrings(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; }
 
+
+/** HTTP 200 with role "none" is an access-denied stub, not usable evidence or a verified absence. */
+function unwrapReadableRecord(value: unknown, table: "thread" | "thread_message", recordId: string): JsonObject {
+  const record = unwrapRecord(value);
+  if (asString(record.id)) return record;
+  let wrapper = object(value);
+  // Inspect the same wrapper depth unwrapRecord handles, including a denied wrapper with an empty value.
+  for (let depth = 0; depth <= 3; depth += 1) {
+    if (wrapper.role === "none") {
+      throw new Error(`Notion ${table} ${recordId} is unreadable (role "none"). The session may have expired or the active workspace may not have access. Refresh the token_v2 cookie (NOTION_TOKEN_V2), restart the server, and verify the selected workspace.`);
+    }
+    const nested = wrapper.value;
+    if (nested === undefined || nested === null || typeof nested !== "object" || Array.isArray(nested)) break;
+    wrapper = object(nested);
+  }
+  return record;
+}
+
 function formatRichTextSegment(value: unknown): string {
   if (!Array.isArray(value)) return ""; const text = asString(value[0]); if (!text) return "";
   const annotations = Array.isArray(value[1]) ? value[1] : []; let result = text; let href = "";
@@ -582,7 +600,7 @@ export class NotionClient {
     const header = Date.parse(response.headers.get("date") ?? "");
     const serverNow = Number.isFinite(header) ? header : Date.now();
     const payload = object(await response.json());
-    const record = unwrapRecord(object(object(payload.recordMap).thread)[threadId]);
+    const record = unwrapReadableRecord(object(object(payload.recordMap).thread)[threadId], "thread", threadId);
     if (Object.keys(record).length === 0) throw new Error(`Conversation ${threadId} was not found`);
     const data = object(record.data);
     const creditsByType = object(object(data.usage_summary).credits_by_type_unit);
@@ -644,7 +662,7 @@ export class NotionClient {
     if (!stepId) return null;
     const account = await this.account();
     const payload = await this.fetchJson("syncRecordValuesMain", { requests: [{ pointer: { table: "thread_message", id: stepId, spaceId: account.spaceId }, version: -1 }] });
-    const record = unwrapRecord(object(object(payload.recordMap).thread_message)[stepId]);
+    const record = unwrapReadableRecord(object(object(payload.recordMap).thread_message)[stepId], "thread_message", stepId);
     if (Object.keys(record).length === 0) return null;
     const step = object(record.step ?? object(record.data).step ?? record.data);
     return {
@@ -871,8 +889,8 @@ export class NotionClient {
         ] }, false);
         const payload = object(await response.json());
         const maps = object(payload.recordMap);
-        const thread = unwrapRecord(object(maps.thread)[conversationId]);
-        const message = unwrapRecord(object(maps.thread_message)[pending.stepId]);
+        const thread = unwrapReadableRecord(object(maps.thread)[conversationId], "thread", conversationId);
+        const message = unwrapReadableRecord(object(maps.thread_message)[pending.stepId], "thread_message", pending.stepId);
         readSucceeded = Object.keys(thread).length > 0;
         const acceptedAt = asNumber(message.created_time);
         if (arrayOfStrings(thread.messages).includes(pending.stepId) && object(message.step).type === "user" && acceptedAt !== null) {
@@ -896,13 +914,13 @@ export class NotionClient {
   async nativeContinuationState(threadId: string): Promise<boolean | null> {
     const account = await this.account();
     const payload = await this.fetchJson("syncRecordValuesMain", { requests: [{ pointer: { table: "thread", id: threadId, spaceId: account.spaceId }, version: -1 }] });
-    const thread = unwrapRecord(object(object(payload.recordMap).thread)[threadId]);
+    const thread = unwrapReadableRecord(object(object(payload.recordMap).thread)[threadId], "thread", threadId);
     const ids = arrayOfStrings(thread.messages);
     if (!ids.length) return null;
     const head = await this.fetchThreadMessages(ids.slice(0, 32));
     let config: JsonObject | undefined;
     for (const id of ids.slice(0, 32)) {
-      const record = unwrapRecord(head[id]);
+      const record = unwrapReadableRecord(head[id], "thread_message", id);
       const step = object(record.step ?? object(record.data).step ?? record.data);
       if (step.type === "config") config = object(step.value);
     }
@@ -917,7 +935,7 @@ export class NotionClient {
       const batch = ids.slice(Math.max(0, end - 128), end);
       const records = await this.fetchThreadMessages(batch);
       for (const id of [...batch].reverse()) {
-        const record = unwrapRecord(records[id]);
+        const record = unwrapReadableRecord(records[id], "thread_message", id);
         const step = object(record.step ?? object(record.data).step ?? record.data);
         if (!step.type) throw new Error("Native continuation evidence is temporarily unavailable");
         // The latest user step ends the turn the banner is counting.
@@ -958,7 +976,7 @@ export class NotionClient {
         const response = await this.request("syncRecordValuesMain", { requests: [{ pointer: { table: "thread", id: conversationId, spaceId: account.spaceId }, version: -1 }] }, false);
         const header = Date.parse(response.headers.get("date") ?? "");
         const payload = object(await response.json());
-        const thread = unwrapRecord(object(object(payload.recordMap).thread)[conversationId]);
+        const thread = unwrapReadableRecord(object(object(payload.recordMap).thread)[conversationId], "thread", conversationId);
         readSucceeded = Object.keys(thread).length > 0;
         const outcome = parseTurnOutcome(object(thread.data).last_turn_outcome);
         // HTTP 200 and job creation are not receipts. The exact submitted trace must be persisted.

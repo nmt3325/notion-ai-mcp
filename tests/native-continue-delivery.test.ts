@@ -6,7 +6,7 @@ import type { NotionConfig } from "../src/config.js";
 const BASE = Math.floor(Date.now() / 1000) * 1000;
 type Mode = "seed" | "accepted" | "pending" | "empty" | "finished";
 async function fixture() {
-  let mode: Mode = "seed", now = BASE, failReads = false, reads = 0;
+  let mode: Mode = "seed", now = BASE, failReads = false, deniedReads = false, deniedMessageReads = false, reads = 0;
   const requests: any[] = [], records: Record<string, any> = {}, controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
   const thread: any = { messages: [], updated_time: BASE, current_inference_id: null, data: {} };
   const put = (step: any) => { records[step.id] = { id: step.id, step, created_time: BASE }; if (!thread.messages.includes(step.id)) thread.messages.push(step.id); };
@@ -34,7 +34,8 @@ async function fixture() {
       if (body.requests[0]?.pointer?.table === "thread_message") reads++;
       const maps: any = { thread: {}, thread_message: {} };
       for (const { pointer: { table, id } } of body.requests) {
-        if (table === "thread") maps.thread[id] = { value: thread };
+        if (table === "thread") maps.thread[id] = { value: deniedReads ? { role: "none" } : thread };
+        else if (deniedMessageReads) maps.thread_message[id] = { value: { role: "none" } };
         else if (records[id]) maps.thread_message[id] = { value: records[id] };
       }
       return json({ recordMap: maps });
@@ -55,6 +56,7 @@ async function fixture() {
   };
   return { client, id: initial.conversationId, requests, records, thread, put, accept, close, reads: () => reads,
     mode: (value: Mode) => { mode = value; }, advance: () => { now = BASE + 200000; }, readFailure: (value: boolean) => { failReads = value; },
+    readDenied: (value: boolean) => { deniedReads = value; }, messageReadDenied: (value: boolean) => { deniedMessageReads = value; },
     cleanup: () => { for (const controller of controllers) controller.close(); }
   };
 }
@@ -241,4 +243,32 @@ test("a live heartbeat is not charged a native evidence read", async () => {
     const result = await supervisor.tick(watch.keepAliveId);
     assert.equal(result.decision.action, "wait"); assert.equal(f.reads(), before); assert.equal(f.requests.length, 0);
   } finally { supervisor.stopAll(); f.cleanup(); }
+});
+
+
+test("role-none native receipt reads retain the same Continue trace until a readable absence check", async () => {
+  const f = await fixture();
+  try {
+    f.mode("empty");
+    f.readDenied(true);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await assert.rejects(f.client.sendChatContinue(f.id, undefined, 2), /not yet confirmed.*token_v2/i);
+    }
+    assert.equal(f.requests.length, 1);
+    f.readDenied(false);
+    await assert.rejects(f.client.sendChatContinue(f.id, undefined, 50), /no answer text|rejected/);
+    assert.equal(f.requests.length, 1);
+    f.mode("accepted");
+    await f.client.sendChatContinue(f.id, undefined, 50);
+    assert.equal(f.requests.length, 2);
+  } finally { f.cleanup(); }
+});
+
+test("role-none native evidence messages are reported as unreadable instead of below-limit", async () => {
+  const f = await fixture();
+  try {
+    f.close();
+    f.messageReadDenied(true);
+    await assert.rejects(f.client.nativeContinuationState(f.id), /thread_message.*role "none".*token_v2/i);
+  } finally { f.cleanup(); }
 });
